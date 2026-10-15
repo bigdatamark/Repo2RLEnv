@@ -1,3 +1,7 @@
+# [MODULE DOC] Harbor task-directory writer: turns an in-memory HarborTask into the on-disk Harbor
+# layout (task.toml, instruction.md, solution/patch.diff + solve.sh, optional
+# environment/Dockerfile, tests/test.sh and arbitrary aux files). Repo2RLEnv provenance lives under
+# [metadata.repo2env]. Generates the format from scratch; does not import the harbor package.
 """Write Harbor-compliant task directories.
 
 The minimal (text-only) path emits:
@@ -44,6 +48,13 @@ import tomli_w
 
 @dataclass(slots=True)
 class HarborTask:
+    # [CLASS DOC] Slotted dataclass describing one emitted task. Fields: name (filesystem-safe slug
+    # used as directory name), org (prefix for the qualified `org/name` in task.toml), description,
+    # instruction (instruction.md text), oracle_diff (solution/patch.diff), repo2env (provenance
+    # dict merged into [metadata.repo2env]), difficulty (default "medium"), category (default
+    # "bugfix"), keywords (default empty list), environment_dockerfile and test_script (optional;
+    # set by sandbox-required pipelines), aux_files (relative path -> text content written under the
+    # task dir, default empty).
     name: str
     org: str
     description: str
@@ -65,6 +76,8 @@ class HarborTask:
 
 
 def _content_hash(task: HarborTask) -> str:
+    # [FUNCTION DOC] HELPER: Returns "sha256:<hex>" over the UTF-8 instruction, a NUL byte, then the
+    # UTF-8 oracle diff. Input: task (HarborTask). Output: str. No side effects.
     h = hashlib.sha256()
     h.update(task.instruction.encode("utf-8"))
     h.update(b"\0")
@@ -73,6 +86,22 @@ def _content_hash(task: HarborTask) -> str:
 
 
 def write_harbor_task(task: HarborTask, dest_dir: Path) -> Path:
+    # [FUNCTION DOC] Materializes the task directory at dest_dir/task.name and returns its path.
+    # Copies task.repo2env and fills defaults: spec_version "0.2.0", content_hash (via
+    # _content_hash), evaluation (always overwritten with
+    # emitter.evaluation.generated_evaluation()), reward_kinds (["test_execution","diff_similarity"]
+    # when test_script is set, else ["diff_similarity"]). When a Dockerfile is present and no
+    # reproducibility entry exists, seeds reproducibility with mode local_only, image_ref/image_tag
+    # from the Dockerfile's first FROM image (fallback "local/r2e-bootstrap:unknown") and visibility
+    # private. Writes task.toml (version 1.0, task.name "org/name", metadata, agent timeout 1800s,
+    # verifier timeout 300s) via tomli_w, instruction.md, solution/patch.diff and an executable
+    # solution/solve.sh that git-applies the patch in /workspace. Optionally writes
+    # environment/Dockerfile and an executable tests/test.sh, then every aux file (creating
+    # parents). Raises ValueError if an aux file path resolves outside the task directory. Side
+    # effects: creates directories/files, chmods scripts to 0755; existing files are overwritten.
+    # KNOWN ISSUE: the aux-file escape check is a plain string-prefix test, so a path resolving into
+    # a sibling directory whose name starts with the task name (e.g. "../<name>x/f") is not
+    # rejected.
     """Materialize the task directory at dest_dir/<task.name>. Returns the path."""
     task_path = dest_dir / task.name
     task_path.mkdir(parents=True, exist_ok=True)

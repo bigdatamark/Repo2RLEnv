@@ -1,3 +1,8 @@
+# [MODULE DOC] Budgeted, permanently offline native Modal environments for Harbor GPU trials.
+# Subclasses Harbor's ModalEnvironment to enforce a fixed offline single-container L4 contract,
+# write durable allocation receipts, reserve and settle a conservative cost estimate in the
+# controller's RunBudget, capture bounded image-build logs on failure, and confirm cleanup. Budget
+# context is passed via the ACCOUNTING context variable.
 """Budgeted, permanently offline native Modal environments for Harbor GPU trials.
 
 Harbor supplies image construction, command execution and artifact transfer. This
@@ -31,6 +36,9 @@ _IMAGE_LOG_MAX_ENTRIES = 10_000
 
 @dataclass
 class NativeAccounting:
+    # [CLASS DOC] Dataclass holding the controller budget context: budget (RunBudget), directory for
+    # receipts, reservation_usd per environment (default "3.00") and the list of environments
+    # created.
     budget: RunBudget
     directory: Path
     reservation_usd: str = "3.00"
@@ -43,6 +51,11 @@ ACCOUNTING: ContextVar[NativeAccounting | None] = ContextVar(
 
 
 def compute_estimate(record: dict) -> dict:
+    # [FUNCTION DOC] Computes a conservative compute charge for a finished allocation record.
+    # Requires state terminated or build_failed (else ValueError). Seconds = stopped_at -
+    # started_at; per-second rate = 0.00003942*cpus + 0.00000667*memory_GiB + 0.000222*gpus;
+    # accounted = seconds*rate*2 + 0.25, rounded up to 6 decimals. Returns a dict with pricing
+    # metadata and string amounts.
     """Charge conservative allocation time, including build wait, after cleanup."""
     if record["state"] not in {"terminated", "build_failed"}:
         raise ValueError("Native compute requires confirmed cleanup or a failed image build")
@@ -78,12 +91,22 @@ def compute_estimate(record: dict) -> dict:
 
 
 class MeteredModalEnvironment(ModalEnvironment):
+    # [CLASS DOC] Harbor ModalEnvironment subclass that meters and restricts native GPU sandboxes;
+    # records state transitions in a per-session JSON receipt.
     async def _sdk_upload_dir(self, source_dir: Path | str, target_dir: str) -> None:
+        # [FUNCTION DOC] HELPER: Overrides directory upload to use the verified, retried archive
+        # transfer in modal_transfer.upload_directory.
         from repo2rlenv.execution.modal_transfer import upload_directory
 
         await upload_directory(self, source_dir, target_dir)
 
     def __init__(self, *args, **kwargs):
+        # [FUNCTION DOC] Requires harbor version exactly 0.22.0 (RuntimeError) and an ACCOUNTING
+        # context (ValueError), then initializes the parent. Raises ValueError for
+        # compose/VM/sandbox-v2/ dynamic-network modes, any network mode other than no-network or
+        # allowed hosts, secrets, volumes or registry secrets, a GPU config other than L4:1/L4:2, or
+        # a sandbox timeout outside 60-1800s. Sets record None and receipt path
+        # <accounting.directory>/<session_id>.json and registers itself in accounting.environments.
         if version("harbor") != "0.22.0":
             raise RuntimeError("Native GPU execution requires the tested Harbor 0.22.0 contract")
         self.accounting = ACCOUNTING.get()
@@ -119,6 +142,14 @@ class MeteredModalEnvironment(ModalEnvironment):
     async def _create_sandbox(
         self, *, entrypoint=None, block_network=None, experimental_options=None
     ):
+        # [FUNCTION DOC] Creates the Modal sandbox once with budget receipts. Rejects block_network
+        # False or experimental options and an existing receipt (ValueError). Saves a claimed
+        # receipt (operation "native:<prefix>:<session_id>", spec), reserves reservation_usd (marks
+        # reservation_failed and re-raises on error), then calls modal.Sandbox.create without
+        # retries (offline, named by session_id, CPU/memory/GPU from config). On success records
+        # running with ids and returns the sandbox. On ImageBuildError records build_failed, settles
+        # cost, appends bounded redacted build diagnostics to the error message and re-raises. On
+        # any other exception records creation_uncertain, marks spend uncertain and re-raises.
         import modal
 
         if block_network is False or experimental_options:
@@ -208,6 +239,11 @@ class MeteredModalEnvironment(ModalEnvironment):
             raise
 
     async def _image_build_diagnostics(self, image_id: str) -> str:
+        # [FUNCTION DOC] HELPER: Fetches Modal image build logs for image_id within 10s, up to 4 MiB
+        # and 10,000 entries, splitting stdout/stderr. On timeout/failure/truncation records status
+        # and drops unfinished trailing lines. Saves logs via save_build_logs (redacted) and a
+        # fetch.json receipt in <receipt>.image-build/, records their path and hash in the record,
+        # and returns a header plus the log excerpt.
         import modal
 
         streams: dict[str, list[str]] = {"stdout": [], "stderr": []}
@@ -266,6 +302,8 @@ class MeteredModalEnvironment(ModalEnvironment):
         )
 
     def _settle(self):
+        # [FUNCTION DOC] HELPER: Computes the cost estimate, saves the receipt and
+        # <receipt>.cost.json, and settles the budget operation with the accounted amount.
         cost = compute_estimate(self.record)
         cost_path = self.receipt.with_suffix(".cost.json")
         save_record(self.receipt, self.record)
@@ -275,6 +313,10 @@ class MeteredModalEnvironment(ModalEnvironment):
         )
 
     async def stop(self, delete=True):
+        # [FUNCTION DOC] Terminates the sandbox (waiting) unless none exists or it is already
+        # terminated. Records terminating; on failure records termination_uncertain, marks spend
+        # uncertain and re-raises; on success records terminated with stopped_at, settles cost and
+        # clears the sandbox. The delete parameter is ignored.
         if self._sandbox is None or not self.record or self.record["state"] == "terminated":
             return
         self.record["state"] = "terminating"

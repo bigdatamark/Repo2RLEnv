@@ -1,3 +1,5 @@
+# [MODULE DOC] Verified, bounded directory upload into an already allocated Modal sandbox, used by
+# MeteredModalEnvironment; keeps a JSON receipt of each transfer.
 """Verified, bounded directory upload on an already allocated Modal sandbox."""
 
 from __future__ import annotations
@@ -14,6 +16,14 @@ from repo2rlenv.execution.lifecycle import save_record
 
 
 async def upload_directory(environment, source_dir: Path | str, target_dir: str) -> None:
+    # [FUNCTION DOC] Packs source_dir into a local tar.gz, uploads it to
+    # /tmp/tasksmith_upload_<uuid>.tar.gz and verifies the remote sha256sum, retrying only the
+    # upload up to 3 attempts; then extracts into target_dir with Harbor's unpack command (600s).
+    # Records attempts and states in <accounting.directory>/transfers/<uuid>.json. Raises
+    # RuntimeError if no sandbox is running, on checksum mismatch after 3 attempts or failed
+    # extraction; FileNotFoundError if source is not a directory. Always tries to delete the remote
+    # archive (cleanup errors recorded, not raised).
+    # Inputs: environment (MeteredModalEnvironment-like), source_dir, target_dir.
     """Retry only the same temporary archive transfer, before extracting any bytes."""
     if not environment._sandbox:
         raise RuntimeError("Sandbox is not running")

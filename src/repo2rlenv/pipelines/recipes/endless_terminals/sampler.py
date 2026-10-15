@@ -1,3 +1,5 @@
+# [MODULE DOC] Endless Terminals sampler: independent seeded draws of task category, complexity
+# level and scenario context from the packaged taxonomy.json, producing candidate request records.
 """Endless Terminals' native independent category, complexity and context draws."""
 
 from __future__ import annotations
@@ -11,6 +13,8 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class SamplerInput(BaseModel):
+    # [CLASS DOC] Sampler settings file schema (extra fields forbidden): count (1-1000, default 40),
+    # seed (RNG seed, default 24), categories (optional subset of taxonomy TASK_CATEGORIES).
     model_config = ConfigDict(extra="forbid")
     count: int = Field(default=40, ge=1, le=1000)
     seed: int = 24
@@ -18,6 +22,12 @@ class SamplerInput(BaseModel):
 
 
 def sample_inputs(path: Path) -> list[dict]:
+    # [FUNCTION DOC] Draws sampler records. Input: path (JSON file matching SamplerInput).
+    # Behavior: restricts categories to the requested subset (keeping taxonomy order), then for each
+    # index draws category, complexity and scenario with random.Random(seed) and builds a record with
+    # source, title, category, task_complexity, scenario, sampler_seed, draw and a natural-language
+    # request string. Output: list of count dicts. Raises: ValueError for empty/unknown category
+    # selection; pydantic ValidationError for invalid settings. Side effects: reads files.
     settings = SamplerInput.model_validate_json(path.read_text())
     taxonomy = json.loads(files(__package__).joinpath("taxonomy.json").read_text())
     categories = taxonomy["TASK_CATEGORIES"]

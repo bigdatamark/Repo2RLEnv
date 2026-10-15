@@ -1,3 +1,6 @@
+# [MODULE DOC] Staging of selected historical test modules for r2e_gym: copies configured test
+# roots from the new revision under a non-package r2e_tests directory so package fixtures and
+# relative imports keep working while only the selected modules run.
 """Stage selected historical tests without breaking their package fixtures."""
 
 from __future__ import annotations
@@ -9,6 +12,12 @@ from repo2rlenv.pipelines.recipes.history.selection import within
 
 
 def stage_tests(head: Path, old: Path, selected: list[str], roots: list[str]) -> list[str]:
+    # [FUNCTION DOC] Copies test roots from head into old/r2e_tests and returns the runnable paths.
+    # Inputs: head (new-revision tree), old (old-revision tree, modified), selected (test module paths),
+    # roots (configured test roots). Roots are copied shallowest first, skipping ones already covered.
+    # Output: list of "r2e_tests/<path>" for each selected module. Raises: ValueError if selection is
+    # empty or outside roots, r2e_tests already exists, a root is missing, or a selected module is not
+    # present after copying. Side effects: creates directories and copies files.
     """Keep helper files private while executing only the selected test modules.
 
     Preserve names and relative imports beneath an outer directory that is not

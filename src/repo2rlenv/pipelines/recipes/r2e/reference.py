@@ -1,3 +1,6 @@
+# [MODULE DOC] Builds the private differential-test files for R2E: a fut_module shim exposing the
+# target function and an observed reference_<name> wrapper, the hidden reference source, and the
+# generated test patched to import from /workspace. These files never enter the learner image.
 """Create private differential-test bindings; never placed in the learner image."""
 
 from __future__ import annotations
@@ -7,6 +10,15 @@ import json
 
 
 def verifier_files(candidate: dict, source: bytes, test: str) -> dict[str, bytes]:
+    # [FUNCTION DOC] Produces verifier files for a candidate.
+    # Inputs: candidate (function_name, module, optional generated_test_path), source (original module
+    # bytes), test (generated test text). Requires at least one test_* function and that both the
+    # target name and reference_<name> are referenced. Inserts "sys.path.insert(0, '/workspace')"
+    # after a leading docstring/__future__ imports. The shim imports the target from its module, loads
+    # /workspace/.r2e_reference.py as module <package>._r2e_reference, and wraps calls to record up to
+    # 20 observations (arg types, output type, input/output reprs) into /tmp/observations.json.
+    # Output: dict {fut_module.py, .r2e_reference.py, <generated test path>} -> bytes.
+    # Raises: ValueError if the test does not compare target and reference; SyntaxError for bad test.
     name, module = candidate["function_name"], candidate["module"]
     tree = ast.parse(test)
     identifiers = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}

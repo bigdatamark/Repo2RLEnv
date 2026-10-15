@@ -1,3 +1,7 @@
+# [MODULE DOC] R2EPipeline: repository-generation pipeline for equivalence_tests / r2e. For each
+# candidate function, iteratively has the LLM write equivalence tests against a private
+# reference_<name>, runs them remotely for reference pass, branch coverage and stub contrast,
+# then refines a specification, exports a stubbed repository task and validates it with Harbor.
 """Owned R2E generate/execute/refine loop, sharing the repository controller."""
 
 from __future__ import annotations
@@ -22,22 +26,39 @@ from repo2rlenv.spec.input import PipelineName
 
 
 class EquivalenceTest(BaseModel):
+    # [CLASS DOC] LLM output schema (extra forbidden): test_code (100-24000 chars, unittest module).
     model_config = ConfigDict(extra="forbid")
     test_code: str = Field(min_length=100, max_length=24000)
 
 
 class RefinedSpecification(BaseModel):
+    # [CLASS DOC] LLM output schema (extra forbidden): docstring (40-8000 chars) for the stub and
+    # instruction (100-10000 chars) for the task.
     model_config = ConfigDict(extra="forbid")
     docstring: str = Field(min_length=40, max_length=8000)
     instruction: str = Field(min_length=100, max_length=10000)
 
 
 class R2EPipeline(RepositoryGenerationPipeline):
+    # [CLASS DOC] RepositoryGenerationPipeline subclass with name EQUIVALENCE_TESTS, recipe_id "r2e"
+    # and remote worker module r2e.worker.
     name = PipelineName.EQUIVALENCE_TESTS
     recipe_id = "r2e"
     worker_module = "repo2rlenv.pipelines.recipes.r2e.worker"
 
     def author_export(self, generation, candidate, ledger, run, out_dir):
+        # [FUNCTION DOC] Authors and validates one task for a candidate function.
+        # Inputs: generation (prepare dir with base/), candidate (dict), ledger, run (run dir), out_dir.
+        # Test loop (options.max_rounds): metered LLM call (test_prompt.md + adaptation, 0.75 USD, 6000
+        # tokens) for EquivalenceTest; schema/verifier_files errors become feedback; runs the worker in
+        # evaluate mode (timeout 2*test_timeout_sec+90); missing output feeds back stderr; stops when the
+        # evaluation has a contrast, else feeds back the result and required coverage.
+        # Then a metered specification call (specification_prompt.md) yields RefinedSpecification; export
+        # kwargs: defective = stub with the refined docstring, reference = original, private verifier
+        # files, metadata (revisions, function, coverage); exports a draft, requires nop/oracle Harbor
+        # trials to complete with rewards [0, 1], then exports to out_dir.
+        # Output: export_repository_task's result. Raises: ValueError when rounds are exhausted or Harbor
+        # checks fail. Side effects: LLM spend, remote execution, filesystem, progress events.
         execution = self.input.execution
         key = candidate["id"]
         directory = run / "tasks" / key

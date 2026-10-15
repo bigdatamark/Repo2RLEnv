@@ -1,3 +1,10 @@
+# [MODULE DOC] FrontierSmithPipeline (optimization_synth / frontiersmith): checkpointed, resumable
+# synthesis of continuously scored optimization tasks from seed problems. Per seed: LLM mutates
+# and self-reviews a design, samples a baseline plus several diverse solutions, gates on semantic
+# divergence, authors generator/scorer/feasibility infrastructure with bounded repair, executes
+# nop/baseline/sample trials on a remote worker via Harbor, gates on execution diversity and
+# improvement, repeats the best reference, optionally runs a model rollout, and retains the task
+# with a construction-level evaluation label. State lives in <campaign>/runs/<run_id>/run.json.
 """Checkpointed synthesis with semantic and execution diversity gates."""
 
 from __future__ import annotations
@@ -36,6 +43,9 @@ from repo2rlenv.spec.input import PipelineName, SeedSource
 
 
 def score_report(trial):
+    # [FUNCTION DOC] HELPER: Loads the single scores.json written by grade.py anywhere under the
+    # trial result's directory. Input: trial (Harbor trial outcome with .result Path). Output: dict.
+    # Raises: ValueError unless exactly one scores.json is found.
     paths = list(trial.result.parent.rglob("scores.json"))
     if len(paths) != 1:
         raise ValueError("Trial lacks exactly one per-case score receipt")
@@ -44,10 +54,14 @@ def score_report(trial):
 
 
 def score_vector(trial):
+    # [FUNCTION DOC] HELPER: Returns the per-case reward list from a trial's score report.
     return [row["reward"] for row in score_report(trial)["cases"]]
 
 
 def behavioral_divergence(vectors, threshold):
+    # [FUNCTION DOC] Fraction of score-vector pairs whose mean absolute per-case difference is at
+    # least threshold. Inputs: vectors (list of equal-length non-empty float lists, at least 2);
+    # threshold (float). Output: float in [0, 1]. Raises: ValueError for misaligned/empty input.
     if len(vectors) < 2 or not vectors[0] or any(len(v) != len(vectors[0]) for v in vectors):
         raise ValueError("Score vectors must be nonempty and aligned")
     pairs = [
@@ -59,6 +73,8 @@ def behavioral_divergence(vectors, threshold):
 
 
 class FrontierSmithPipeline:
+    # [CLASS DOC] Pipeline for PipelineName.OPTIMIZATION_SYNTH (recipe frontiersmith). Flags: no
+    # bootstrap, not native-supported, experimental, any language. Holds input, options, on_event.
     name = PipelineName.OPTIMIZATION_SYNTH
     requires_bootstrap = False
     native_supported = False
@@ -66,6 +82,9 @@ class FrontierSmithPipeline:
     supported_languages = None
 
     def __init__(self, input, options, bootstrap=None):
+        # [FUNCTION DOC] Validates and stores input. Inputs: input (GenerationInput), options
+        # (FrontierSmith options), bootstrap (unused). Raises: ValueError if the source is not a
+        # SeedSource, execution is missing, or llm is missing or not provider "openai".
         if not isinstance(input.source, SeedSource) or input.execution is None:
             raise ValueError("FrontierSmith needs seed JSON and a remote execution context")
         if input.llm is None or input.llm.provider != "openai":
@@ -74,14 +93,38 @@ class FrontierSmithPipeline:
         self.on_event = lambda event: None
 
     def set_event_callback(self, callback):
+        # [FUNCTION DOC] Replaces the progress event callback. Output: None.
         self.on_event = callback
 
     def event(self, stage, state, message):
+        # [FUNCTION DOC] HELPER: Emits a ProgressEvent(recipe "frontiersmith", stage, state, message) to
+        # the callback. Output: None.
         self.on_event(
             ProgressEvent(recipe="frontiersmith", stage=stage, state=state, message=message)
         )
 
     def run(self, out_dir):
+        # [FUNCTION DOC] Runs the whole synthesis campaign into out_dir.
+        # Setup: seed file must be at most 8 MiB; seeds validated as Seed with unique ids, truncated to
+        # options.max_candidates; fingerprint = sha256 of input settings (minus resume), runtime wheel and
+        # seeds. An existing run.json requires resume and an identical fingerprint and verifies prior
+        # bundle hashes; otherwise it is created exclusively. A completed run returns immediately. Requires
+        # a running worker receipt bound to this campaign's budget ledger; deadline is the earlier of the
+        # execution timeout and the worker lifetime; prepares Docker and installs the runtime wheel.
+        # Per seed (until options.target tasks): raises TimeoutError if under 900 s remain; nested ask()
+        # does schema-repaired authoring; mutate/filter loop up to max_repairs+1 (else skip
+        # "formulation_rejected"); baseline and options.solutions parallel solutions; divergence review
+        # (wrong pair count raises InvalidArtifact; below min_divergence skips). Infrastructure loop:
+        # generator, scorer, feasibility, review; on approval emits baseline/sample bundles, runs nop,
+        # baseline and sample trials (incomplete trials feed logs back as feedback); requires nop reward 0
+        # (else ValueError), feasible completed baseline and at least 2 eligible samples, behavioral
+        # divergence >= min_divergence (using min_score_spread) and best sample beating baseline and 0;
+        # re-runs the best reference and requires an identical score vector; optionally runs a
+        # "responses" agent rollout for the first options.rollout_tasks tasks; writes quality.json,
+        # retains the labeled copy at out_dir/frontiersmith-<seed id> and records evidence. APIConnection
+        # errors and invalid artifacts skip the seed with a failure.json; other exceptions propagate.
+        # Output: PipelineResult via result(). Side effects: filesystem receipts, ledger spend, LLM calls,
+        # remote worker Docker/Harbor trials, progress events.
         spec, options = self.input, self.options
         execution = spec.execution
         if spec.source.path.stat().st_size > 8 * 1024 * 1024:
@@ -144,6 +187,10 @@ class FrontierSmithPipeline:
                 save_record(directory / "seed.json", seed.model_dump())
 
                 def ask(stage, schema, prompt, payload, *, seed=seed, directory=directory):
+                    # [FUNCTION DOC] HELPER (nested): Authors one stage artifact with up to max_repairs+1 attempts,
+                    # passing accumulated validation errors back as format_feedback. Inputs: stage name, schema,
+                    # prompt, payload; seed and directory bound as defaults. Output: schema instance.
+                    # Raises: InvalidArtifact when all attempts fail; other author() errors propagate.
                     self.event(stage, "started", seed.title)
                     format_feedback = []
                     for format_attempt in range(options.max_repairs + 1):
@@ -195,6 +242,8 @@ class FrontierSmithPipeline:
                 )
 
                 def sample_solution(i, *, ask=ask, design=design):
+                    # [FUNCTION DOC] HELPER (nested): Asks for solution i with a strategy hint rotating among
+                    # constructive, local-improvement and global/multistart approaches. Output: Program.
                     return ask(
                         f"solution-{i}",
                         Program,
@@ -304,6 +353,9 @@ class FrontierSmithPipeline:
                         name=name,
                         lineage=lineage,
                     ):
+                        # [FUNCTION DOC] HELPER (nested): Exports design + current infrastructure + the given solution as a
+                        # task bundle at destination (via export_task with output org, options.seed and lineage).
+                        # Output: export_task's return value (the bundle path used for trials).
                         return export_task(
                             design,
                             infrastructure,
@@ -333,6 +385,9 @@ class FrontierSmithPipeline:
                         attempt=attempt,
                         trial_prefix=trial_prefix,
                     ):
+                        # [FUNCTION DOC] HELPER (nested): Runs one Harbor trial of task on the worker under
+                        # directory/execution-<attempt>/<label> with a deterministic trial id, agent (default "oracle"),
+                        # 600 s timeout and resume support; emits an execute event. Output: trial outcome.
                         self.event("execute", "started", f"{seed.title}: {label}")
                         return run_trial(
                             worker,
@@ -512,6 +567,8 @@ class FrontierSmithPipeline:
 
     @staticmethod
     def result(record, out_dir):
+        # [FUNCTION DOC] Builds a PipelineResult from a run record: attempted = tasks + skipped, emitted =
+        # tasks, skipped count, out_dir, and a Counter of skip reasons as a dict.
         skipped = Counter(record["skipped"].values())
         return PipelineResult(
             len(record["tasks"]) + sum(skipped.values()),

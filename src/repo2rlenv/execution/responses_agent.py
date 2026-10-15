@@ -1,3 +1,6 @@
+# [MODULE DOC] Harbor agent that drives an OpenAI Responses-API tool loop (run_openai_agent) in
+# solve or exploit mode with native budget accounting. Runs in the remote Harbor controller; only
+# environment.exec reaches the learner container, so the API key, ledger and logs stay outside it.
 """Harbor agent for explicit Sol/Luna attempts with Responses-native accounting.
 
 Runs in the remote Harbor controller. Only environment.exec reaches the learner;
@@ -38,7 +41,12 @@ hypothesis you could not verify.
 
 
 class ResponsesAgent(BaseAgent):
+    # [CLASS DOC] Harbor BaseAgent exposing terminal and finish tools to a Responses model, with
+    # turn, token and cost limits and a per-attempt SQLite budget ledger in logs_dir.
     def __init__(self, *args, max_turns=16, max_tokens=4096, max_cost=1.0, mode="solve", **kwargs):
+        # [FUNCTION DOC] Initializes BaseAgent, validates the model name via model_name (raises on
+        # unsupported models), requires mode solve or exploit (ValueError) and stores max_turns
+        # (default 16), max_tokens (4096), max_cost (1.0 USD) and mode, coerced to int/int/float.
         super().__init__(*args, **kwargs)
         model_name(self.model_name or "")
         if mode not in {"solve", "exploit"}:
@@ -52,15 +60,25 @@ class ResponsesAgent(BaseAgent):
 
     @staticmethod
     def name():
+        # [FUNCTION DOC] Static: returns "repo2rlenv-responses".
         return "repo2rlenv-responses"
 
     def version(self):
+        # [FUNCTION DOC] Returns "1".
         return "1"
 
     async def setup(self, environment):
+        # [FUNCTION DOC] No-op setup.
         pass
 
     async def run(self, instruction, environment, context):
+        # [FUNCTION DOC] Runs one attempt: creates budget.sqlite3 ledger limited to max_cost and an
+        # AuthorBudget, then runs run_openai_agent with the SOLVE or EXPLOIT system prompt, the
+        # instruction, terminal/finish tools, trace.jsonl and limits.
+        # AgentLimitReached/BudgetExceeded are recorded as stop_reason instead of raised. Always
+        # sets context.cost_usd (accounted USD if nothing remains reserved, else None), metadata
+        # (mode, model, finished, budget status) and n_input/n_output tokens summed from
+        # logs_dir/trace/*-response.json usage.
         self.logs_dir.mkdir(parents=True, exist_ok=True)
         ledger = BudgetLedger(self.logs_dir / "budget.sqlite3", limit_usd=str(self.max_cost))
         budget = AuthorBudget(
@@ -69,6 +87,10 @@ class ResponsesAgent(BaseAgent):
         finished = False
 
         async def terminal(command: str, timeout_sec: int = 60):
+            # [FUNCTION DOC] HELPER: Tool handler: validates command (string up to 24000 chars) and
+            # integer timeout_sec (clamped to 1-120, default 60), runs it in the environment, and
+            # returns JSON with returncode and tails of stdout (18000 chars) and stderr (4000).
+            # Errors are returned as JSON.
             if not isinstance(command, str) or len(command) > 24000:
                 return json.dumps({"error": "command must be a string of at most 24000 characters"})
             if type(timeout_sec) is not int:
@@ -85,6 +107,8 @@ class ResponsesAgent(BaseAgent):
             )
 
         async def finish(summary: str):
+            # [FUNCTION DOC] HELPER: Tool handler: requires a string summary, sets finished, writes
+            # conclusion.txt and returns a confirmation string.
             nonlocal finished
             if not isinstance(summary, str):
                 return json.dumps({"error": "summary must be a string"})

@@ -1,3 +1,5 @@
+# [MODULE DOC] Remote provider acceptance probe: checks a worker can transfer binary files, build an
+# image, run an offline container and start fresh, using uniquely named temporary Docker resources.
 """Remote provider acceptance probes, using owned temporary Docker resources."""
 
 from __future__ import annotations
@@ -13,6 +15,14 @@ from repo2rlenv.execution.lifecycle import now, prepare_docker, save_record
 
 
 def probe_worker(worker: RemoteWorker, output: Path) -> dict:
+    # [FUNCTION DOC] Runs the acceptance probe on worker, writing per-step stdout/stderr and
+    # probe.json into output (must not exist; FileExistsError). Steps: prepare_docker, mkdir, round-
+    # trip a binary marker file (ValueError if bytes change), docker build a python:3.12-slim image
+    # copying the marker, run it with --network none asserting the marker and no egress while
+    # writing /changed, then run again asserting /changed is absent. Always removes the container
+    # and image and records cleanup return codes; passed requires all four checks and successful
+    # image removal. Raises RuntimeError if not passed (or propagates step errors). Returns the
+    # record dict.
     output.mkdir(parents=True, exist_ok=False)
     token = uuid.uuid4().hex
     directory = f"/work/probe-{token}"
@@ -21,6 +31,9 @@ def probe_worker(worker: RemoteWorker, output: Path) -> dict:
     record = {"worker_id": worker.id, "started_at": now(), "checks": {}}
 
     def command(label, argv, timeout=120):
+        # [FUNCTION DOC] HELPER: Runs argv on the worker (default 120s), saves
+        # <label>.stdout/.stderr, raises RemoteCommandError on failure, marks the check passed and
+        # saves probe.json. Returns the result.
         result = worker.exec(argv, timeout=timeout)
         (output / f"{label}.stdout").write_text(result.stdout)
         (output / f"{label}.stderr").write_text(result.stderr)

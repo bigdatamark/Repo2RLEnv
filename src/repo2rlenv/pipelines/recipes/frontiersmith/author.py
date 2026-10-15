@@ -1,3 +1,6 @@
+# [MODULE DOC] FrontierSmith authoring client: a durable, resumable, budget-bounded wrapper around
+# the OpenAI Responses API with strict JSON-schema output, recording receipts on disk and
+# reserving/settling spend in the shared campaign ledger.
 """Durable, bounded OpenAI Responses calls using the shared campaign ledger."""
 
 from __future__ import annotations
@@ -12,10 +15,29 @@ from repo2rlenv.tasksmith.author.openai_agent import PRICES, model_name, usage_c
 
 
 class InvalidArtifact(ValueError):
+    # [CLASS DOC] ValueError subclass raised when a metered model response was received (and paid for)
+    # but is incomplete or does not validate against the stage schema.
     """A received, metered response did not satisfy the stage contract."""
 
 
 def author(spec, schema, *, prompt, payload, path: Path, ledger, operation, max_tokens, resume):
+    # [FUNCTION DOC] Performs (or replays) one structured-output model call.
+    # Inputs: spec (LLMSpec; must be provider openai with no endpoint and no fallback); schema
+    # (pydantic model class for the output); keyword-only prompt (instructions), payload (JSON-able
+    # input), path (receipt file), ledger (campaign ledger), operation (operation id), max_tokens,
+    # resume (bool).
+    # Behavior: builds a request (medium reasoning, store False, default tier) and a sha256 identity
+    # over request plus schema. If the receipt exists: requires resume, matching identity, operation
+    # and ledger path; replays a completed artifact or re-raises InvalidArtifact for invalid_output
+    # (settling the stored cost either way); other states raise. Otherwise resolves the API key,
+    # bounds the input size (at most 240000 bytes), reserves the worst-case cost from PRICES, writes
+    # <path>.request.json and a "dispatched" receipt, calls responses.create with a strict
+    # json_schema format, saves <path>.response.json, computes usage cost, validates the output, and
+    # writes a completed or invalid_output receipt while settling the cost.
+    # Output: validated schema instance. Raises: ValueError (config, key, size, receipt conflicts),
+    # InvalidArtifact, APIStatusError (settled at 0 for 400/401/403/404/422, else marked uncertain),
+    # and any other exception after marking the operation uncertain if unsettled.
+    # Side effects: network call, receipt files, ledger mutations.
     name = model_name(spec.qualified_name)
     if spec.provider != "openai" or spec.endpoint or spec.fallback:
         raise ValueError("FrontierSmith requires direct OpenAI without implicit fallbacks")

@@ -1,3 +1,7 @@
+# [MODULE DOC] CodeMidas Stack v3 source adapter. Validates, records provenance for, and
+# materializes one pinned row of the HuggingFaceCode/stack-v3-train dataset (a whole repository
+# with inline file contents) so CodeMidas can use it instead of a live GitHub checkout.
+# Constants: DATASET (required dataset id), MAX_BYTES (32 MiB cap on manifest and total content).
 """Bounded Stack v3 repository rows, with explicit optional GitHub hydration.
 
 The train dataset has inline repository files. The full corpus is a bucket and
@@ -18,6 +22,10 @@ MAX_BYTES = 32 * 1024 * 1024
 
 
 def read_manifest(path: Path) -> dict:
+    # [FUNCTION DOC] Loads and validates a Stack manifest JSON file.
+    # Inputs: path (Path to the manifest). Output: the parsed manifest dict.
+    # Raises: ValueError if the path is a symlink, not a regular file, or larger than MAX_BYTES, or if
+    # validate_manifest rejects it; json errors on malformed JSON. Side effects: reads the file.
     if path.is_symlink() or not path.is_file() or path.stat().st_size > MAX_BYTES:
         raise ValueError("Stack manifest must be a regular file below 32 MiB")
     value = json.loads(path.read_text())
@@ -26,6 +34,14 @@ def read_manifest(path: Path) -> dict:
 
 
 def validate_manifest(value: dict):
+    # [FUNCTION DOC] Validates a Stack manifest dict in place; returns None on success.
+    # Checks: dataset equals DATASET and dataset_revision is a 40-hex sha; row.repo_path is owner/name;
+    # row.commit_id is a 40-hex sha; row.files is non-empty, at most 10000 entries and matches
+    # num_files; each file_path is a safe relative path (via relative_asset_path under environment/),
+    # unique case-insensitively, without .git/.env/__pycache__ components; content has no NUL bytes,
+    # is at most 2 MiB, and has license_type "permissive" with non-empty detected_licenses; total
+    # content is at most MAX_BYTES; no file path is also a parent directory of another file.
+    # Raises: ValueError for any violation (KeyError if required keys are missing). Side effects: none.
     if value.get("dataset") != DATASET or not re.fullmatch(
         r"[0-9a-f]{40}", value.get("dataset_revision", "")
     ):
@@ -61,6 +77,11 @@ def validate_manifest(value: dict):
 
 
 def provenance(value: dict, materialization: str) -> dict:
+    # [FUNCTION DOC] Builds the source-provenance record for a validated Stack row.
+    # Inputs: value (manifest dict); materialization ("inline" or "hydrated").
+    # Output: dict with source_kind ("stack_v3_<materialization>"), dataset, dataset_revision,
+    # repo_path, commit_id, repo_id, and per-file path/content_id/sha256-of-content/licenses.
+    # Raises: ValueError if the manifest is invalid or materialization is not inline/hydrated.
     validate_manifest(value)
     if materialization not in {"inline", "hydrated"}:
         raise ValueError("Stack materialization must be inline or hydrated")
@@ -85,6 +106,10 @@ def provenance(value: dict, materialization: str) -> dict:
 
 
 def materialize(value: dict, destination: Path):
+    # [FUNCTION DOC] Writes every file of a validated Stack row under destination.
+    # Inputs: value (manifest dict); destination (Path, must not already exist).
+    # Output: None. Raises: ValueError from validation; FileExistsError if destination exists.
+    # Side effects: creates destination and parent directories, writes each file's text content.
     validate_manifest(value)
     destination.mkdir(parents=True, exist_ok=False)
     for item in value["row"]["files"]:

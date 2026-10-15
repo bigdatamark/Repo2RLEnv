@@ -1,3 +1,6 @@
+# [MODULE DOC] Standalone script run on the remote POSIX worker (via python -c) that installs the
+# uploaded repo2rlenv wheel into a content-addressed venv, serialized across controllers with a file
+# lock.
 """Serialize runtime installation on the remote Linux worker, across controllers."""
 
 from __future__ import annotations
@@ -10,6 +13,12 @@ from pathlib import Path
 
 
 def install(directory: Path, uploaded: Path):
+    # [FUNCTION DOC] Takes an exclusive flock on directory/.install.lock. If directory/installed
+    # exists returns. Otherwise checks the wheel's SHA-256 equals directory.name (ValueError), moves
+    # it into directory, creates directory/venv with uv from /opt/repo2rlenv/bin/python if missing,
+    # installs the wheel with extras mutation,harbor (reinstalling repo2rlenv), and writes the
+    # installed marker. Always deletes the uploaded file and removes its (assumed empty) upload
+    # directory. Raises RuntimeError on Windows, CalledProcessError on uv failures.
     if sys.platform == "win32":
         raise RuntimeError("Runtime installation requires a remote POSIX worker")
     import fcntl

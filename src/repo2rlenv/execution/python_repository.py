@@ -1,3 +1,6 @@
+# [MODULE DOC] Remote-only Python repository bootstrap (explicit Dockerfile via ensure_bootstrap,
+# snapshot extraction and cleanup) and fresh, offline, resource-limited pytest execution in
+# throwaway containers, shared by owned recipes.
 """Remote Python repository bootstrap and fresh test execution shared by recipes."""
 
 from __future__ import annotations
@@ -23,12 +26,18 @@ from repo2rlenv.spec.recipe_options import PythonRepositoryProfile
 
 @dataclass(frozen=True)
 class TestInstrumentation:
+    # [CLASS DOC] Frozen dataclass for an optional test driver: driver (local script copied to
+    # /tmp/instrument.py), arguments passed before the pytest arguments, and output filenames under
+    # /tmp to copy back.
     driver: Path
     arguments: tuple[str, ...] = ()
     outputs: tuple[str, ...] = ()
 
 
 def _run(argv: list[str], *, timeout: int = 600, check: bool = True):
+    # [FUNCTION DOC] HELPER: Runs argv via subprocess (captured text, timeout default 600s). Raises
+    # RuntimeError naming argv[0] when check (default True) and the exit code is non-zero. Returns
+    # the CompletedProcess.
     result = subprocess.run(
         argv, capture_output=True, text=True, encoding="utf-8", timeout=timeout, check=False
     )
@@ -47,6 +56,14 @@ def test_image(
     removals: tuple[str, ...] = (),
     instrumentation: TestInstrumentation | None = None,
 ):
+    # [FUNCTION DOC] Runs the profile's pytest selection once in a fresh container from image with
+    # no network, CPU/memory limits from options, pids limit 256, and the job ownership label.
+    # Optionally wraps pytest with an instrumentation driver, removes test files (validated relative
+    # paths; ValueError if also replaced), and copies replacement files into /workspace before
+    # starting. Writes stdout.txt, stderr.txt, state.json, results.xml, any instrumentation outputs
+    # and results.json into output (must not exist). Raises ValueError on OOM kill, a still-running
+    # container or invalid instrumentation outputs; RuntimeError on docker failures. Always force-
+    # removes the container. Returns the parsed JUnit result (parse_junit).
     """Run each test suite from a clean image, with no network or host mounts."""
     output.mkdir(parents=True, exist_ok=False)
     name = "r2e-contrast-" + uuid.uuid4().hex
@@ -142,6 +159,8 @@ def test_image(
 
 
 def repository_source_files(base: Path, options: PythonRepositoryProfile) -> list[Path]:
+    # [FUNCTION DOC] Returns sorted Python files under options.source_paths (files or directories,
+    # recursive *.py) beneath base, excluding anything inside test_paths or private_test_paths.
     """Select Python sources without treating nested verifier tests as task targets."""
     tests = [base / relative for relative in [*options.test_paths, *options.private_test_paths]]
     paths = set()
@@ -152,6 +171,10 @@ def repository_source_files(base: Path, options: PythonRepositoryProfile) -> lis
 
 
 def materialize_document_links(base: Path, options: PythonRepositoryProfile) -> list[dict]:
+    # [FUNCTION DOC] Replaces selected symlinked documents (options.materialize_document_links)
+    # under base with copies of their targets. Each must resolve within base to a .md/.rst/.txt file
+    # (else ValueError, also for missing/cyclic links). Non-symlink entries are validated but left
+    # alone. Returns records of path, target and SHA-256 for each materialized link. Mutates files.
     """Preserve explicitly selected document contents without exporting symlinks."""
     base = base.resolve()
     copies = []
@@ -187,6 +210,12 @@ def materialize_document_links(base: Path, options: PythonRepositoryProfile) -> 
 
 
 def bootstrap_snapshot(repo: RepoSpec, options: PythonRepositoryProfile, destination: Path):
+    # [FUNCTION DOC] Requires REPO2RLENV_REMOTE_WORKER == "1" (RuntimeError). Builds a Dockerfile
+    # from dependency_recipe plus COPY, the install command, .git/pip cache removal and offline/HF
+    # env vars, writes it to /work/bootstrap-profiles/<sha>.Dockerfile and calls ensure_bootstrap
+    # with it (no LLM, no gh auth, cache /work/bootstrap-cache, 900s). Saves bootstrap.json, copies
+    # /workspace out of the image into destination/base, then clean_snapshot. Returns
+    # (BootstrapResult, base path).
     if os.environ.get("REPO2RLENV_REMOTE_WORKER") != "1":
         raise RuntimeError("Repository execution is remote only")
     dockerfile = (
@@ -226,6 +255,9 @@ def bootstrap_snapshot(repo: RepoSpec, options: PythonRepositoryProfile, destina
 
 
 def clean_snapshot(base: Path, options: PythonRepositoryProfile, destination: Path) -> None:
+    # [FUNCTION DOC] Materializes allowed document links (recorded in snapshot-document-links.json),
+    # raises ValueError if any other symlink remains, and deletes .git, __pycache__, .pytest_cache,
+    # build and dist directories anywhere under base.
     links = materialize_document_links(base, options)
     save_record(destination / "snapshot-document-links.json", {"materialized": links})
     # A snapshot may contain bytecode or generated build files. Keep them out of

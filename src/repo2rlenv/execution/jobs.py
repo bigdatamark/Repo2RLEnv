@@ -1,3 +1,5 @@
+# [MODULE DOC] Controller-side helpers that launch a supervised remote job once (detached with
+# nohup) and poll its durable job.json outcome, optionally streaming progress events.
 """Launch once and observe remote jobs without coupling them to an API stream."""
 
 from __future__ import annotations
@@ -21,6 +23,11 @@ def launch_job(
     env: dict[str, str] | None = None,
     python: str = "python",
 ) -> None:
+    # [FUNCTION DOC] Starts `python -m repo2rlenv.execution.job --directory <dir> --timeout-sec <n>
+    # -- <command>` detached in the background on worker via sh -c with nohup and null stdio (30s
+    # exec timeout). Passes env plus REPO2RLENV_REMOTE_WORKER=1. Inputs: worker, directory (remote),
+    # command, timeout_sec, env (optional), python (default "python"). Raises RemoteCommandError if
+    # the launch shell fails. Returns None.
     supervisor = [
         python,
         "-m",
@@ -50,6 +57,11 @@ def observe_job(
     timeout_sec: int,
     on_event: Callable[[ProgressEvent], None] | None = None,
 ) -> dict:
+    # [FUNCTION DOC] Polls <directory>/job.json every 3s (reads retried on transient errors) until
+    # state is completed or failed, then returns the record dict. When event_file and on_event are
+    # given, reads that remote JSON-lines file each poll and delivers newly completed lines as
+    # ProgressEvent objects. Raises TimeoutError after timeout_sec without a terminal state (job is
+    # not relaunched).
     deadline = time.monotonic() + timeout_sec
     delivered = 0
     while time.monotonic() < deadline:

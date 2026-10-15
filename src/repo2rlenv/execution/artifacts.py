@@ -1,3 +1,5 @@
+# [MODULE DOC] Bounded transfer of the owned repo2rlenv runtime wheel to a remote worker and safe
+# unpacking of downloaded evidence archives on the controller (never executing or following links).
 """Bounded transfer of owned runtime code and remote generation evidence."""
 
 from __future__ import annotations
@@ -14,6 +16,11 @@ from repo2rlenv.execution.base import RemoteWorker
 
 
 def check_runtime_wheel(wheel: Path) -> str:
+    # [FUNCTION DOC] Verifies a built wheel matches the installed repo2rlenv package byte-for-byte:
+    # every file under the package root (excluding __pycache__ and .pyc) must exist in the wheel zip
+    # at "repo2rlenv/<rel>" with identical content. Input: wheel (Path). Output: SHA-256 hex digest
+    # of the wheel file. Raises ValueError if a file is missing or differs ("run uv build"). Reads
+    # files only.
     """Refuse a stale wheel: every installed owned source/asset must match it."""
     root = Path(str(files("repo2rlenv")))
     with zipfile.ZipFile(wheel) as archive:
@@ -31,6 +38,14 @@ def check_runtime_wheel(wheel: Path) -> str:
 
 
 def install_runtime(worker: RemoteWorker, wheel: Path, log_dir: Path) -> str:
+    # [FUNCTION DOC] Installs the owned runtime wheel on a worker under the content-addressed
+    # directory /work/runtime/<digest>. Validates the wheel (check_runtime_wheel), creates the
+    # directory, and returns early if an "installed" marker exists. Otherwise uploads the wheel into
+    # a unique upload-<uuid> subdirectory and runs the runtime_install.py source with
+    # /opt/repo2rlenv/bin/python -c (args: runtime dir, uploaded wheel path, 600s timeout). Writes
+    # install.stdout/install.stderr into log_dir (created). Inputs: worker (RemoteWorker), wheel
+    # (Path), log_dir (Path). Output: digest str. Raises RemoteCommandError on failed remote
+    # commands; ValueError from wheel check.
     digest = check_runtime_wheel(wheel)
     remote_dir = "/work/runtime/" + digest
     worker.exec(["mkdir", "-p", remote_dir], timeout=30).checked("Runtime directory")
@@ -60,6 +75,8 @@ def install_runtime(worker: RemoteWorker, wheel: Path, log_dir: Path) -> str:
 
 
 def runtime_python(digest: str) -> str:
+    # [FUNCTION DOC] Returns the remote interpreter path /work/runtime/<digest>/venv/bin/python.
+    # Input: digest (must be 64 lowercase hex chars). Raises ValueError otherwise. No side effects.
     if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
         raise ValueError("Runtime identity must be a SHA-256 digest")
     return "/work/runtime/" + digest + "/venv/bin/python"
@@ -68,6 +85,13 @@ def runtime_python(digest: str) -> str:
 def unpack_evidence(
     archive: Path, destination: Path, *, root_name: str, max_bytes: int = 512 * 1024 * 1024
 ) -> Path:
+    # [FUNCTION DOC] Safely extracts a downloaded .tar.gz evidence archive to destination/root_name
+    # and returns that path. Rejects (ValueError) archives with more than 50,000 members or total
+    # member size above max_bytes (default 512 MiB), absolute paths, "..", empty names, entries not
+    # under root_name, any non-file/non-directory member (links, devices) and duplicate paths.
+    # Raises FileExistsError if the target already exists (or is a symlink). Extracts with the
+    # "data" filter into a temporary directory inside destination, then renames into place (atomic
+    # on the same filesystem). Creates destination.
     """Never execute downloaded code or follow archive links on the controller."""
     target = destination / root_name
     if target.exists() or target.is_symlink():

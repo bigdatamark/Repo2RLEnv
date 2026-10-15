@@ -1,3 +1,6 @@
+# [MODULE DOC] Remote process supervisor run as `python -m repo2rlenv.execution.job`. Runs a command
+# with a deadline in its own process group, writes a durable job.json outcome independent of the
+# caller, kills the group afterwards and removes Docker containers labelled with the job id.
 """Remote process supervisor with a durable outcome, independent of its caller."""
 
 from __future__ import annotations
@@ -15,12 +18,17 @@ JOB_LABEL = "repo2rlenv.job"
 
 
 def container_labels() -> list[str]:
+    # [FUNCTION DOC] Returns ["--label", "repo2rlenv.job=<id>"] using env REPO2RLENV_JOB_ID, or an
+    # empty list when unset; for attaching ownership to Docker resources created by a job.
     """Attach the supervisor's ownership label to a recipe's Docker resources."""
     job_id = os.environ.get("REPO2RLENV_JOB_ID")
     return ["--label", f"{JOB_LABEL}={job_id}"] if job_id else []
 
 
 def _cleanup_containers(job_id: str) -> dict:
+    # [FUNCTION DOC] HELPER: Lists (docker ps -aq, 30s) and force-removes (docker rm -f, 60s) all
+    # containers labelled with this job id. Returns {"passed": bool, ...} with removed count, or
+    # reason container_lookup_failed when listing fails. Subprocess side effects.
     # Killing a Docker CLI does not stop the container it started. Select only
     # this supervisor's label; unrelated jobs and cached images remain intact.
     listed = subprocess.run(
@@ -48,6 +56,15 @@ def _cleanup_containers(job_id: str) -> dict:
 
 
 def execute(directory: Path, command: list[str], *, timeout_sec: int) -> int:
+    # [FUNCTION DOC] Supervises command in directory with timeout_sec (1-14400). Requires env
+    # REPO2RLENV_REMOTE_WORKER == "1" (RuntimeError) and a non-empty command (ValueError). Creates
+    # the directory and an exclusive .job-claim file (FileExistsError if already claimed), writes
+    # job.json (starting, random job_id, pid, command), installs a SIGTERM handler that exits with
+    # 128+signum, and runs the command in a new session with stdout.txt/stderr.txt and
+    # REPO2RLENV_JOB_ID set. Records running then completed with returncode; on exception records
+    # failed and re-raises. Always kills the process group, cleans labelled containers (failure sets
+    # state failed, cleanup_pending), records finished_at, saves job.json and restores the old
+    # handler. Returns the command's exit code, or 1 if cleanup failed.
     if os.environ.get("REPO2RLENV_REMOTE_WORKER") != "1":
         raise RuntimeError("Job supervision runs inside a remote worker only")
     if not command or not 1 <= timeout_sec <= 14400:
@@ -66,6 +83,8 @@ def execute(directory: Path, command: list[str], *, timeout_sec: int) -> int:
     save_record(receipt, record)
 
     def terminate(signum, frame):
+        # [FUNCTION DOC] HELPER: SIGTERM handler that raises SystemExit(128 + signum) so cleanup
+        # runs.
         raise SystemExit(128 + signum)
 
     previous = signal.signal(signal.SIGTERM, terminate)
@@ -109,6 +128,8 @@ def execute(directory: Path, command: list[str], *, timeout_sec: int) -> int:
 
 
 def main() -> None:
+    # [FUNCTION DOC] CLI entry: parses --directory, --timeout-sec and the remaining command
+    # (dropping a leading "--"), then exits with execute()'s return code.
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--directory", required=True, type=Path)
     parser.add_argument("--timeout-sec", required=True, type=int)

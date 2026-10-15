@@ -1,3 +1,9 @@
+# [MODULE DOC] CodeMidas remote-worker entry point. Runs inside a credential-free remote worker
+# in two modes driven by a JSON config: "prepare" (default) bootstraps the repository snapshot,
+# checks that a sanitized public build context builds, and discovers candidate public
+# function/class anchors to author features against; "evaluate" runs a generated verifier against
+# the healthy reference and a defective (implementation-removed) source and records the contrast.
+# Invoked as a script: worker CONFIG OUTPUT.
 """Credential-free discovery and reference execution inside a remote worker."""
 
 from __future__ import annotations
@@ -30,6 +36,24 @@ from repo2rlenv.spec.recipe_options import CodeMidasOptions
 
 
 def prepare(repo, options, destination, stack_source=None):
+    # [FUNCTION DOC] Discovery phase: bootstraps the repo and selects candidate anchors.
+    # Inputs: repo (RepoSpec); options (CodeMidasOptions); destination (Path, must not exist);
+    # stack_source (optional Stack manifest dict; when given, provenance is recorded and, for inline
+    # materialization, the row is written to destination/stack-source, committed into a fresh git repo
+    # via subprocess git, and used as the bootstrap repo).
+    # Steps: bootstrap_snapshot gives (boot, base); private_paths are test/docs/example/benchmark/
+    # .github/conftest/test_*/ *_test.py/ *.egg-info paths in base; builds the sanitized public context
+    # in destination/public-readiness with docker build (600s), logging to public-readiness.log, and
+    # removes it on success. For each repository source file outside private paths (and outside
+    # underscore-prefixed path parts unless listed in options.source_paths) parses symbols; public
+    # symbols spanning at least 12 lines with at least options.min_implementation_statements
+    # non-def, non-docstring statements are shuffled (seeded by seed+path), and up to
+    # options.max_per_module per module are kept, skipping ids in options.exclude_candidate_ids. Each
+    # candidate id is the first 20 hex chars of sha256 over repo/ref/path/anchor. Candidates are
+    # shuffled with options.seed and truncated to options.max_candidates.
+    # Output: dict {candidates, rejected (syntax-error files), attempted}; also saved to
+    # generation.json. Raises: ValueError if the sanitized repository fails to build; FileExistsError
+    # if destination exists; subprocess errors from git/docker. Side effects: filesystem, Docker, git.
     destination.mkdir(parents=True, exist_ok=False)
     bootstrap_repo = repo
     source_record = {"source_kind": "github"}
@@ -149,6 +173,17 @@ def prepare(repo, options, destination, stack_source=None):
 
 
 def evaluate(config, options, destination):
+    # [FUNCTION DOC] Evaluation phase: runs a generated verifier against reference and defective code.
+    # Inputs: config (dict with feature, verifier, generation dir, image_digest); options
+    # (CodeMidasOptions); destination (Path, must not exist).
+    # Behavior: validates assertions, derives the defective implementation via implementation_pair,
+    # writes the verifier test as test_codemidas_generated.py, runs test_image on the reference (must
+    # pass), then with defective files replaced (baseline must have no setup "error" statuses), and
+    # stores execution_contrast(healthy, broken). ValueError messages and test timeouts (with phase,
+    # error_type "test_timeout" and the last 18000 chars of output) are captured into the result rather
+    # than raised. Appends the last 18000 chars of each stage's stdout.txt.
+    # Output: result dict, also saved to evaluation.json. Raises: ValueError (uncaught) if the
+    # verifier filename already exists in the source base. Side effects: filesystem, Docker runs.
     destination.mkdir(parents=True, exist_ok=False)
     feature, verifier = (
         Feature.model_validate(config["feature"]),
@@ -202,6 +237,9 @@ def evaluate(config, options, destination):
 
 
 def main():
+    # [FUNCTION DOC] CLI entry: parses CONFIG and OUTPUT paths, loads the JSON config, validates
+    # CodeMidasOptions, and dispatches to evaluate (mode == "evaluate") or prepare (otherwise, with
+    # RepoSpec from config["repo"] and optional stack_source). Output: None. Side effects: as callees.
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("config", type=Path)
     parser.add_argument("output", type=Path)

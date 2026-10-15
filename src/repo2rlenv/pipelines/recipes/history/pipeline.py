@@ -1,3 +1,7 @@
+# [MODULE DOC] HistoryPipeline: repository-generation pipeline for history recipes. The remote
+# worker selects historical changes and measures the old/new test contrast; this module then has
+# the LLM write a user-facing issue from the observed failures, exports a repository task, checks
+# it with fresh nop/oracle Harbor trials, and exports the final task.
 """History-derived task authoring after an observed old/new test contrast."""
 
 from __future__ import annotations
@@ -23,15 +27,22 @@ from repo2rlenv.spec.recipe_options import PythonRepositoryProfile
 
 
 class HistoricalIssue(BaseModel):
+    # [CLASS DOC] LLM output schema (extra fields forbidden): analysis (30-10000 chars, private
+    # reasoning) and instruction (100-20000 chars, the public task statement).
     model_config = ConfigDict(extra="forbid")
     analysis: str = Field(min_length=30, max_length=10000)
     instruction: str = Field(min_length=100, max_length=20000)
 
 
 class HistoryPipeline(RepositoryGenerationPipeline):
+    # [CLASS DOC] RepositoryGenerationPipeline subclass whose remote worker module is
+    # history.worker; recipe_id (swe_next or r2e_gym) selects source and test-layout policy.
     worker_module = "repo2rlenv.pipelines.recipes.history.worker"
 
     def worker_configuration(self, run):
+        # [FUNCTION DOC] Extends the base worker configuration with "recipe"; for swe_next also collects
+        # merged pull requests on the controller (merged_pulls, cached in run/pulls.json) into "pulls".
+        # Input: run (run directory). Output: config dict. Side effects: progress event, gh API calls.
         config = {**super().worker_configuration(run), "recipe": self.recipe_id}
         if self.recipe_id == "swe_next":
             self.event(
@@ -41,6 +52,18 @@ class HistoryPipeline(RepositoryGenerationPipeline):
         return config
 
     def author_export(self, generation, candidate, ledger, run, out_dir):
+        # [FUNCTION DOC] Authors and validates one task from a selected candidate.
+        # Inputs: generation (prepare output dir with generation.json), candidate (dict), ledger, run
+        # (run dir), out_dir. Steps: connects to the worker from the receipt; runs the worker in evaluate
+        # mode (1200 s) to get candidate.json with contrast, profile and source files; asks the LLM
+        # (metered, 0.75 USD reservation, 5000 tokens) with the recipe's instruction_prompt.md plus
+        # issue_examples.json for a HistoricalIssue, saved to instruction.json; builds export kwargs
+        # (defective = old source files, reference = new files, profile, instruction, name
+        # <recipe>-<id>, metadata including revisions and test_layout) and exports a draft; runs nop and
+        # oracle Harbor trials and requires both complete with rewards [0, 1]; then exports to out_dir.
+        # Output: export_repository_task's result for out_dir. Raises: ValueError if the worker produced
+        # no output or the Harbor contrast is not retained; pydantic errors on bad LLM JSON.
+        # Side effects: remote execution, LLM spend, filesystem writes, progress events.
         execution = self.input.execution
         directory = run / "tasks" / candidate["id"]
         directory.mkdir(parents=True, exist_ok=True)

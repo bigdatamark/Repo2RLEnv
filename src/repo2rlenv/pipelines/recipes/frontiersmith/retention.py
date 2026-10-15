@@ -1,3 +1,7 @@
+# [MODULE DOC] FrontierSmith retention: copies a constructed task to its output location with an
+# "unverified" construction-stage EvaluationLabel, after checking its evidence chain.
+# KNOWN ISSUE: this module lacks the `from __future__ import annotations` line required by the
+# project invariants for every module.
 """Construction evidence is useful without claiming full quality acceptance."""
 
 import hashlib
@@ -10,6 +14,16 @@ from repo2rlenv.quality.labels import read_evaluation, write_labeled_copy
 
 
 def retain(task: Path, destination: Path, report: Path) -> Path:
+    # [FUNCTION DOC] Retains a constructed task with a construction label.
+    # Inputs: task (bundle dir), destination (output dir), report (quality.json path).
+    # Checks: bundle integrity; report bundle_hash matches and construction_verified is set; the
+    # repeated reference Harbor result has no exception and its reward equals reference_reward; the
+    # nearest ancestor trial.json binds the same bundle hash and the result file's sha256.
+    # Builds evidence (diagnosis=report, oracle=result) and an unverified label with reason codes
+    # optimization_construction_passed and full_quality_not_run. If destination exists it must be
+    # intact and carry the same hash, evidence and reason codes (idempotent resume); otherwise writes a
+    # labeled copy. Output: destination Path. Raises: ValueError on any mismatch.
+    # Side effects: reads files, writes the labeled copy.
     identity = inspect_bundle(task)
     if not identity["integrity_passed"]:
         raise ValueError("Task changed after construction")

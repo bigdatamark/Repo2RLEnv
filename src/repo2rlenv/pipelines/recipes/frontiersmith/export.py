@@ -1,3 +1,9 @@
+# [MODULE DOC] FrontierSmith export: writes an optimization task as a Harbor bundle with a slim
+# Python 3.12 Docker image (DOCKERFILE), a public instruction suffixed with RUNTIME_CONTRACT, the
+# reference solution, and private tests (grade.py, generator, scorer, optional feasibility,
+# contract.json).
+# KNOWN ISSUE: this module lacks the `from __future__ import annotations` line required by the
+# project invariants for every module.
 """Export original optimization tasks through the shared Harbor bundle contract."""
 
 import json
@@ -25,6 +31,8 @@ standard library; no packages, files, subprocesses, network or nondeterminism.
 
 
 def public_instruction(design):
+    # [FUNCTION DOC] HELPER: Returns design.instruction with RUNTIME_CONTRACT appended (after a blank
+    # line) unless it already ends with that contract, in which case it is returned unchanged.
     if design.instruction.rstrip().endswith(RUNTIME_CONTRACT.rstrip()):
         return design.instruction
     return design.instruction.rstrip() + "\n\n" + RUNTIME_CONTRACT
@@ -33,6 +41,16 @@ def public_instruction(design):
 def export_task(
     design, infrastructure, solution, destination, *, name, org, seed, lineage, resume=False
 ):
+    # [FUNCTION DOC] Writes the task bundle via write_bundle.
+    # Inputs: design (Design), infrastructure (Infrastructure), solution (Program), destination (Path);
+    # keyword-only name, org, seed (generator seed stored in contract.json), lineage (extra metadata
+    # dict), resume (default False).
+    # Files: environment/Dockerfile, solution/solution.py, executable solve.sh (copies to
+    # /workspace), executable tests/test.sh (runs grade.py in isolated mode), tests/grade.py (this
+    # package's grade.py), generator.py, scorer.py, feasibility.py if non-empty, contract.json.
+    # Metadata marks pipeline optimization_synth, recipe frontiersmith, oracle semantics, mutation and
+    # lineage; agent runs as "solver" and verifier as root, both no-network; verifier timeout 150s.
+    # Output: write_bundle's return value. Side effects: writes files under destination.
     return write_bundle(
         TaskBundle(
             name=name,

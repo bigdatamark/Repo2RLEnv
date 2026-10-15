@@ -1,3 +1,8 @@
+# [MODULE DOC] Runs one Harbor trial on a remote worker with task-bound evidence: validates the task
+# bundle and limits, reserves model spend in a BudgetLedger, uploads the task, launches `harbor run`
+# under the job supervisor with the offline Docker environment, downloads and verifies the result,
+# and settles or marks spend uncertain. Also supports recovery of interrupted trials without
+# redispatch and abandonment of provably undispatched trials.
 """One remote Harbor trial with task-bound evidence and explicit model accounting."""
 
 from __future__ import annotations
@@ -26,6 +31,9 @@ from repo2rlenv.spec.input import LLMSpec
 
 @dataclass(frozen=True)
 class TrialEvidence:
+    # [CLASS DOC] Frozen dataclass summarizing one Harbor trial: reward (float or None),
+    # exception_type (str or None), result (Path to the trial's result.json) and cost_usd (float or
+    # None).
     reward: float | None
     exception_type: str | None
     result: Path
@@ -33,10 +41,15 @@ class TrialEvidence:
 
     @property
     def completed(self) -> bool:
+        # [FUNCTION DOC] Property: True when no exception was recorded and a reward exists.
         return self.exception_type is None and self.reward is not None
 
 
 def read_trial(directory: Path) -> TrialEvidence:
+    # [FUNCTION DOC] Parses the single Harbor trial under directory (glob "*/result.json"). Extracts
+    # exception_info.exception_type, verifier_result.rewards.reward and agent_result.cost_usd.
+    # Raises ValueError unless exactly one result exists, if reward is non-numeric/bool/non-finite,
+    # or if cost is non-numeric/bool/non-finite/negative. Output: TrialEvidence.
     results = list(directory.glob("*/result.json"))
     if len(results) != 1:
         raise ValueError(f"Expected exactly one Harbor trial, found {len(results)}")
@@ -62,6 +75,12 @@ def read_trial(directory: Path) -> TrialEvidence:
 
 
 def responses_cost_is_complete(evidence: TrialEvidence) -> bool:
+    # [FUNCTION DOC] Decides whether a (possibly failed) Responses-agent trial has fully settled
+    # usage. Reads agent_result.metadata.budget from the result file; returns True only if cost_usd
+    # is set, there is at least one operation and all are status settled with int actual_micros >=
+    # 0, the budget has reserved_usd "0.000000", and the summed micros (as USD Decimal) equal both
+    # cost_usd and budget.accounted_usd. Returns False otherwise. Raises KeyError if accounted_usd
+    # is absent when the earlier checks pass.
     """A failed agent can still have complete, settled usage for every request."""
     if evidence.cost_usd is None:
         return False
@@ -84,6 +103,14 @@ def responses_cost_is_complete(evidence: TrialEvidence) -> bool:
 
 
 def _collect_trial(worker, output: Path, record: dict, ledger, status: dict) -> TrialEvidence:
+    # [FUNCTION DOC] HELPER: Finalizes a finished remote trial. Saves the job status as remote-
+    # job.json, downloads stdout/stderr, records command_returncode, and raises RuntimeError if the
+    # job did not complete with returncode 0. Otherwise tars /evidence/trials/<id> remotely,
+    # downloads and unpacks it, reads the TrialEvidence, updates the trial.json receipt (state
+    # completed, finished_at, reward, exception_type, result path and its SHA-256). For model
+    # trials, settles the ledger operation "trial:<id>" with cost_usd when cost is positive and the
+    # trial completed (or Responses usage is complete); otherwise marks it uncertain. Inputs:
+    # worker, output dir, record (mutated), ledger, status dict. Output: TrialEvidence.
     trial_id = record["trial_id"]
     receipt = output / "trial.json"
     remote_dir = "/work/trials/" + trial_id
@@ -129,6 +156,13 @@ def _collect_trial(worker, output: Path, record: dict, ledger, status: dict) -> 
 
 
 def recover_trial(worker: RemoteWorker, output: Path, *, ledger=None) -> TrialEvidence:
+    # [FUNCTION DOC] Collects an already completed remote trial without another model dispatch.
+    # Requires the receipt state interrupted/dispatched, the same worker id, a dispatched trial (or
+    # a model-less one), a valid slug trial_id, a stored command, and a ledger for model trials;
+    # otherwise raises ValueError. Reads the remote job.json (with read retries) and requires the
+    # identical command, state completed, returncode 0 and successful cleanup (else ValueError).
+    # Preserves the original receipt as interrupted-trial.json, collects via _collect_trial, writes
+    # recovery.json, and returns the TrialEvidence.
     """Collect an already completed remote job without another model dispatch.
 
     A lost observation is not a failed solve. Preserve the interrupted receipt and
@@ -166,6 +200,12 @@ def recover_trial(worker: RemoteWorker, output: Path, *, ledger=None) -> TrialEv
 
 
 def abandon_undispatched_trial(worker: RemoteWorker, output: Path, *, ledger) -> dict:
+    # [FUNCTION DOC] Releases a trial reservation only when dispatch is disproven. Requires receipt
+    # state interrupted or not_dispatched, same worker, trial_dispatched explicitly False, no
+    # command, and a valid trial_id (else ValueError). Confirms no remote job.json exists
+    # (RemoteCommandError if it does), saves interrupted-trial.json once, updates the receipt to
+    # state not_dispatched with cost 0 and settles "trial:<id>" at 0 in the ledger. Returns the
+    # updated record.
     """Release a reservation only when dispatch is disproven by both receipts.
 
     Keep the failed attempt; a caller may create a separately named replacement.
@@ -214,6 +254,26 @@ def run_trial(
     python: str = "python",
     agent_mode: str = "solve",
 ) -> TrialEvidence:
+    # [FUNCTION DOC] Dispatches one Harbor trial of task on worker and returns its TrialEvidence.
+    # Inputs: trial_id (lowercase slug), agent (nop/oracle/terminus-2/probe/responses), model
+    # (LLMSpec; required exactly for terminus-2 and responses), ledger (BudgetLedger, needed with a
+    # model), reservation_usd (default "4.00"), reservation_wait_sec (int 0-300), max_turns 1-100,
+    # max_tokens 256-8192, timeout_sec 30-3600, probe (required exactly for agent probe, validated
+    # via probe_program), submitted_path, resume, python (remote interpreter; harbor CLI resolved
+    # next to it), agent_mode (solve, or exploit with responses only). Raises ValueError on any
+    # invalid argument, if the bundle hash no longer matches, for model providers other than direct
+    # openai/anthropic, or missing credentials/ledger. Parses the task with harbor's Task before
+    # dispatch. If output exists: with resume and a completed receipt whose settings match and whose
+    # result hash is unchanged, returns the stored evidence; otherwise raises
+    # FileExistsError/ValueError. Otherwise creates output, writes trial.json (state claimed),
+    # reserves model spend (using reserve_with_wait when available, recording reservation_waiting
+    # progress; on BudgetExceeded records reservation_failed and re-raises), tars and uploads the
+    # task, claims remote /work/trials/<id> and /evidence/trials/<id>, builds the `harbor run`
+    # command (probe or Responses agent import paths, OfflineDockerEnvironment, single concurrency,
+    # no retries, model kwargs), records state dispatched, launches via launch_job with the API key
+    # in env, observes the job and collects results. On any exception records state interrupted,
+    # marks the model spend uncertain and re-raises. Side effects: network, remote processes, local
+    # files, ledger mutations.
     if not re.fullmatch(r"[a-z][a-z0-9-]{0,60}", trial_id):
         raise ValueError("Trial ID must be a unique lowercase slug")
     if agent not in {"nop", "oracle", "terminus-2", "probe", "responses"}:
@@ -284,6 +344,9 @@ def run_trial(
         wait_count = 0
 
         def reservation_waiting(exc):
+            # [FUNCTION DOC] HELPER: on_wait callback for reserve_with_wait; increments the poll
+            # count and records state reservation_waiting with elapsed time and last denials in the
+            # receipt.
             nonlocal wait_count
             wait_count += 1
             record.update(

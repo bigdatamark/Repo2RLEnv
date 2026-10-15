@@ -1,3 +1,5 @@
+# [MODULE DOC] Builds source-free Dockerfile prefixes for Python repositories (base image, optional
+# venv, pip dependencies, pinned Hugging Face assets) shared by bootstrap and task export.
 """Source-free Python image layers shared by bootstrap and task export."""
 
 from __future__ import annotations
@@ -14,6 +16,14 @@ def dependency_recipe(
     use_system_site_packages: bool = False,
     hub_assets=(),
 ) -> str:
+    # [FUNCTION DOC] Returns Dockerfile text: FROM base_image, WORKDIR /workspace; with
+    # use_system_site_packages installs python3-venv and creates /opt/tasksmith-venv (system site
+    # packages) on PATH; pip installs dependencies (shell-quoted) when given. When hub_assets
+    # (models with repo_id, revision, cache_aliases, ...) are given, embeds hub_asset_fetch.py
+    # source plus a call with the sorted assets (excluding purpose/cache_aliases) as a single-line
+    # `python -c exec(...)` RUN with HF offline disabled, sets HF_HOME/HF_HUB_CACHE to
+    # /opt/tasksmith-hf, and if any asset has cache aliases adds a second RUN embedding
+    # hub_asset_alias.py. No side effects beyond reading package resources.
     recipe = f"FROM {base_image}\nWORKDIR /workspace\n"
     if use_system_site_packages:
         recipe += (

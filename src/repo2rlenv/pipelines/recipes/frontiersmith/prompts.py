@@ -1,3 +1,8 @@
+# [MODULE DOC] FrontierSmith stage prompts as module-level string constants (COMMON preamble plus
+# MUTATE, FILTER, SOLVE, DIVERGENCE, GENERATOR, SCORER, FEASIBILITY, REVIEW, etc.). No classes or
+# functions; seeds and model artifacts are treated as untrusted data by the prompt text.
+# KNOWN ISSUE: this module lacks the `from __future__ import annotations` line required by the
+# project invariants for every module.
 """Auditable stage prompts. Seeds and model artifacts are untrusted task data."""
 
 COMMON = """You are constructing research-quality optimization coding tasks.

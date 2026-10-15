@@ -1,3 +1,6 @@
+# [MODULE DOC] Runs one remote generator module invocation exactly once, persisting a dispatch
+# receipt before launch so an interrupted run is observed (never relaunched) on resume, and
+# retrieves its evidence.
 """Persist one remote generator invocation and retrieve its evidence exactly once."""
 
 from __future__ import annotations
@@ -21,6 +24,19 @@ def run_generator(
     timeout_sec: int,
     resume: bool,
 ) -> Path | None:
+    # [FUNCTION DOC] Dispatches `python -m <module> <remote>/config.json <output>` on worker as a
+    # supervised job, or resumes observation of an earlier dispatch. Inputs: worker (RemoteWorker),
+    # python (remote interpreter), module (str), config (dict uploaded as config.json), directory
+    # (local receipt dir), job_id (names /work/generation/<id> and /evidence/generation/<id>),
+    # timeout_sec, resume (bool). If directory/dispatch.json exists, requires resume=True and an
+    # identical configuration (worker_id, python, module, config) else raises ValueError; otherwise
+    # claims the remote directory with a non-recursive mkdir (fails if taken), saves config.json and
+    # dispatch.json (state dispatched) and launches via launch_job. Returns directory/job_id
+    # immediately if state is downloaded, None if failed. Otherwise observes the job (timeout_sec +
+    # 15), saves remote-job.json, downloads stdout.txt and stderr.txt, and if the remote output dir
+    # exists tars, downloads and unpacks it (unless already unpacked). Sets state downloaded when
+    # the job completed with returncode 0, else failed, saves the receipt, and returns the evidence
+    # path or None. Raises RemoteCommandError / TimeoutError from remote operations.
     """Return downloaded evidence, or None for a recorded failed generation.
 
     A dispatch claim is durable before launch. An interrupted or uncertain launch

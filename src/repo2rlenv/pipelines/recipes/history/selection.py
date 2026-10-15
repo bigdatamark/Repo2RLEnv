@@ -1,3 +1,6 @@
+# [MODULE DOC] Python change analysis for history recipes: path-root membership, per-entity AST
+# fingerprints that ignore docstrings, and native SWE-smith/R2E-style bounds on how a commit edits
+# source entities and whether its tests correspond to them.
 """Python entity and test correspondence filters used by historical recipes."""
 
 from __future__ import annotations
@@ -7,6 +10,8 @@ from pathlib import PurePosixPath
 
 
 def within(path: str, roots: list[str]) -> bool:
+    # [FUNCTION DOC] HELPER: True if POSIX path equals any root or lies beneath one. Inputs: path
+    # (str), roots (list of str). Output: bool.
     value = PurePosixPath(path)
     return any(
         value == PurePosixPath(root) or PurePosixPath(root) in value.parents for root in roots
@@ -14,6 +19,10 @@ def within(path: str, roots: list[str]) -> bool:
 
 
 def entities(source: str) -> tuple[dict[str, str], list[str]]:
+    # [FUNCTION DOC] Fingerprints Python source. Input: source text. Output: (definitions, statements)
+    # where definitions maps dotted qualified names of every (nested) class/function to an AST dump
+    # without positions (docstrings stripped; emptied bodies become pass) and statements lists dumps of
+    # module-level non-definition, non-docstring statements. Raises: SyntaxError for invalid source.
     tree = ast.parse(source)
     definitions = {}
     for node in ast.walk(tree):
@@ -29,9 +38,13 @@ def entities(source: str) -> tuple[dict[str, str], list[str]]:
             )
 
     class Visitor(ast.NodeVisitor):
+        # [CLASS DOC] HELPER: Local NodeVisitor that records each class/function definition under its
+        # dotted prefix into the enclosing definitions dict.
         prefix = ""
 
         def definition(self, node):
+            # [FUNCTION DOC] HELPER: Visits a definition: extends the prefix with the node name, stores its
+            # dump, recurses into children, then restores the prefix. Side effects: mutates definitions.
             previous = self.prefix
             self.prefix += node.name + "."
             definitions[self.prefix[:-1]] = ast.dump(node, include_attributes=False)
@@ -59,6 +72,15 @@ def entities(source: str) -> tuple[dict[str, str], list[str]]:
 def check_entities(
     source_pairs: dict[str, tuple[str, str]], test_pairs: dict[str, tuple[str, str]], options
 ) -> dict:
+    # [FUNCTION DOC] Classifies a commit's Python changes and enforces bounds.
+    # Inputs: source_pairs and test_pairs (path -> (old text, new text)); options (require_bug_edit,
+    # max_added_entities, max_edited_entities, max_statement_entities, require_test_match).
+    # Computes added/edited/deleted source entities and the count of changed module-level statements
+    # (symmetric difference); test entities whose fingerprint is new or changed. A test match holds if
+    # any changed test name contains "issue" or names/references (id or attr) an edited entity.
+    # Output: dict with sorted added, edited, deleted, statement_changes, test_match, test_entities.
+    # Raises: ValueError if no behavior change, no test change, bug-edit bounds are violated (when
+    # required) or no test match (when required).
     added, edited, deleted, statements = [], [], [], 0
     test_changes = []
     for path, (old, new) in source_pairs.items():

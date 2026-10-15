@@ -1,3 +1,8 @@
+# [MODULE DOC] Remote history worker (requires REPO2RLENV_REMOTE_WORKER=1). "prepare" mode clones
+# the repository into a shared, lock-protected cache under /work/history, enumerates candidate
+# changes (supplied merged PRs for swe_next, first-parent history for r2e_gym) and filters them;
+# "evaluate" mode bootstraps the new revision, snapshots the old one, and runs the identical new
+# tests against new and old source to compute the execution contrast.
 """Remote history selection and execution of identical post-change tests."""
 
 from __future__ import annotations
@@ -31,6 +36,8 @@ from repo2rlenv.ui import console
 
 
 def git(root: Path, *args: str) -> str:
+    # [FUNCTION DOC] HELPER: Runs git -C root with args (120 s timeout, UTF-8 text) and returns
+    # stdout. Raises: CalledProcessError on failure, TimeoutExpired.
     return subprocess.run(
         ["git", "-C", str(root), *args],
         capture_output=True,
@@ -42,6 +49,9 @@ def git(root: Path, *args: str) -> str:
 
 
 def snapshot(root: Path, revision: str, destination: Path) -> None:
+    # [FUNCTION DOC] HELPER: Extracts git archive of revision into destination (created; must not
+    # exist). Rejects absolute or parent-escaping paths, links, special files, .git and __pycache__.
+    # Files get mode 755 if any executable bit was set, else 644. Raises: ValueError, subprocess errors.
     archive = subprocess.run(
         ["git", "-C", str(root), "archive", revision], capture_output=True, timeout=120, check=True
     ).stdout
@@ -71,6 +81,15 @@ def snapshot(root: Path, revision: str, destination: Path) -> None:
 def candidate_for(
     root: Path, head: str, repo: RepoSpec, options: HistoryRecipeOptions, context: dict
 ) -> dict:
+    # [FUNCTION DOC] Builds a candidate record for one commit.
+    # Inputs: root (clone), head (revision), repo (RepoSpec), options (HistoryRecipeOptions), context
+    # (PR or commit info dict). Resolves head and its first parent; inspects .py changes (no rename
+    # detection): each must be in source or test paths; source files may only be modified, tests
+    # modified or added. Requires both kinds, fewer than max_non_test_files source files, source edited
+    # lines below max_non_test_edited_lines and patch length below max_patch_length; runs
+    # check_entities. Output: dict with id (sha256 of url:parent:head, 20 hex), repo, base, head,
+    # title, message, context, source_files, test_files, source_diff, test_diff and selection.
+    # Raises: ValueError for violations; SyntaxError/CalledProcessError propagate.
     resolved = git(root, "rev-parse", "--verify", head + "^{commit}").strip()
     parent = git(root, "rev-parse", resolved + "^1").strip()
     rows = [
@@ -122,6 +141,13 @@ def candidate_for(
 
 
 def prepare(config: dict, destination: Path) -> dict:
+    # [FUNCTION DOC] Prepare mode: discovers candidates.
+    # Inputs: config (repo, recipe, options, and pulls for swe_next); destination (must not exist).
+    # Clones the repo once into the cache (atomic rename under a file lock), resolves repo.ref or
+    # HEAD, iterates PRs or first-parent commits (history_limit), and keeps up to max_candidates
+    # unique, non-excluded candidates; failures are recorded as rejected "source_filter" entries.
+    # Output: dict with candidates, rejected, attempted, repo_revision, repository_cache; saved to
+    # generation.json. Side effects: network clone, filesystem, locking.
     repo = RepoSpec.model_validate(config["repo"])
     recipe = config["recipe"]
     options = (SWENextOptions if recipe == "swe_next" else R2EGymOptions).model_validate(
@@ -182,6 +208,14 @@ def prepare(config: dict, destination: Path) -> dict:
 
 
 def evaluate(config: dict, destination: Path) -> dict:
+    # [FUNCTION DOC] Evaluate mode: measures the old/new test contrast for one candidate.
+    # Inputs: config (candidate, options, recipe, repository_cache); destination (must not exist).
+    # Builds a PythonRepositoryProfile from the overlapping options, bootstraps the head revision,
+    # snapshots the base revision into destination/old, stages tests (r2e_gym: stage_tests into
+    # r2e_tests marked private; otherwise copies new test files into old), runs tests on the image
+    # with tests replaced (healthy) and additionally with old source files (defective), and computes
+    # execution_contrast. Output: candidate plus contrast, profile, image_digest, test_evidence and
+    # stdout tails; saved to candidate.json. Side effects: Docker, filesystem.
     candidate = config["candidate"]
     profile = PythonRepositoryProfile.model_validate(
         {
@@ -236,6 +270,9 @@ def evaluate(config: dict, destination: Path) -> dict:
 
 
 def main() -> None:
+    # [FUNCTION DOC] CLI entry: refuses to run unless REPO2RLENV_REMOTE_WORKER=1 (RuntimeError);
+    # parses CONFIG and OUTPUT, runs evaluate or prepare by config mode, and prints a JSON summary
+    # (id and candidate count) via console.json.
     if os.environ.get("REPO2RLENV_REMOTE_WORKER") != "1":
         raise RuntimeError("Historical repository execution is remote only")
     parser = argparse.ArgumentParser(description=__doc__)

@@ -1,3 +1,6 @@
+# [MODULE DOC] Worker lifecycle with durable receipts: atomic JSON record writing, provisioning that
+# records the worker identity before dispatch and reserves budget, termination that keeps cost
+# uncertain until reconciled, and a Docker daemon readiness probe.
 """Persist worker identity before dispatch and retain uncertain spend for recovery."""
 
 from __future__ import annotations
@@ -13,10 +16,14 @@ from repo2rlenv.execution.base import RemoteWorker, WorkerSpec, connect_worker, 
 
 
 def now() -> str:
+    # [FUNCTION DOC] Returns the current UTC time as an ISO-8601 string.
     return datetime.now(UTC).isoformat()
 
 
 def save_record(path: Path, record: dict) -> None:
+    # [FUNCTION DOC] Atomically writes record as sorted, indented JSON (plus newline) to path:
+    # creates the parent, writes and fsyncs a temporary file in the same directory, then os.replace.
+    # Removes the temporary file on failure.
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(prefix=f".{path.name}-", dir=path.parent)
     try:
@@ -34,6 +41,12 @@ def save_record(path: Path, record: dict) -> None:
 def provision_worker(
     spec: WorkerSpec, directory: Path, ledger: BudgetLedger, *, reserve_usd: str
 ) -> tuple[RemoteWorker, Path]:
+    # [FUNCTION DOC] Creates a remote worker with receipts. Exclusively creates
+    # directory/<spec.name>.json (FileExistsError if it exists, so a name is never reused), reserves
+    # reserve_usd under operation "worker:<provider>:<name>" (records reservation_failed and re-
+    # raises on error), records creating, calls create_worker, then records running with worker_id.
+    # On any creation exception records creation_uncertain, marks the ledger operation uncertain and
+    # re-raises. Returns (worker, receipt path).
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / f"{spec.name}.json"
     # The stable name is also the provider recovery handle if a create response
@@ -69,6 +82,11 @@ def provision_worker(
 
 
 def stop_worker(path: Path, ledger: BudgetLedger) -> dict:
+    # [FUNCTION DOC] Terminates the worker named by a receipt. Raises ValueError if the receipt
+    # belongs to another ledger or has no worker_id. Returns immediately if already terminated.
+    # Records terminating, reconnects and terminates; on failure records termination_uncertain,
+    # marks uncertain and re-raises. On success records terminated and marks the ledger operation
+    # uncertain pending cost reconciliation. Returns the record.
     record = json.loads(path.read_text())
     if Path(record["ledger"]).resolve() != ledger.path.resolve():
         raise ValueError("Worker receipt belongs to another budget ledger")
@@ -98,6 +116,9 @@ def stop_worker(path: Path, ledger: BudgetLedger) -> dict:
 
 
 def prepare_docker(worker: RemoteWorker) -> None:
+    # [FUNCTION DOC] Ensures the worker's Docker daemon responds: creates /work and /evidence,
+    # starts dockerd (overlay2, log to /evidence/dockerd.log) if docker info fails, and waits up to
+    # 60s. Raises RemoteCommandError if not ready (90s exec timeout).
     """Probe the real daemon; package presence alone is not build readiness."""
     script = """set -eu
 mkdir -p /work /evidence
