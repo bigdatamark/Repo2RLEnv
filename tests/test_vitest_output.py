@@ -1,3 +1,8 @@
+# [MODULE DOC] Tests for parsing vitest (and colored jest) console output with both the
+# canonical log parser (log_parsers/jest_parser.parse_jest) and the standalone copy embedded
+# in the in-container verifier (pipelines/_pr_runtime_verifier). Module constants hold real
+# captured logs: _BASE (pre-fix), _GOLD (gold patch), _AGENT (agent patch), _GOLD_DEFAULT
+# (default reporter), multi-project, vitest 3 and jest samples.
 """Vitest runs must survive generation-time and standalone parsing."""
 
 from __future__ import annotations
@@ -15,6 +20,9 @@ from repo2rlenv.pipelines import _pr_runtime_verifier as verifier
 
 @pytest.fixture(params=[parse_jest, verifier.parse_jest], ids=["canonical", "standalone"])
 def parser(request):
+    # [FUNCTION DOC] Parametrized fixture yielding each jest/vitest log parser under test:
+    # the canonical log_parsers.jest_parser.parse_jest and the standalone copy in
+    # _pr_runtime_verifier (ids 'canonical'/'standalone'). Output: a callable log -> {name: status}.
     return request.param
 
 
@@ -257,6 +265,8 @@ _JEST_COLOR = (
 
 
 def test_colored_verbose_runs_keep_every_test(parser):
+    # [FUNCTION DOC] Checks colored vitest verbose output (_BASE, _AGENT) yields every test
+    # keyed as 'file > suite > title' with PASSED/FAILED status, ANSI codes stripped.
     assert parser(_BASE) == {
         "math.test.ts > math > adds": "PASSED",
         "math.test.ts > math > rejects division by zero": "FAILED",
@@ -270,6 +280,8 @@ def test_colored_verbose_runs_keep_every_test(parser):
 
 
 def test_project_names_are_part_of_the_identity_with_or_without_color(parser):
+    # [FUNCTION DOC] Checks multi-project vitest output keeps the '|project|' prefix in test ids
+    # and that colored and plain logs parse identically; skipped/todo map to SKIPPED.
     expected = {
         "|unit| vt/other.test.ts > standalone passes": "PASSED",
         "|node| vt/other.test.ts > standalone passes": "PASSED",
@@ -285,6 +297,8 @@ def test_project_names_are_part_of_the_identity_with_or_without_color(parser):
 
 
 def test_vitest_3_verbose_format(parser):
+    # [FUNCTION DOC] Checks vitest 3.x verbose format (todo marked with the skip arrow) parses:
+    # FAILED/SKIPPED/PASSED statuses and exactly 8 entries.
     status = parser(_V3_PLAIN)
     assert status["math.test.ts > Math > add() > breaks on purpose"] == "FAILED"
     assert status["math.test.ts > Math > add() > todo test"] == "SKIPPED"
@@ -302,11 +316,15 @@ def test_vitest_3_verbose_format(parser):
     ],
 )
 def test_run_suffixes_are_not_part_of_the_name(parser, suffix):
+    # [FUNCTION DOC] Checks trailing duration, retry/repeat annotations and heap-usage suffixes
+    # are stripped from test names. Inputs: parser fixture; suffix (parametrized string).
     log = f" RUN  v5.0.1 /repo\n ✓ src/a.test.ts > waits 5ms{suffix}\n"
     assert parser(log) == {"src/a.test.ts > waits 5ms": "PASSED"}
 
 
 def test_skipped_tests_keep_their_title_and_drop_the_note(parser):
+    # [FUNCTION DOC] Checks skipped and todo lines keep their title while a trailing bracketed
+    # note such as '[not ready]' is dropped; both map to SKIPPED.
     log = " RUN  v5.0.1 /repo\n ↓ src/a.test.ts > waits 5ms\n □ src/a.test.ts > later [not ready]\n"
     assert parser(log) == {
         "src/a.test.ts > waits 5ms": "SKIPPED",
@@ -315,12 +333,16 @@ def test_skipped_tests_keep_their_title_and_drop_the_note(parser):
 
 
 def test_default_reporter_lines_are_not_recorded(parser):
+    # [FUNCTION DOC] Checks vitest default-reporter (tree) lines are ignored, giving an empty
+    # result, since collapsed per-file summaries cannot be graded per test.
     # Once a patch fixes the rest of a file, the default reporter collapses it
     # to `✓ math.test.ts (3 tests)`, so its per-test lines can't be graded.
     assert parser(_GOLD_DEFAULT) == {}
 
 
 def test_colored_jest_output_matches_plain_jest(parser):
+    # [FUNCTION DOC] Checks colored `jest --verbose` output parses into 'file > describe > title'
+    # ids with PASSED/FAILED/SKIPPED; the todo line is not recorded and 'skipped ' prefix is kept.
     assert parser(_JEST_COLOR) == {
         "jt/other.test.js > standalone passes": "PASSED",
         "jt/math.test.js > Math > add() > adds two numbers": "PASSED",
@@ -332,6 +354,9 @@ def test_colored_jest_output_matches_plain_jest(parser):
 
 
 def test_long_lines_do_not_stall_parsing():
+    # [FUNCTION DOC] Guards against regex catastrophic backtracking: runs both parsers in a
+    # subprocess (10s timeout) over pathological long lines and asserts the real test still parses
+    # as PASSED and the subprocess exits 0. Side effects: spawns a Python subprocess.
     # Isolate the timeout so a backtracking regression cannot hang the suite.
     result = subprocess.run(
         [
@@ -354,6 +379,10 @@ def test_long_lines_do_not_stall_parsing():
 
 
 def test_vitest_fix_grades_through_the_standalone_verifier(tmp_path: Path):
+    # [FUNCTION DOC] End-to-end grading: derives F2P/P2P lists from _BASE vs _GOLD via parse_jest,
+    # copies _pr_runtime_verifier.py to tmp_path and runs it isolated (python -I) on the _AGENT log
+    # with f2p/p2p JSON files. Asserts exit 0 and rewards/reward-details.json reports runner 'jest',
+    # reward 1.0, resolved True. Side effects: temp files, subprocess (30s timeout).
     pre, gold = parse_jest(_BASE), parse_jest(_GOLD)
     f2p = [
         name for name, status in pre.items() if status == "FAILED" and gold.get(name) == "PASSED"
