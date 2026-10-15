@@ -1,3 +1,17 @@
+# [MODULE DOC] HELPER: Agentic proof-of-concept test synthesis for the `cve_patches` pipeline.
+# Runs an LLM ReAct loop with shell access inside a DockerSandbox checked out at the vulnerable
+# (pre-fix) commit: each turn the model replies with either "RUN\n<shell command>" (executed in
+# the sandbox, output fed back as an observation) or "DONE\n<test file path>" (the file is read
+# back and returned). Exposes the PoCResult dataclass and synthesize_poc_agentic(). Side effects:
+# executes commands in the sandbox (git reset/clean, arbitrary agent commands), makes LLM calls
+# via llm.complete (cost tracked), debug logging.
+# [MODULE DOC] HELPER: Agentic proof-of-concept test synthesis for the `cve_patches` pipeline.
+# Runs an LLM ReAct loop with shell access inside a DockerSandbox checked out at the vulnerable
+# (pre-fix) commit: each turn the model replies with either "RUN\n<shell command>" (executed in
+# the sandbox, output fed back as an observation) or "DONE\n<test file path>" (the file is read
+# back and returned). Exposes the PoCResult dataclass and synthesize_poc_agentic(). Side effects:
+# executes commands in the sandbox (git reset/clean, arbitrary agent commands), makes LLM calls
+# via llm.complete (cost tracked), debug logging.
 """Agentic PoC-test synthesis for cve_patches.
 
 Unlike one-shot prompt synthesis (the LLM sees only the prompt), this runs an
@@ -54,12 +68,26 @@ Rules:
 
 @dataclass(slots=True)
 class PoCResult:
+    # [CLASS DOC] Mutable slotted dataclass: test_path (repo-root-relative path of the written
+    # test file), test_code (its contents as read from the sandbox), cost_usd (cumulative LLM cost
+    # at completion).
+    # [CLASS DOC] Mutable slotted dataclass: test_path (repo-root-relative path of the written
+    # test file), test_code (its contents as read from the sandbox), cost_usd (cumulative LLM cost
+    # at completion).
     test_path: str
     test_code: str
     cost_usd: float
 
 
 def _initial_prompt(vuln_desc: str, fix_diff: str) -> str:
+    # [FUNCTION DOC] HELPER: Builds the first user message: the advisory text truncated to 3000
+    # chars, the fix diff truncated to 7000 chars in a diff fence with an instruction not to apply
+    # it, and a hint to start by finding the test directory. Inputs: vuln_desc, fix_diff (str).
+    # Output: str.
+    # [FUNCTION DOC] HELPER: Builds the first user message: the advisory text truncated to 3000
+    # chars, the fix diff truncated to 7000 chars in a diff fence with an instruction not to apply
+    # it, and a hint to start by finding the test directory. Inputs: vuln_desc, fix_diff (str).
+    # Output: str.
     return (
         f"CVE / advisory:\n{vuln_desc[:3000]}\n\n"
         "The commit that FIXED it (study it to understand what behavior to test — "
@@ -73,6 +101,14 @@ _ACTION_RE = re.compile(r"(?is)\b(RUN|DONE)\b\s*\n(.+)")
 
 
 def _parse_action(text: str) -> tuple[str, str]:
+    # [FUNCTION DOC] HELPER: Parses an LLM reply into (kind, arg). Searches (case-insensitive) for
+    # a word RUN or DONE followed by a newline and the rest of the text. Returns ("none", "") if
+    # absent. For "run", arg is the whole remaining block stripped (the command); for "done", arg
+    # is the first line with backticks and whitespace stripped (the path). kind is lowercased.
+    # [FUNCTION DOC] HELPER: Parses an LLM reply into (kind, arg). Searches (case-insensitive) for
+    # a word RUN or DONE followed by a newline and the rest of the text. Returns ("none", "") if
+    # absent. For "run", arg is the whole remaining block stripped (the command); for "done", arg
+    # is the first line with backticks and whitespace stripped (the path). kind is lowercased.
     m = _ACTION_RE.search(text.strip())
     if not m:
         return "none", ""
@@ -95,6 +131,42 @@ def synthesize_poc_agentic(
     max_spend_usd: float = 1.5,
     cmd_timeout: int = 180,
 ) -> tuple[PoCResult | None, float]:
+    # [FUNCTION DOC] Drives the agent to write a pytest test that fails on the vulnerable code.
+    # Inputs: sandbox (DockerSandbox, lifecycle owned by caller); keyword-only parent_sha
+    # (vulnerable commit), vuln_desc, fix_diff, llm (LLMSpec), max_iterations (default 14),
+    # max_spend_usd (default 1.5; 0/falsy disables), cmd_timeout (per RUN command seconds, default
+    # 180). Setup: marks /workspace as a git safe.directory, then hard-resets /workspace to
+    # parent_sha and git-cleans untracked files (keeping .venv/venv/__pycache__/.tox). Loop: calls
+    # complete() with the fixed system prompt, the last 10 history entries joined as the user
+    # message, max_tokens 2000, temperature 0.2; accumulates cost. DONE: cats the path; if non-
+    # empty and contains "def test", strips /workspace/, workspace/ or ./ prefixes and leading
+    # slashes and returns (PoCResult, cost); otherwise appends a "missing" observation. RUN:
+    # executes the command and appends exit code plus output truncated to 3500 chars. Otherwise
+    # appends a format reminder. Stops early once cost reaches max_spend_usd. Output: (PoCResult
+    # or None, total cost). Raises: whatever complete()/sandbox raise.
+    # KNOWN ISSUE: the reset command ends with "|| true", so reset.ok is always true and the
+    # reset-failure debug log can never fire. History is windowed to the last 10 entries, so after
+    # a few turns the initial prompt (CVE text and fix diff) is dropped from the context. The
+    # prefix-stripping loop applies prefixes sequentially, so only certain combinations are
+    # removed.
+    # [FUNCTION DOC] Drives the agent to write a pytest test that fails on the vulnerable code.
+    # Inputs: sandbox (DockerSandbox, lifecycle owned by caller); keyword-only parent_sha
+    # (vulnerable commit), vuln_desc, fix_diff, llm (LLMSpec), max_iterations (default 14),
+    # max_spend_usd (default 1.5; 0/falsy disables), cmd_timeout (per RUN command seconds, default
+    # 180). Setup: marks /workspace as a git safe.directory, then hard-resets /workspace to
+    # parent_sha and git-cleans untracked files (keeping .venv/venv/__pycache__/.tox). Loop: calls
+    # complete() with the fixed system prompt, the last 10 history entries joined as the user
+    # message, max_tokens 2000, temperature 0.2; accumulates cost. DONE: cats the path; if non-
+    # empty and contains "def test", strips /workspace/, workspace/ or ./ prefixes and leading
+    # slashes and returns (PoCResult, cost); otherwise appends a "missing" observation. RUN:
+    # executes the command and appends exit code plus output truncated to 3500 chars. Otherwise
+    # appends a format reminder. Stops early once cost reaches max_spend_usd. Output: (PoCResult
+    # or None, total cost). Raises: whatever complete()/sandbox raise.
+    # KNOWN ISSUE: the reset command ends with "|| true", so reset.ok is always true and the
+    # reset-failure debug log can never fire. History is windowed to the last 10 entries, so after
+    # a few turns the initial prompt (CVE text and fix diff) is dropped from the context. The
+    # prefix-stripping loop applies prefixes sequentially, so only certain combinations are
+    # removed.
     """Drive an agent to write a test that fails on the vulnerable code.
 
     Returns (PoCResult|None, total_cost_usd). The sandbox is reset to the

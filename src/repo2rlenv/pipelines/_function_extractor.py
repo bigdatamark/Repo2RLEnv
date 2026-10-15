@@ -1,3 +1,13 @@
+# [MODULE DOC] HELPER: AST function extractor used by the `equivalence_tests` pipeline. Parses
+# Python source files of a cloned repo and yields FunctionCandidate records for module-level,
+# synchronous functions that pass R2E-style filters: name not private/test/main-like, at least one
+# named argument, body LOC within [min_loc, max_loc], an explicit `return <expr>`, no side-effect-
+# suggesting substrings (_BODY_SIDE_EFFECT_PATTERNS: I/O, subprocess, env, logging, print,
+# click/flask context, time, randomness, ...), and self-containment (only references its own
+# locals, builtins, or the _ALLOWED_EXTERNAL_NAMES stdlib allowlist). Side effects: filesystem
+# reads only.
+# KNOWN ISSUE: the module docstring lists "must have docstring" as a filter, but
+# extract_from_module does not require a docstring.
 """AST function extractor for `equivalence_tests`.
 
 Walks a parsed module and yields `FunctionCandidate` records for every
@@ -29,6 +39,12 @@ logger = logging.getLogger(__name__)
 
 @dataclass(slots=True, frozen=True)
 class FunctionCandidate:
+    # [CLASS DOC] Frozen slotted dataclass: one module-level function chosen as an equivalence-
+    # test seed. Fields: relative_path (POSIX path in repo), name, lineno / end_lineno (1-indexed,
+    # inclusive, of the def line; decorators not counted in lineno), body_loc (lines from first
+    # body statement to end), source (full text including decorators), docstring
+    # (ast.get_docstring or ""), arg_names (tuple of positional-only, regular and keyword-only
+    # argument names in order; excludes *args/**kwargs).
     """One module-level function picked as an equivalence-test seed."""
 
     relative_path: str  # POSIX, e.g. "src/foo/bar.py"
@@ -113,10 +129,16 @@ _BODY_SIDE_EFFECT_PATTERNS = (
 
 
 def _is_excluded(relative_path: str, exclude_globs: list[str]) -> bool:
+    # [FUNCTION DOC] HELPER: True if relative_path matches any fnmatch pattern in exclude_globs.
+    # Output: bool.
     return any(fnmatch.fnmatch(relative_path, pat) for pat in exclude_globs)
 
 
 def _function_body_loc(node: ast.FunctionDef | ast.AsyncFunctionDef) -> int:
+    # [FUNCTION DOC] HELPER: Number of lines spanned by the function body: node.end_lineno -
+    # body[0].lineno + 1, clamped at 0. Returns 0 for an empty body or missing line numbers.
+    # Input: (Async)FunctionDef node. Note the first body statement may be the docstring, so
+    # docstring lines are counted.
     """# lines in the function body (signature/decorators excluded).
 
     Uses end_lineno - body[0].lineno + 1 so we don't count the `def` line.
@@ -133,6 +155,10 @@ def _function_body_loc(node: ast.FunctionDef | ast.AsyncFunctionDef) -> int:
 
 
 def _function_source(source_lines: list[str], node: ast.FunctionDef) -> str:
+    # [FUNCTION DOC] HELPER: Returns the function's source text sliced from source_lines
+    # (0-indexed list of lines), starting at the earliest decorator line (or the def line) through
+    # end_lineno, joined by newlines.
+    # Inputs: source_lines, node. Output: str.
     """Slice the full `def <name>(...): ...` text out of the source.
 
     Includes decorators. Uses ast's lineno/end_lineno (1-indexed).
@@ -144,6 +170,8 @@ def _function_source(source_lines: list[str], node: ast.FunctionDef) -> str:
 
 
 def _arg_names(node: ast.FunctionDef) -> tuple[str, ...]:
+    # [FUNCTION DOC] HELPER: Returns the tuple of positional-only, regular and keyword-only
+    # parameter names of node in order; *args and **kwargs are excluded.
     """Positional + keyword arg names (no *args / **kwargs)."""
     args = node.args
     out: list[str] = []
@@ -153,6 +181,11 @@ def _arg_names(node: ast.FunctionDef) -> tuple[str, ...]:
 
 
 def _has_explicit_return(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    # [FUNCTION DOC] HELPER: True iff any Return node with a value exists inside the function
+    # (bare `return` ignored).
+    # KNOWN ISSUE: the inline comment says nested functions/classes are not descended into, but
+    # ast.walk does descend, so a `return x` inside a nested def makes the outer function pass
+    # this filter.
     """True iff the function body contains a `return <expr>` (not bare `return`)."""
     for sub in ast.walk(node):
         if sub is node:
@@ -164,6 +197,9 @@ def _has_explicit_return(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
 
 
 def _body_has_side_effect(source: str) -> bool:
+    # [FUNCTION DOC] HELPER: True if any pattern in _BODY_SIDE_EFFECT_PATTERNS is a plain
+    # substring of the function source (so it also matches inside strings/comments, e.g.
+    # "request." in "self.request.").
     """Heuristic: function body contains a substring suggesting side effects."""
     return any(pat in source for pat in _BODY_SIDE_EFFECT_PATTERNS)
 
@@ -242,6 +278,17 @@ _ALLOWED_EXTERNAL_NAMES: frozenset[str] = frozenset(
 
 
 def _collect_scope_names(node: ast.AST) -> set[str]:
+    # [FUNCTION DOC] HELPER: Collects names locally bound in one function scope. Input: an AST
+    # node (if FunctionDef, AsyncFunctionDef or Lambda, its parameters including *args/**kwargs
+    # are added). Then, for each body statement, walks without entering nested
+    # function/class/lambda bodies and adds: Assign target Names (any depth),
+    # AnnAssign/AugAssign/NamedExpr Name targets, for/async-for targets, with/async-with `as`
+    # targets, plain-import bound names (first dotted segment or asname), from-import
+    # names/asnames, nested def/class names, and except-handler names. Output: set of str. No side
+    # effects.
+    # KNOWN ISSUE: comprehension targets and match-statement captures are not collected, so
+    # functions using comprehensions with free-looking loop variables are rejected by the self-
+    # containment gate.
     """Collect names that would be locally bound in this function scope.
 
     Includes function args, local assignments (`x = ...`, walrus, augmented,
@@ -260,6 +307,9 @@ def _collect_scope_names(node: ast.AST) -> set[str]:
             names.add(args.kwarg.arg)
 
     def walk_body(items):
+        # [FUNCTION DOC] HELPER: Nested closure that iterates the given statements, walks each
+        # with _walk_no_nested_scope, and adds every binding form listed in the parent's doc to
+        # the enclosing `names` set (mutates it).
         for stmt in items:
             for sub in _walk_no_nested_scope(stmt):
                 if isinstance(sub, ast.Assign):
@@ -300,6 +350,9 @@ def _collect_scope_names(node: ast.AST) -> set[str]:
 
 
 def _walk_no_nested_scope(root: ast.AST) -> Iterator[ast.AST]:
+    # [FUNCTION DOC] HELPER: Breadth-first generator over root and its descendants (root itself is
+    # always yielded) that does not enter child FunctionDef/AsyncFunctionDef/ClassDef/Lambda nodes
+    # (they are not yielded either). Output: iterator of AST nodes.
     """Like ast.walk but does not descend into nested function/class bodies."""
     todo: list[ast.AST] = [root]
     while todo:
@@ -314,6 +367,16 @@ def _walk_no_nested_scope(root: ast.AST) -> Iterator[ast.AST]:
 
 
 def _references_only_safe_names(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    # [FUNCTION DOC] HELPER: Self-containment gate. True iff every Load-context Name in the
+    # function (walked without nested scopes, so including decorators, defaults and annotations)
+    # is a local of the function (via _collect_scope_names), a Python builtin, or in
+    # _ALLOWED_EXTERNAL_NAMES. Direct child nested functions of node are checked too, against the
+    # outer scope plus their own locals. Returns False on the first unresolved name. Imports
+    # `builtins` lazily. No side effects.
+    # KNOWN ISSUE: skipping ast.arguments nodes does not skip their children (the walker still
+    # yields annotation/default Names), so annotations ARE checked despite the comment saying they
+    # are stripped and ignored. Also nested functions are only found as direct AST children of the
+    # def (not inside if/for blocks), and nested classes/lambdas are never checked.
     """True iff the function body only references its own args / builtins / a
     small whitelist of stdlib modules.
 
@@ -363,6 +426,9 @@ def _references_only_safe_names(node: ast.FunctionDef | ast.AsyncFunctionDef) ->
 
 
 def _is_skipped_name(name: str) -> bool:
+    # [FUNCTION DOC] HELPER: True if name is in _SKIP_EXACT_NAMES
+    # (main/setup/run/init/cli/wrapper), starts with "test_", or starts with "_" (private/dunder).
+    # Output: bool.
     if name in _SKIP_EXACT_NAMES:
         return True
     if name.startswith("test_"):
@@ -378,6 +444,12 @@ def extract_from_module(
     min_loc: int,
     max_loc: int,
 ) -> list[FunctionCandidate]:
+    # [FUNCTION DOC] Parses source and returns FunctionCandidates for every top-level synchronous
+    # function passing all filters, in source order. Inputs: path (unused), source (file text),
+    # keyword-only relative_path (POSIX, stored on candidates), min_loc/max_loc (inclusive body-
+    # LOC bounds). Filters in order: skip async, _is_skipped_name, no named args, body LOC out of
+    # range, no explicit return, side-effect substring in source (IndexError slicing -> skip), not
+    # self-contained. Output: list (empty on SyntaxError). No side effects.
     """Parse `source` and return every module-level function that survives filters.
 
     Returns an empty list on SyntaxError.
@@ -446,6 +518,11 @@ def walk_repo(
     min_loc: int,
     max_loc: int,
 ) -> Iterator[FunctionCandidate]:
+    # [FUNCTION DOC] Generator: for every regular file in clone_dir matching file_glob (Path.glob)
+    # whose POSIX relative path does not match an exclude_glob pattern, reads it as UTF-8 (replace
+    # errors; OSError -> skip) and yields from extract_from_module with the given min_loc/max_loc.
+    # Inputs: clone_dir; keyword-only file_glob, exclude_glob, min_loc, max_loc. Side effects:
+    # filesystem reads.
     """Walk `clone_dir`, yield FunctionCandidate from every matching .py file."""
     for path in clone_dir.glob(file_glob):
         if not path.is_file():

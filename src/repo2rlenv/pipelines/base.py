@@ -1,3 +1,9 @@
+# [MODULE DOC] Pipeline contract module. Defines the Pipeline Protocol every synthesis pipeline
+# implements (class attributes name / requires_bootstrap / supported_languages / experimental, an
+# __init__ taking GenerationInput + validated options + optional bootstrap result, and
+# run(out_dir)), the uniform PipelineResult counters returned by run(), LanguageMismatchError, and
+# check_language_compatibility() used by the CLI before running a pipeline. Side effects: only a
+# logger warning in check_language_compatibility.
 """Pipeline contract — every synthesis pipeline implements this Protocol.
 
 A pipeline:
@@ -27,6 +33,9 @@ logger = logging.getLogger(__name__)
 
 
 class LanguageMismatchError(RuntimeError):
+    # [CLASS DOC] RuntimeError subclass raised by check_language_compatibility when a pipeline
+    # restricted to certain languages is pointed at a repo detected as another language and force
+    # is not set. No extra fields.
     """Pipeline can't run against the detected repo language.
 
     Raised by `check_language_compatibility()` when a Python-only pipeline
@@ -36,6 +45,10 @@ class LanguageMismatchError(RuntimeError):
 
 @dataclass(slots=True)
 class PipelineResult:
+    # [CLASS DOC] Mutable slotted dataclass returned by every Pipeline.run. Fields: candidates
+    # (int, discovered before filtering), emitted (int, tasks written), skipped (int, sum of skip
+    # counts), out_dir (Path where tasks landed), skip_reasons (dict reason -> count). No
+    # validation that skipped equals the sum of skip_reasons; callers maintain consistency.
     """Uniform result shape across every pipeline.
 
     Attributes:
@@ -55,6 +68,12 @@ class PipelineResult:
 
 @runtime_checkable
 class Pipeline(Protocol):
+    # [CLASS DOC] runtime_checkable typing Protocol describing a synthesis pipeline (structural,
+    # no inheritance needed). Class attributes: name (PipelineName, required), requires_bootstrap
+    # (default False; if True the CLI runs ensure_bootstrap first and passes the BootstrapResult),
+    # supported_languages (frozenset of LanguageHint or None = any), experimental (default False;
+    # CLI warns before running). Note isinstance checks against a runtime_checkable Protocol only
+    # verify member presence.
     """The contract every synthesis pipeline implements.
 
     Implementations are duck-typed (Protocol, not ABC) so a class doesn't have
@@ -92,9 +111,18 @@ class Pipeline(Protocol):
         input: GenerationInput,
         options: BaseModel,
         bootstrap: Any = None,
-    ) -> None: ...
+    ) -> None:
+        # [FUNCTION DOC] Protocol signature only (body is an ellipsis). Implementations take input
+        # (GenerationInput), options (the Pydantic model registered for this pipeline in
+        # OPTIONS_REGISTRY), and bootstrap (BootstrapResult when requires_bootstrap, else None).
+        # Output: None.
+        ...
 
-    def run(self, out_dir: Path) -> PipelineResult: ...
+    def run(self, out_dir: Path) -> PipelineResult:
+        # [FUNCTION DOC] Protocol signature only (body is an ellipsis). Implementations write
+        # Harbor task directories under out_dir and return a PipelineResult with
+        # candidate/emitted/skipped counters.
+        ...
 
 
 def check_language_compatibility(
@@ -103,6 +131,13 @@ def check_language_compatibility(
     *,
     force: bool = False,
 ) -> None:
+    # [FUNCTION DOC] Verifies a pipeline class can run on the detected repo language. Inputs:
+    # pipeline_cls (class, read via getattr for supported_languages and name), detected
+    # (LanguageHint), keyword-only force (default False). Returns None if supported_languages is
+    # None or contains detected. On mismatch with force: logs a warning (pipeline name, sorted
+    # supported language values, detected) and returns. On mismatch without force: raises
+    # LanguageMismatchError with a multi-line message suggesting language-agnostic pipelines or
+    # --force-language. Side effects: logging only.
     """Verify the pipeline can run against the detected repo language.
 
     Behavior:

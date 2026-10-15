@@ -1,3 +1,11 @@
+# [MODULE DOC] The `code_instruct` pipeline (experimental, Python-only, requires bootstrap): repo-
+# anchored OSS-Instruct. Clones the target repo, samples seed snippets, asks the LLM for a problem
+# / pytest test / task_module.py oracle, runs the _oss_instruct quality gates (decontamination,
+# task_module import, repo anchoring, symbol collision, test strength, dedup), verifies in the
+# bootstrap Docker sandbox that the test fails without the oracle and passes with it, and emits
+# Harbor tasks whose gold patch creates only task_module.py while the grading test ships under
+# tests/. Side effects: git clone into a temp dir, Docker sandbox execution, LLM calls, writing
+# task directories, logging.
 """OSS-Instruct-style coding tasks, anchored to a target repo + verified by execution.
 
 For each emitted task:
@@ -81,6 +89,9 @@ logger = logging.getLogger(__name__)
 
 @dataclass(slots=True)
 class _VerifyOutcome:
+    # [CLASS DOC] HELPER: Mutable slotted dataclass for sandbox verification results: accepted
+    # (bool, default False), reason (skip reason, "" on accept), pre_log / post_log (truncated
+    # pytest logs of stage A / B).
     accepted: bool = False
     reason: str = ""
     pre_log: str = ""
@@ -88,6 +99,11 @@ class _VerifyOutcome:
 
 
 def new_file_hunk(content: str, path: str) -> str:
+    # [FUNCTION DOC] Builds a git-apply-compatible diff creating a new file at path: diff --git,
+    # new file mode 100644, a placeholder index line, --- /dev/null, +++ b/<path>, one "@@ -0,0
+    # +1,N @@" hunk with every line "+"-prefixed, plus the "\ No newline at end of file" marker
+    # when content lacks a trailing newline.
+    # Inputs: content, path. Output: diff str.
     """One `git apply`-compatible hunk that creates a NEW file at repo root.
 
     Standard `diff --git` + `new file mode` + index + `--- /dev/null` +
@@ -111,6 +127,9 @@ def new_file_hunk(content: str, path: str) -> str:
 
 
 def make_solution_diff(*, task_module_code: str) -> str:
+    # [FUNCTION DOC] Returns the gold patch: new_file_hunk for task_module_code at
+    # "task_module.py" (keyword-only). The grading test is deliberately not included (it ships
+    # under tests/ for every agent).
     """Gold patch: creates ONLY `task_module.py`.
 
     The grading test ships separately under `tests/` (Harbor mounts it at
@@ -123,6 +142,9 @@ def make_solution_diff(*, task_module_code: str) -> str:
 
 
 def build_code_instruct_dockerfile(bootstrap_image: str) -> str:
+    # [FUNCTION DOC] Returns the per-task Dockerfile text: FROM bootstrap_image, WORKDIR
+    # /workspace, install git via apt or apk if missing (failures tolerated), and mark /workspace
+    # as a git safe.directory. Input: image reference (digest or tag). Output: str.
     """Per-task Dockerfile: FROM bootstrap + defensive git install. HEAD state.
 
     Unlike pr_runtime, code_instruct adds NEW files at
@@ -144,6 +166,10 @@ def build_code_instruct_dockerfile(bootstrap_image: str) -> str:
 
 
 class CodeInstructPipeline:
+    # [CLASS DOC] Pipeline implementation for PipelineName.CODE_INSTRUCT. Class attributes:
+    # requires_bootstrap True, experimental True, supported_languages {PYTHON}. Instance state:
+    # input, options (CodeInstructOptions), bootstrap (BootstrapResult), optional progress
+    # callback, and a cumulative _llm_cost_usd across all LLM calls in the run.
     """Repo-anchored OSS-Instruct with executable verifiers."""
 
     name: ClassVar[PipelineName] = PipelineName.CODE_INSTRUCT
@@ -157,6 +183,8 @@ class CodeInstructPipeline:
         options: CodeInstructOptions,
         bootstrap: BootstrapResult | None = None,
     ):
+        # [FUNCTION DOC] Stores input/options/bootstrap and initializes progress callback and cost
+        # counter. Raises RuntimeError if bootstrap is None and ValueError if input.llm is None.
         if bootstrap is None:
             raise RuntimeError(
                 "code_instruct requires a BootstrapResult (set requires_bootstrap=True "
@@ -171,9 +199,14 @@ class CodeInstructPipeline:
         self._llm_cost_usd = 0.0
 
     def set_progress_callback(self, cb) -> None:
+        # [FUNCTION DOC] Registers a callable invoked as cb(name=, outcome=, reason=) for each
+        # emitted/skipped candidate.
         self._progress_cb = cb
 
     def _emit_progress(self, name: str, outcome: str, reason: str = "") -> None:
+        # [FUNCTION DOC] HELPER: Calls the progress callback (if set) with name, outcome
+        # ("emit"/"skip") and reason; any exception from the callback is swallowed and logged at
+        # debug level.
         if self._progress_cb is not None:
             try:
                 self._progress_cb(name=name, outcome=outcome, reason=reason)
@@ -183,6 +216,20 @@ class CodeInstructPipeline:
     # ----- run loop -----------------------------------------------------------
 
     def run(self, out_dir: Path) -> PipelineResult:
+        # [FUNCTION DOC] Main loop. Creates out_dir; resolves the repo token (private repo without
+        # token -> RuntimeError); seeds an RNG from options.seed (or unseeded). In a temp dir:
+        # shallow-clones repo.url at repo.ref (any failure -> RuntimeError), lists source files by
+        # file_glob/exclude_glob, detects the package name (None -> anchoring/collision gates
+        # skipped, warning logged) and its top-level symbols. Unless skip_validation, starts a
+        # sandbox. Loops until options.limit tasks are emitted or limit*5 candidates are seen:
+        # sample a seed (None -> skip "no_seed"); up to max_attempts_per_seed LLM attempts, each
+        # passing gates in order: parse, benchmark overlap (unless skip_decontamination), test
+        # references task_module, repo anchoring and symbol collision (when package known), test
+        # strength, fingerprint dedup against emitted tasks; failure records the last reason as
+        # one skip. Then verifies in the sandbox (unless skip_validation), builds and writes the
+        # Harbor task, records fingerprints and reports progress. Always cleans up the sandbox and
+        # clone. Output: PipelineResult(candidates seen, emitted, sum of skips, out_dir,
+        # skip_reasons).
         out_dir.mkdir(parents=True, exist_ok=True)
         token = resolve_repo_token(self.input.repo, self.input.auth)
         if self.input.repo.access == "private" and not token:
@@ -352,6 +399,11 @@ class CodeInstructPipeline:
         # library-agnostic prompt so single-file / plain-repo cases don't
         # bring the pipeline to a halt. The anchoring gate is skipped in
         # that path (see run()).
+        # [FUNCTION DOC] HELPER: Formats PROMPT_SYSTEM / PROMPT_USER_TEMPLATE with the package
+        # name (or "the target library" if unknown) and the seed path/lines/text, calls
+        # llm.complete with options.max_llm_tokens and llm_temperature, adds the response cost to
+        # _llm_cost_usd, and returns parse_task_response(content). Any exception from complete ->
+        # logged warning and None. Output: ParsedTask or None.
         effective_pkg = pkg_name or "the target library"
         system = PROMPT_SYSTEM.format(pkg_name=effective_pkg)
         user = PROMPT_USER_TEMPLATE.format(
@@ -378,6 +430,11 @@ class CodeInstructPipeline:
     # ----- sandbox -----------------------------------------------------------
 
     def _start_sandbox(self):
+        # [FUNCTION DOC] HELPER: Creates a temp directory containing an empty .keep file and
+        # starts a DockerSandbox from bootstrap.image_tag with that dir as repo_dir and the
+        # configured platform (the bootstrap image already contains the repo at /workspace).
+        # Imports DockerSandbox lazily. Output: the sandbox.
+        # KNOWN ISSUE: the mkdtemp marker directory is never removed (leaks one temp dir per run).
         from repo2rlenv.bootstrap.docker import DockerSandbox
 
         marker = Path(tempfile.mkdtemp(prefix="r2e-code-instruct-"))
@@ -389,6 +446,18 @@ class CodeInstructPipeline:
         )
 
     def _verify_task(self, sandbox, parsed: ParsedTask, *, test_filename: str) -> _VerifyOutcome:
+        # [FUNCTION DOC] HELPER: Two-stage sandbox check. Inputs: sandbox, parsed task, keyword-
+        # only test_filename. Stage A script: reset/clean /workspace to HEAD, remove
+        # task_module.py, write the base64-decoded test file, run pytest on it (exit masked with
+        # || true); if options.require_test_fails_without_oracle and the log shows all tests
+        # passed -> reject "test_passes_without_oracle". Stage B: write task_module.py, run pytest
+        # (exit code kept), then delete both files; post_passed = command ok and log all-passed;
+        # if options.require_test_passes_with_oracle and not passed -> reject
+        # "oracle_does_not_satisfy_test". Logs truncated to 4000 chars. Timeouts from
+        # options.validation_timeout_sec. Output: _VerifyOutcome.
+        # KNOWN ISSUE: Stage B's script ends with an rm command, so the sandbox exit status
+        # reflects the rm, not pytest; b.ok is effectively always true and acceptance relies only
+        # on the log parse.
         """Two-stage verification.
 
         Stage A: write only the test file, run pytest on it → must NOT pass.
@@ -452,6 +521,9 @@ class CodeInstructPipeline:
     # ----- task builder -------------------------------------------------------
 
     def _task_test_filename(self, seed: Seed, parsed: ParsedTask) -> str:
+        # [FUNCTION DOC] HELPER: Returns "test_r2e_<10 hex>.py" where the hash is SHA-256 over
+        # seed path, start line and the problem text (NUL-separated). Deterministic for identical
+        # inputs.
         """Content-derived filename — pytest discovers it by `test_*.py` glob."""
         h = hashlib.sha256()
         h.update(seed.relative_path.encode())
@@ -462,6 +534,18 @@ class CodeInstructPipeline:
         return f"test_r2e_{h.hexdigest()[:10]}.py"
 
     def _build_task(self, seed: Seed, parsed: ParsedTask, *, test_filename: str) -> HarborTask:
+        # [FUNCTION DOC] HELPER: Builds the HarborTask. Task id "<owner>__<name>-cinst-<8 hex>"
+        # (same hash inputs as the test filename). Gold diff = make_solution_diff; test script =
+        # build_binary_eval_script copying /tests/<test file> into /workspace and running pytest
+        # on it; Dockerfile FROM the image digest if pushed to a registry else the local tag;
+        # reference blob URL for the seed lines (omitted when None, e.g. local repos). Metadata
+        # (repo2env) includes pipeline name/version, repo, ref, source access, UTC build time,
+        # synthesis LLM, reward kinds and a code_instruct sub-table (seed location, test filename,
+        # bootstrap digest, LLM cost). The instruction is the problem plus a delivery contract
+        # requiring /workspace/task_module.py. Test file shipped as aux file tests/<name>. Output:
+        # HarborTask.
+        # KNOWN ISSUE: llm_cost_usd records the cumulative cost of the whole run so far, not this
+        # task's cost.
         owner, name = self.input.repo.owner_name
         h = hashlib.sha256()
         h.update(seed.relative_path.encode())

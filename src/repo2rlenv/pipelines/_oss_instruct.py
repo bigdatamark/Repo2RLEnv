@@ -1,3 +1,13 @@
+# [MODULE DOC] HELPER: Shared machinery for the `code_instruct` pipeline (Magicoder OSS-Instruct-
+# style recipe).
+# Provides: repo package detection and top-level symbol listing (for repo anchoring and the
+# symbol-collision guard); random seed-snippet sampling from repo source files; a substring
+# decontamination check against well-known benchmark phrases; the LLM system/user prompt templates
+# and a parser for the three-section response ([Problem Description] / [Test] / [Solution]);
+# and the post-LLM quality gates (repo anchoring, symbol collision, test strength, equivalence-
+# test
+# strength) plus dedup fingerprints. Stdlib only; module-level logger is defined but unused here.
+# Side effects: only filesystem reads of the cloned repo.
 """Helpers for the `code_instruct` pipeline: sampling, parsing, decontam.
 
 Magicoder OSS-Instruct is a recipe (prompt template + sampling + parsing),
@@ -32,6 +42,21 @@ logger = logging.getLogger(__name__)
 
 
 def detect_repo_package(clone_dir: Path, repo_name: str) -> str | None:
+    # [FUNCTION DOC] Finds the top-level Python package name of a cloned repo.
+    # Inputs: clone_dir (repo root Path); repo_name (repo short name, e.g. "attrs").
+    # Steps: (1) if pyproject.toml exists, parse it (TOML/OS errors treated as empty) and take
+    # project.name, else tool.poetry.name; normalize dashes to underscores and lowercase; accept
+    # it only
+    # if src/<name>/__init__.py or <name>/__init__.py exists. (2) Otherwise try candidates
+    # [repo_name with dashes->underscores lowercased, repo_name lowercased], with "attr" prepended
+    # when
+    # repo_name is "attrs", checking src/<c>/__init__.py then <c>/__init__.py.
+    # Output: the package name string, or None if nothing matched. Raises: nothing. Side effects:
+    # reads files.
+    # KNOWN ISSUE: docstring says "attr" is always a candidate; code only adds it when repo_name
+    # is "attrs".
+    # Also the lowercased-but-dash-preserving candidate can never be a valid identifier if it has
+    # dashes.
     """Find the top-level Python package name of the target repo.
 
     Order of attempts:
@@ -77,6 +102,13 @@ def detect_repo_package(clone_dir: Path, repo_name: str) -> str | None:
 
 
 def list_repo_top_level_symbols(clone_dir: Path, pkg_name: str) -> set[str]:
+    # [FUNCTION DOC] Returns the set of names of top-level classes and (async) functions defined
+    # in any .py file under
+    # the repo package directory (src/<pkg_name> preferred, else <pkg_name>), walked recursively.
+    # Inputs: clone_dir; pkg_name. Output: set of str (empty if no package dir found). Files that
+    # fail to
+    # read or parse are skipped silently. Used by check_symbol_collision. Side effects: filesystem
+    # reads.
     """Return the set of top-level class/function names defined anywhere in
     the repo's Python package. Used by the symbol-collision guard so that
     the LLM's `task_module.py` doesn't reuse a name that would let an agent
@@ -110,6 +142,11 @@ def list_repo_top_level_symbols(clone_dir: Path, pkg_name: str) -> set[str]:
 
 @dataclass(slots=True, frozen=True)
 class Seed:
+    # [CLASS DOC] Frozen slotted dataclass: one sampled snippet from the target repo. Fields:
+    # relative_path (POSIX
+    # path relative to the clone), start_line (1-indexed), end_line (1-indexed, inclusive), text
+    # (the
+    # snippet lines joined by newlines, without line numbers).
     """One sampled snippet from the target repo."""
 
     relative_path: str  # POSIX-style, e.g. "src/foo/bar.py"
@@ -119,10 +156,20 @@ class Seed:
 
 
 def is_excluded(relative_path: str, exclude_globs: list[str]) -> bool:
+    # [FUNCTION DOC] HELPER: True if relative_path matches any fnmatch glob in exclude_globs.
+    # Inputs: relative_path
+    # (POSIX str), exclude_globs (list of patterns). Output: bool. No side effects.
     return any(fnmatch.fnmatch(relative_path, pat) for pat in exclude_globs)
 
 
 def list_source_files(clone_dir: Path, *, file_glob: str, exclude_glob: list[str]) -> list[Path]:
+    # [FUNCTION DOC] Lists files in clone_dir matching the glob file_glob (Path.glob semantics, so
+    # "**" recurses),
+    # keeping only regular files whose POSIX relative path is not matched by any exclude_glob
+    # pattern.
+    # Inputs: clone_dir; keyword-only file_glob (str), exclude_glob (list of str). Output: list of
+    # Paths
+    # (absolute under clone_dir, in glob order). Side effects: filesystem traversal.
     """Walk the repo tree matching `file_glob` minus `exclude_glob`."""
     out: list[Path] = []
     for p in clone_dir.glob(file_glob):
@@ -144,6 +191,19 @@ def sample_seed(
     max_loc: int,
     max_attempts: int = 20,
 ) -> Seed | None:
+    # [FUNCTION DOC] Samples a random snippet window from the given files using the supplied RNG.
+    # Inputs: files (candidate Paths), clone_dir (to compute relative paths), keyword-only rng
+    # (random.Random), min_loc/max_loc (window size bounds in lines), max_attempts (default 20).
+    # Each attempt: pick a random file (read errors -> retry), skip if it has fewer than min_loc
+    # lines,
+    # choose a window size uniformly in [min_loc, min(max_loc, line count)] and a uniform start
+    # offset,
+    # and accept the chunk if _looks_substantive. Output: a Seed (1-indexed start, inclusive end),
+    # or None
+    # if files is empty or all attempts fail. Side effects: reads files; advances rng.
+    # KNOWN ISSUE: docstring says windows dominated by docstrings are skipped, but
+    # _looks_substantive only
+    # counts blank, comment and import lines as boring.
     """Pick a random file, pick a random window of `[min_loc..max_loc]` lines.
 
     Skips files that are too short. Skips windows that are dominated by
@@ -181,6 +241,9 @@ _COMMENT_OR_IMPORT_RE = re.compile(r"^\s*(?:#|from\s|import\s)")
 
 
 def _looks_substantive(chunk_lines: list[str]) -> bool:
+    # [FUNCTION DOC] HELPER: Returns True if fewer than 80% of the given lines are "boring"
+    # (blank, a comment, or a line
+    # starting with `from ` / `import `). Empty input returns False. Input: list of line strings.
     """Reject snippets that are 80%+ comments / imports / blanks."""
     if not chunk_lines:
         return False
@@ -224,6 +287,11 @@ DEFAULT_BENCHMARK_PHRASES: tuple[str, ...] = (
 
 
 def has_benchmark_overlap(text: str, phrases: tuple[str, ...] = DEFAULT_BENCHMARK_PHRASES) -> bool:
+    # [FUNCTION DOC] Decontamination check: True if any phrase from phrases (default
+    # DEFAULT_BENCHMARK_PHRASES, a small
+    # set of HumanEval/MBPP/APPS/GSM8K/DS-1000 phrasings) occurs as a case-insensitive substring
+    # of text.
+    # Inputs: text; phrases (tuple of str). Output: bool. No side effects.
     """True if any known benchmark phrase appears as a substring (case-insensitive)."""
     lower = text.lower()
     return any(p.lower() in lower for p in phrases)
@@ -267,12 +335,24 @@ Design a task that requires the solver to import and use `{pkg_name}`'s public A
 
 @dataclass(slots=True)
 class ParsedTask:
+    # [CLASS DOC] Mutable slotted dataclass holding the parsed LLM response: problem (problem
+    # statement text),
+    # test_code (pytest file source, code fence stripped), solution_code (task_module.py source,
+    # fence
+    # stripped).
     problem: str
     test_code: str
     solution_code: str
 
 
 def parse_task_response(text: str) -> ParsedTask | None:
+    # [FUNCTION DOC] Parses the LLM response into a ParsedTask by extracting the "[Problem
+    # Description]", "[Test]" and
+    # "[Solution]" sections (markers matched case-insensitively on their own line). Input: raw
+    # text.
+    # Output: ParsedTask with problem stripped and test/solution code-fence-stripped, or None if
+    # any
+    # section is missing or empty. No side effects.
     """Extract the three sections from the LLM's response.
 
     Tolerant: section markers are matched case-insensitively. Returns
@@ -294,6 +374,11 @@ _SECTION_RE_CACHE: dict[str, re.Pattern[str]] = {}
 
 
 def _section_re(name: str) -> re.Pattern[str]:
+    # [FUNCTION DOC] HELPER: Returns (and memoizes in module-level _SECTION_RE_CACHE) a compiled
+    # multiline,
+    # case-insensitive regex matching a line consisting only of "[<name>]" with optional
+    # whitespace.
+    # Input: section name. Output: compiled pattern. Side effects: mutates the global cache.
     if name not in _SECTION_RE_CACHE:
         # Match `[Section Name]` markers, with optional leading/trailing whitespace
         pattern = rf"(?im)^\s*\[\s*{re.escape(name)}\s*\]\s*$"
@@ -302,6 +387,11 @@ def _section_re(name: str) -> re.Pattern[str]:
 
 
 def _extract_section(text: str, name: str) -> str:
+    # [FUNCTION DOC] HELPER: Returns the stripped text between the "[<name>]" marker line and the
+    # next line that looks
+    # like any "[Letters and spaces]" marker (or end of text). Empty string if the marker is
+    # absent.
+    # Inputs: text, name. Output: str.
     """Return the text between `[<name>]` and the next `[...]` marker (or EOF)."""
     pattern = _section_re(name)
     m = pattern.search(text)
@@ -318,6 +408,10 @@ _CODE_FENCE_RE = re.compile(r"^```(?:python|py)?\s*\n(.*?)\n```\s*$", re.DOTALL)
 
 
 def _strip_code_fence(text: str) -> str:
+    # [FUNCTION DOC] HELPER: Strips surrounding whitespace and, if the whole text is a single ```
+    # / ```python / ```py
+    # fenced block, returns the inner content stripped; otherwise returns the stripped text
+    # unchanged.
     """Strip a single surrounding ``` code fence if present."""
     text = text.strip()
     m = _CODE_FENCE_RE.match(text)
@@ -332,6 +426,11 @@ def _strip_code_fence(text: str) -> str:
 
 
 def references_task_module(test_code: str) -> bool:
+    # [FUNCTION DOC] True iff test_code has a line starting with `from task_module import` or
+    # `import task_module`
+    # (multiline regex). Guards against self-sufficient tests that pass without the oracle.
+    # Input: test source string. Output: bool. Named without a test_ prefix so pytest won't
+    # collect it.
     """True iff the test code imports from `task_module` (our convention).
 
     Without this check, the LLM could write a self-sufficient test that
@@ -352,6 +451,21 @@ def references_task_module(test_code: str) -> bool:
 
 
 def check_repo_anchoring(solution_code: str, pkg_name: str) -> tuple[bool, str]:
+    # [FUNCTION DOC] Quality gate: the oracle task_module.py must import the target package and
+    # use it.
+    # Inputs: solution_code (source), pkg_name. Parses with ast (SyntaxError -> (False,
+    # "solution_syntax_error:<msg>")). Collects every Import/ImportFrom (anywhere in the tree)
+    # whose
+    # module is pkg_name or a submodule, recording the local bound names (alias asname, else the
+    # name for
+    # from-imports or the top-level segment for plain imports) and the import's first line number.
+    # No such
+    # import -> (False, "no_repo_import"). Then, with those import lines removed, accepts if any
+    # bound name
+    # is "*" or appears as a whole word in the remaining text -> (True, ""); otherwise (False,
+    # "repo_import_unused"). Output: (accepted bool, reason str). No side effects.
+    # KNOWN ISSUE: only the import statement's first line (lineno) is excluded, so a multi-line
+    # parenthesized from-import leaks its imported names into the body text and counts as "used".
     """The oracle `task_module.py` must import the target repo and USE it.
 
     Passes iff:
@@ -400,6 +514,12 @@ def check_repo_anchoring(solution_code: str, pkg_name: str) -> tuple[bool, str]:
 
 
 def check_symbol_collision(solution_code: str, repo_symbols: set[str]) -> tuple[bool, str]:
+    # [FUNCTION DOC] Quality gate: rejects the oracle if any module top-level class/function name
+    # is in repo_symbols
+    # (would let an agent grep and re-export the real implementation). Inputs: solution_code,
+    # repo_symbols (set of str). Output: (False, "symbol_collides_with_repo:<name>") on the first
+    # collision, else (True, ""). A SyntaxError returns (True, "") since anchoring already reports
+    # it.
     """Reject if any top-level class/function name in the oracle collides
     with a real symbol in the target repo — that lets an agent `grep`
     the on-disk source and re-export the real implementation to pass the
@@ -425,6 +545,22 @@ _ASSERT_TRIVIAL_RE = re.compile(
 
 
 def check_test_strength(test_code: str, instruction: str) -> tuple[bool, str]:
+    # [FUNCTION DOC] Quality gate for code_instruct test files. Inputs: test_code, instruction
+    # (problem text).
+    # Parses (SyntaxError -> (False, "test_syntax_error:<msg>")); collects top-level sync `test_*`
+    # functions (none -> "no_test_functions"). Walks those functions counting assert statements;
+    # an
+    # assert is trivial if its test is a constant bool/int/str or a Name == same Name comparison
+    # (any
+    # compare operator). Any trivial assert -> "trivial_assert_present"; fewer than 3 non-trivial
+    # ->
+    # "too_few_asserts". If the instruction matches raise/error/invalid/must not/reject/forbidden
+    # (case-insensitive word), the test must contain "pytest.raises" or "raises(" substring, else
+    # "missing_pytest_raises". Output: (accepted, reason), reason empty on accept.
+    # KNOWN ISSUE: docstring rule 2 (at least 3 test functions, or one with >=3 asserts) is not
+    # enforced; only total non-trivial asserts >= 3 is. The "x == x" check ignores the operator
+    # kind.
+    # Module-level _ASSERT_TRIVIAL_RE is defined but never used. Async test functions are ignored.
     """Reject test files that are too weak to be worth grading.
 
     Rules:
@@ -490,6 +626,18 @@ def check_test_strength(test_code: str, instruction: str) -> tuple[bool, str]:
 def check_equivalence_test_strength(
     test_code: str, name: str, *, min_test_cases: int = 5
 ) -> tuple[bool, str]:
+    # [FUNCTION DOC] Quality gate for equivalence_tests test files. Inputs: test_code; name
+    # (function under test);
+    # keyword-only min_test_cases (default 5). Parses (SyntaxError -> "test_syntax_error:<msg>");
+    # requires
+    # at least min_test_cases top-level `test_*` functions (else
+    # "too_few_test_functions:<n><<min>").
+    # Every such function must contain a direct call to `name` and to `reference_<name>` (plain
+    # Name
+    # calls), else (False, "test_fn_missing_both_names:<fn>") immediately. Constant bool/int/str
+    # asserts
+    # count as trivial -> "trivial_assert_present". Output: (accepted, reason); reason empty on
+    # accept.
     """Reject weak equivalence-test files before sending them to the sandbox.
 
     Different shape than `check_test_strength`: for equivalence tests the
@@ -546,6 +694,14 @@ def check_equivalence_test_strength(
 
 
 def task_fingerprints(problem: str, solution_code: str = "") -> set[str]:
+    # [FUNCTION DOC] Returns the set of dedup fingerprints for a candidate task. Always includes
+    # "p:" + first 16 hex chars
+    # of SHA-256 of the first 80 chars of the whitespace-collapsed lowercased problem. If
+    # solution_code is
+    # given and parses, also adds "s:" + 16-hex SHA-256 of the comma-joined sorted public (no
+    # leading
+    # underscore) top-level class/function names, when any exist. Output: set of str. No side
+    # effects.
     """Return the set of dedup signals for a candidate task.
 
     Two independent signals — a match on EITHER counts as a duplicate:
@@ -578,6 +734,9 @@ def task_fingerprints(problem: str, solution_code: str = "") -> set[str]:
 
 
 def task_fingerprint(problem: str, solution_code: str = "") -> str:
+    # [FUNCTION DOC] Legacy single fingerprint: 16-hex SHA-256 of the first 80 normalized chars of
+    # the problem (same as
+    # the "p:" signal without prefix). solution_code is accepted but ignored. Output: str.
     """Legacy single-fingerprint (problem-only) — kept for compat.
 
     New callers should use `task_fingerprints` which returns a set of

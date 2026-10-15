@@ -1,3 +1,14 @@
+# [MODULE DOC] Standalone in-container verifier for `pr_diff` tasks (not used at generation time
+# except as source text: it is base64-embedded into tests/test.sh and also imported by unit
+# tests). CLI: `python3 verifier.py <oracle.patch> <predicted.patch> <instruction.md>`. Computes
+# six reward components (format_valid, size_sanity, file_targeting F1, region_overlap, similarity
+# over +/- lines, optional LLM judge via Anthropic Messages API or an OpenAI-compatible
+# R2E_JUDGE_ENDPOINT), combines them with weights (defaults in _DEFAULT_WEIGHTS, overridable by
+# R2E_W_* env vars), renormalizing when the judge is unavailable, clips to [0, 1], and caps at
+# 0.40 when size_sanity < 0.10. Writes /logs/verifier/reward.txt and /logs/verifier/reward-
+# details.json and prints the breakdown to stdout (print is intentional here: this is an in-
+# container script, not library code). Stdlib only. Side effects: env var reads, optional HTTPS
+# request to the judge, filesystem writes under /logs.
 """In-container verifier for pr_diff tasks (6-component reward).
 
 This module is the **standalone verifier** that runs inside the task's
@@ -77,6 +88,9 @@ _INDEX_RE = re.compile(r"^index ")
 
 
 def file_paths(diff: str) -> set[str]:
+    # [FUNCTION DOC] Returns the set of post-change paths (the b/<path> part) from every "diff
+    # --git a/X b/Y" header line in the diff. Paths containing spaces are not matched (regex uses
+    # non-space tokens). Output: set.
     """Return the set of ``b/<path>`` paths touched by a unified diff."""
     paths: set[str] = set()
     for line in diff.splitlines():
@@ -87,6 +101,10 @@ def file_paths(diff: str) -> set[str]:
 
 
 def hunk_ranges(diff: str) -> dict[str, list[tuple[int, int]]]:
+    # [FUNCTION DOC] Maps each file (from diff --git headers) to a list of (start, end) post-
+    # change line ranges from its "@@ -a,b +c,d @@" hunk headers: start = c, end = c + max(d-1, 0)
+    # with d defaulting to 1 (so a pure deletion with d=0 yields (c, c)). Hunk headers before any
+    # file header are ignored. Output: dict.
     """For each touched file, return list of (start_line, end_line) ranges
     on the **post-change** side (the ``+`` numbers in ``@@ -X +Y @@``).
     """
@@ -108,6 +126,9 @@ def hunk_ranges(diff: str) -> dict[str, list[tuple[int, int]]]:
 
 
 def _normalize_changes_only(diff: str) -> list[str]:
+    # [FUNCTION DOC] HELPER: Returns the diff's comparable lines for similarity: drops diff --git,
+    # index and @@ lines and context lines; keeps ---/+++ file-marker lines truncated at the first
+    # tab and stripped; keeps every other line starting with + or -. Output: list of str.
     """Return the +/- lines (the actual changes) for similarity scoring.
 
     Drops:
@@ -140,6 +161,9 @@ def _normalize_changes_only(diff: str) -> list[str]:
 
 
 def format_valid(predicted: str) -> float:
+    # [FUNCTION DOC] Returns 1.0 if predicted contains at least one diff --git header and at least
+    # one +/- change line that is not a "+++ "/"--- " file marker; otherwise 0.0 (also for blank
+    # input). Output: float.
     """1.0 if the predicted text looks like a unified diff; else 0.0.
 
     Requires both a ``diff --git`` header and at least one real +/- line
@@ -162,6 +186,9 @@ def format_valid(predicted: str) -> float:
 
 
 def file_targeting(oracle: str, predicted: str) -> float:
+    # [FUNCTION DOC] F1 between oracle and predicted changed-file sets (file_paths): 2TP / (2TP +
+    # FN + FP). Returns 1.0 when both sets are empty and 0.0 when there is no overlap. Output:
+    # float in [0, 1].
     """F1 over the changed-file sets.
 
     Why F1 instead of Jaccard:
@@ -188,6 +215,8 @@ def file_targeting(oracle: str, predicted: str) -> float:
 
 
 def _count_loc_changes(diff: str) -> int:
+    # [FUNCTION DOC] HELPER: Counts lines starting with + or - excluding "+++ " / "--- " file
+    # markers. Output: int.
     """Number of real +/- lines (excluding file-marker lines)."""
     n = 0
     for line in diff.splitlines():
@@ -197,6 +226,9 @@ def _count_loc_changes(diff: str) -> int:
 
 
 def size_sanity(oracle: str, predicted: str) -> float:
+    # [FUNCTION DOC] Ratio min/max of oracle vs predicted changed-line counts
+    # (_count_loc_changes). Both zero -> 1.0; exactly one zero -> 0.0. Output: float in [0, 1].
+    # Used for the catastrophic-size cap in main.
     """Penalize predicted patches that are wildly larger / smaller than the oracle.
 
     Returns ``min(oracle_loc, predicted_loc) / max(oracle_loc, predicted_loc)``.
@@ -216,6 +248,11 @@ def size_sanity(oracle: str, predicted: str) -> float:
 
 
 def region_overlap(oracle: str, predicted: str, *, slack_lines: int = 5) -> float:
+    # [FUNCTION DOC] Fraction of oracle hunks (hunk_ranges) for which some predicted hunk in the
+    # same file satisfies max(starts) <= min(ends) + slack_lines (keyword-only, default 5).
+    # Returns 1.0 if the oracle has no hunks. Output: float in [0, 1]. Note the slack is applied
+    # only on one side of the comparison, which still covers drift in both directions because
+    # max/min are symmetric.
     """For each oracle hunk, did the predicted diff edit a line within
     ``slack_lines`` of that hunk in the same file?
 
@@ -241,6 +278,9 @@ def region_overlap(oracle: str, predicted: str, *, slack_lines: int = 5) -> floa
 
 
 def similarity(oracle: str, predicted: str) -> float:
+    # [FUNCTION DOC] difflib.SequenceMatcher ratio (autojunk off) between _normalize_changes_only
+    # of oracle and predicted. Returns 0.0 for blank predicted or an oracle with no change lines.
+    # Output: float [0, 1].
     """SequenceMatcher ratio over +/- lines only.
 
     No free credit for context lines — fixes the v0.8.1 inflation where a
@@ -294,6 +334,18 @@ def llm_judge(
     timeout: int = 60,
     endpoint: str | None = None,
 ) -> tuple[float | None, str]:
+    # [FUNCTION DOC] Asks an LLM whether the predicted patch addresses the issue. Keyword-only
+    # inputs: instruction, oracle, predicted (each truncated to 4000 chars in the prompt),
+    # api_key, model (default Haiku id), timeout (default 60 s), endpoint (OpenAI-compatible base
+    # URL or None). Early returns: no api_key -> (None, "no_api_key"); endpoint without model ->
+    # (None, "no_judge_model"); blank predicted -> (0.0, "empty_predicted"). Builds a payload with
+    # max_tokens 200; with an endpoint, adds temperature 0 and POSTs to
+    # <endpoint>/chat/completions with a Bearer header; otherwise POSTs to the Anthropic Messages
+    # URL with x-api-key and anthropic-version 2023-06-01. Network/HTTP/timeout/OS errors ->
+    # (None, "network"). Extracts choices[0].message.content or content[0].text; JSON/shape errors
+    # or non-string text -> (None, "parse"). Finds the first flat JSON object containing "score"
+    # in the text; absent or unparseable -> (None, "missing_score"). Output: (score clamped to [0,
+    # 1], "ok"). Side effects: one HTTP request.
     """Return ``(score, status)``.
 
     ``score`` is a float in [0, 1] on success, ``None`` on failure.
@@ -381,6 +433,13 @@ def llm_judge(
 
 
 def combine(components: dict[str, float | None], weights: dict[str, float]) -> float:
+    # [FUNCTION DOC] Weighted average over components whose value is not None and that appear in
+    # weights: sum(w*v) / sum(w) over the available ones, so a missing judge's weight is
+    # redistributed proportionally. Returns 0.0 if nothing is available or total weight <= 0.
+    # Inputs: components dict, weights dict. Output: float.
+    # KNOWN ISSUE: docstring says "5 components" and "4 deterministic components"; there are 6
+    # components (5 deterministic). Also negative env-provided weights are not rejected and can
+    # push results outside [0, 1] (main clips afterwards).
     """Combine the 5 components into a final scalar in [0, 1].
 
     If ``llm_judge`` is None (judge failed / disabled), redistribute its
@@ -438,6 +497,9 @@ _CATASTROPHIC_SIZE_CAP = 0.40
 
 
 def _read_weights_from_env() -> dict[str, float]:
+    # [FUNCTION DOC] HELPER: Returns a copy of _DEFAULT_WEIGHTS with overrides from R2E_W_FORMAT,
+    # R2E_W_SIZE, R2E_W_FILE, R2E_W_REGION, R2E_W_SIM, R2E_W_JUDGE env vars; unparseable values
+    # are ignored. Output: dict.
     """Override defaults via R2E_W_* env vars (set in container by harbor)."""
     overrides = {
         "format_valid": os.environ.get("R2E_W_FORMAT"),
@@ -459,6 +521,11 @@ def _read_weights_from_env() -> dict[str, float]:
 
 
 def _judge_config_from_env() -> tuple[str, str, str | None]:
+    # [FUNCTION DOC] HELPER: Returns (api_key, model, endpoint) for the judge. If
+    # R2E_JUDGE_ENDPOINT is set (stripped, non-empty): key from R2E_JUDGE_API_KEY or the "EMPTY"
+    # placeholder, model from R2E_JUDGE_MODEL (may be "" which makes llm_judge report
+    # no_judge_model). Otherwise: key from ANTHROPIC_API_KEY (may be ""), model from
+    # R2E_JUDGE_MODEL or the default Haiku id, endpoint None. Side effects: env reads only.
     """``(api_key, model, endpoint)`` for the judge, from the verifier env.
 
     With ``R2E_JUDGE_ENDPOINT`` set, the key comes from ``R2E_JUDGE_API_KEY``
@@ -478,6 +545,14 @@ def _judge_config_from_env() -> tuple[str, str, str | None]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # [FUNCTION DOC] Verifier entry point. Input: argv (defaults to sys.argv[1:]); needs oracle,
+    # predicted and instruction file paths. Fewer than 3 args -> prints usage to stderr and
+    # returns 2. Reads the files (missing/undecodable -> ""), resolves judge config, computes all
+    # components, reads weights, combines, clips to [0, 1], caps at 0.40 when size_sanity < 0.10,
+    # then builds a breakdown dict (final_reward, rounded components and weights, judge_model only
+    # when status ok, judge_endpoint, judge_status). Side effects: creates /logs/verifier, writes
+    # reward.txt (6-decimal float) and reward-details.json, prints the breakdown JSON to stdout,
+    # may call the judge over HTTP. Output: exit code 0.
     args = argv if argv is not None else sys.argv[1:]
     if len(args) < 3:
         print(
@@ -551,6 +626,8 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _read_or_empty(path: str) -> str:
+    # [FUNCTION DOC] HELPER: Returns the UTF-8 contents of path, or "" on OSError or
+    # UnicodeDecodeError.
     try:
         with open(path, encoding="utf-8") as f:
             return f.read()

@@ -1,3 +1,13 @@
+# [MODULE DOC] Standalone in-container verifier for runtime pipelines (pr_runtime, commit_runtime,
+# cve_patches). Parses the captured test log with a condensed stdlib port of
+# repo2rlenv.log_parsers (pytest, go test, cargo test, jest/mocha/vitest) into a {test name ->
+# PASSED/FAILED/SKIPPED/ERROR} map, then grades it against the baked FAIL_TO_PASS / PASS_TO_PASS
+# lists: reward = f2p_rate * p2p_rate (dense training signal), resolved = all F2P and all P2P pass
+# (strict SWE-bench), command_resolved = resolved and no untracked failures and exit code 0. If
+# the log yields no parsed tests, falls back to an exit-code reward. Writes reward.txt and reward-
+# details.json to --out-dir (default /logs/verifier) and prints the breakdown to stdout
+# (intentional for an in-container script). Side effects: file reads/writes, stdout. Patterns must
+# stay in sync with log_parsers/*.
 """In-container verifier for pr_runtime tasks (graded F2P/P2P reward).
 
 This module is the **standalone verifier** that runs inside the task's
@@ -87,6 +97,13 @@ _PYTEST_XDIST_PREFIX_RE = re.compile(rf"^\[gw\d+\]\s+(?:(?:{_PYTEST_PROGRESS})\s
 
 
 def parse_pytest(log: str) -> dict[str, str]:
+    # [FUNCTION DOC] Parses pytest output into {node id -> status}. Per non-empty stripped line:
+    # removes an xdist "[gwN] [progress]" prefix; if the line starts with a status word (summary
+    # form), records the rest (trimmed of " - message"; for folded "SKIPPED [N] file:line" lines,
+    # the second token i.e. the location) with that status; otherwise, if the first token contains
+    # "::" or ends in ".py", matches the verbose "NAME STATUS [(reason)] [progress]" form and
+    # records it when the name looks like a node id. Later lines overwrite earlier ones. Input:
+    # log str. Output: dict (empty for empty log).
     """{test_name -> status} from pytest output (verbose or summary)."""
     out: dict[str, str] = {}
     if not log:
@@ -131,6 +148,9 @@ _GO_STATUS = {"PASS": PASSED, "FAIL": FAILED, "SKIP": SKIPPED}
 
 
 def parse_go_test(log: str) -> dict[str, str]:
+    # [FUNCTION DOC] Parses `go test -v` output: each "--- PASS|FAIL|SKIP: Name" line (leading
+    # whitespace allowed, so subtests like Parent/Child are included) maps Name to
+    # PASSED/FAILED/SKIPPED. Output: dict.
     """{test_name -> status} from `go test -v` output."""
     out: dict[str, str] = {}
     if not log:
@@ -151,6 +171,11 @@ _CARGO_DOCTEST_RANK = {SKIPPED: 0, PASSED: 1, FAILED: 2}
 
 
 def parse_cargo_test(log: str) -> dict[str, str]:
+    # [FUNCTION DOC] Parses `cargo test` lines "test NAME ... ok|FAILED|ignored" into {name ->
+    # PASSED/FAILED/SKIPPED}. Strips trailing mode suffixes (" - should panic", " - compile fail",
+    # " - compile"). Doctest names "file - item (line N)" are keyed as "file - item" (or just
+    # "file"), and when several doctests collapse to one key the worst status wins (FAILED >
+    # PASSED > SKIPPED). Output: dict.
     """{test_name -> status} from `cargo test` output.
 
     Test modes (` - should panic`) are dropped from names, and doctests are
@@ -211,6 +236,12 @@ _VITEST_STATUS = {"✓": PASSED, "×": FAILED, "↓": SKIPPED, "□": SKIPPED}
 
 
 def _parse_mocha(log: str) -> dict[str, str]:
+    # [FUNCTION DOC] HELPER: Parses mocha spec-reporter output (no per-file headers). Tracks
+    # describe titles by indentation (lines indented >= 2 that are not tests push onto a suite
+    # stack, popping deeper or equal ones); test lines (pass glyph, "N)" failure, or "-" pending)
+    # are keyed as "suite > ... > title". After the "N passing (" epilogue, the numbered failure-
+    # detail list (indent 2, up to the "N failing" count) is skipped so it is not double-counted.
+    # Output: dict name -> status.
     """{test_name -> status} from mocha's spec reporter (no file header)."""
     out: dict[str, str] = {}
     suites: list[tuple[int, str]] = []
@@ -248,6 +279,10 @@ def _parse_mocha(log: str) -> dict[str, str]:
 
 
 def _parse_vitest(log: str) -> dict[str, str]:
+    # [FUNCTION DOC] HELPER: Parses vitest verbose reporter lines (glyph then "file > ... > test"
+    # with optional |project| or label prefix, duration, retry/repeat/heap/annotation suffixes).
+    # Skipped/todo glyphs keep a trailing duration in the name (it is part of the label then). Key
+    # is "|project| name" when a project/label is present. Output: dict name -> status.
     """{test_name -> status} from vitest `--reporter=verbose` lines only."""
     out: dict[str, str] = {}
     for raw in log.split("\n"):
@@ -263,6 +298,12 @@ def _parse_vitest(log: str) -> dict[str, str]:
 
 
 def parse_jest(log: str) -> dict[str, str]:
+    # [FUNCTION DOC] Parses JS test output after stripping ANSI codes. Dispatches to _parse_vitest
+    # if a vitest marker ("RUN vX.Y" or "Test Files N") is present, to _parse_mocha if a mocha
+    # marker is present and no jest PASS/FAIL file header exists; otherwise parses Jest:
+    # "PASS|FAIL <file>" headers reset context, glyph lines become "file > describe... > test"
+    # (stripping "skipped:"/"todo:" prefixes), and other non-summary lines indented less than the
+    # last test are treated as describe titles. Output: dict.
     """{test_name -> status} from Jest / Mocha / Vitest output."""
     out: dict[str, str] = {}
     if not log:
@@ -307,6 +348,9 @@ def parse_jest(log: str) -> dict[str, str]:
 
 
 def _detect_runner(test_cmds: str) -> str:
+    # [FUNCTION DOC] HELPER: Guesses the runner from the test command string (lowercased):
+    # "pytest" substring -> "pytest"; word "go test" -> "go"; "cargo test" -> "cargo";
+    # jest/mocha/vitest/npm|yarn|pnpm test -> "jest"; else "unknown".
     joined = test_cmds.lower()
     if "pytest" in joined:
         return "pytest"
@@ -320,6 +364,8 @@ def _detect_runner(test_cmds: str) -> str:
 
 
 def parse_logs(runner: str, log: str) -> dict[str, str]:
+    # [FUNCTION DOC] Dispatches to parse_pytest / parse_go_test / parse_cargo_test / parse_jest by
+    # runner name ("pytest"/"go"/"cargo"/"jest"); returns {} for any other runner. Output: dict.
     """Dispatch to the right per-runner parser. Empty dict if unknown."""
     if runner == "pytest":
         return parse_pytest(log)
@@ -336,6 +382,11 @@ def parse_logs(runner: str, log: str) -> dict[str, str]:
 # Grading
 # ---------------------------------------------------------------------------
 def _has_go_parent(name: str, status_map: dict[str, str]) -> bool:
+    # [FUNCTION DOC] HELPER: True if some ancestor of a Go subtest name (prefixes of its
+    # "/"-separated path) is FAILED in status_map. Used so a failed subtest under a failed parent
+    # counts once as untracked.
+    # KNOWN ISSUE: docstring says "has an ancestor represented in the status map", but the code
+    # returns True only when that ancestor's status is FAILED.
     """Return True if a Go test has an ancestor represented in the status map."""
     parts = name.split("/")
 
@@ -353,6 +404,15 @@ def grade(
     status_map: dict[str, str],
     runner: str | None = None,
 ) -> dict:
+    # [FUNCTION DOC] Computes the graded result. Inputs: fail_to_pass, pass_to_pass (lists of test
+    # names), status_map (name -> status), runner (optional; "go" enables parent-dedup of
+    # untracked failures). f2p_rate = passed F2P / total F2P (0.0 if no F2P); p2p_rate = passed
+    # P2P / total (1.0 if none); reward = product clamped to [0, 1] and rounded to 6 places;
+    # resolved = F2P non-empty and all F2P and P2P PASSED; regressions = P2P tests not PASSED
+    # (including missing); untracked_failed = FAILED tests in neither list (sorted, list capped at
+    # 20, full count kept). Output: dict with reward, resolved, f2p_total/passed/rate,
+    # p2p_total/passed/rate, regressions, untracked_failed_count, untracked_failed. No side
+    # effects.
     """Compute the graded reward + strict resolved bool from a status map.
 
     f2p_rate   = (# F2P now PASSED) / (# F2P)
@@ -427,6 +487,8 @@ def grade(
 
 
 def _read_json_list(path: str) -> list[str]:
+    # [FUNCTION DOC] HELPER: Loads a JSON file and returns its elements stringified if it is a
+    # list, else []; OS or JSON errors -> [].
     try:
         with open(path, encoding="utf-8") as f:
             data = json.load(f)
@@ -436,6 +498,7 @@ def _read_json_list(path: str) -> list[str]:
 
 
 def _read_text(path: str) -> str:
+    # [FUNCTION DOC] HELPER: Returns UTF-8 file contents, or "" on OSError/UnicodeDecodeError.
     try:
         with open(path, encoding="utf-8") as f:
             return f.read()
@@ -444,6 +507,14 @@ def _read_text(path: str) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # [FUNCTION DOC] CLI entry point. Args: --log, --f2p, --p2p (required paths), --runner (blank
+    # -> auto-detect from --test-cmds), --test-cmds, --exit-code (int, default 1), --out-dir
+    # (default /logs/verifier). Parses the log; if no statuses: reward = 1.0 iff exit code 0,
+    # resolved only when exit 0 and no F2P oracle declared, eval_trustworthy = no oracle,
+    # parse_status "fallback_exitcode". Otherwise uses grade() plus parse_status "ok", runner,
+    # tests_parsed, exit_code, and command_resolved (resolved and no untracked failures and exit
+    # 0). Side effects: creates out-dir, writes reward.txt (6 decimals) and reward-details.json,
+    # prints JSON to stdout. Output: 0 (argparse exits 2 on bad args).
     p = argparse.ArgumentParser(description="pr_runtime graded F2P/P2P verifier")
     p.add_argument("--log", required=True, help="captured test-run log file")
     p.add_argument("--f2p", required=True, help="JSON file: FAIL_TO_PASS test names")
