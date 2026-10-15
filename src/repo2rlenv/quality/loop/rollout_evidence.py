@@ -1,3 +1,7 @@
+# [MODULE DOC] Builds deterministic, reviewer-facing evidence documents from a Harbor trial
+# directory: the agent's recorded tool calls and a diff of the Python source the solver actually
+# submitted (captured artifacts) against the task's baseline source. Edits are never inferred from
+# the solver's prose. Depends only on stdlib plus quality.loop.artifacts.digest (file sha256 hex).
 """Deterministic reviewer evidence from captured commands and submitted source."""
 
 from __future__ import annotations
@@ -10,6 +14,23 @@ from repo2rlenv.quality.loop.artifacts import digest
 
 
 def rollout_documents(task: Path, trial: Path) -> dict[str, str]:
+    # [FUNCTION DOC] Produces a mapping of document name to text content for one rollout trial.
+    # Inputs: task (task bundle dir; baseline source read from task/environment/source), trial
+    # (Harbor trial dir). Output: dict that may contain 'tool-calls.jsonl' (first row: trajectory
+    # sha256 and step count, then one row per tool call merged with its step_id, from
+    # agent/trajectory.json), 'submission-index.json' (manifest sha256 plus a list of changed paths
+    # with before/after sha256, or 'collection_<status>' entries for failed collections) and
+    # 'submitted-source.diff' (concatenated unified diffs baseline/<path> -> submitted/<path>, or a
+    # placeholder line when no differences). Only manifest entries whose source starts with
+    # /workspace/ and whose service is None or 'main' are considered; for 'directory' entries every
+    # *.py file in either side is compared, for 'file' entries only that file (and only when it ends
+    # in .py). Unchanged files are skipped. Raises ValueError when the trajectory or manifest
+    # resolves outside the trial, is a symlink or is too large (16 MiB trajectory, 2 MiB manifest),
+    # when an artifact path is absolute or contains '..', or when a compared source is linked,
+    # escapes its root, is not a regular file or exceeds 2 MiB. Side effects: reads files only.
+    # KNOWN ISSUE: source bytes are decoded with strict UTF-8, so a non-UTF-8 .py file raises an
+    # unhandled UnicodeDecodeError instead of the ValueError used for every other contract
+    # violation.
     """Produce addressable documents; never infer edits from a solver's prose."""
     documents = {}
     trajectory = trial / "agent/trajectory.json"

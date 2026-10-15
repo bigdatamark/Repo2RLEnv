@@ -1,3 +1,7 @@
+# [MODULE DOC] Independent LLM review of instruction/verifier alignment for a task bundle, run
+# before blind rollouts. Sends the learner-visible instruction plus private evidence (task.toml and
+# behavioral evidence) to a model under a strict system prompt and parses a structured
+# SpecificationReview. Cost is metered via campaigns.llm.metered_complete against a BudgetLedger.
 """Independent instruction/verifier alignment review before blind rollouts."""
 
 from __future__ import annotations
@@ -15,6 +19,8 @@ from repo2rlenv.spec.input import LLMSpec
 
 
 class Finding(BaseModel):
+    # [CLASS DOC] One criterion verdict: status (pass/fail/unknown), non-empty explanation and non-
+    # empty evidence excerpt/reference. Extra fields forbidden.
     model_config = ConfigDict(extra="forbid")
     status: Literal["pass", "fail", "unknown"]
     explanation: str = Field(min_length=1)
@@ -22,6 +28,9 @@ class Finding(BaseModel):
 
 
 class SpecificationReview(BaseModel):
+    # [CLASS DOC] Structured review result with four Findings (clarity, verifier_alignment,
+    # answer_leakage, reference_validity) and a list of actionable_repairs. Also used as the
+    # response JSON schema sent to the model.
     model_config = ConfigDict(extra="forbid")
     clarity: Finding
     verifier_alignment: Finding
@@ -31,6 +40,8 @@ class SpecificationReview(BaseModel):
 
     @property
     def passed(self) -> bool:
+        # [FUNCTION DOC] Property: True when there are no actionable repairs and all four findings
+        # have status 'pass' (unknown counts as not passed).
         return not self.actionable_repairs and all(
             getattr(self, field).status == "pass"
             for field in ("clarity", "verifier_alignment", "answer_leakage", "reference_validity")
@@ -75,6 +86,16 @@ def review_specification(
     reservation_usd: str = "0.50",
     resume: bool = False,
 ) -> SpecificationReview:
+    # [FUNCTION DOC] Runs the specification review for one task. Inputs: task (bundle dir),
+    # behavioral_evidence (dict included as private evidence), model (LLMSpec), ledger
+    # (BudgetLedger), receipt (path for the metered call receipt), operation_id, reservation_usd
+    # (budget reservation, default '0.50'), resume (reuse a recorded call). Checks bundle integrity
+    # via inspect_bundle, builds a JSON context (bundle_hash, learner_visible instruction.md,
+    # private task.toml and evidence), calls metered_complete with the _SYSTEM prompt, max_tokens
+    # 4096 and the review schema. Output: SpecificationReview parsed from the response. Raises
+    # ValueError if integrity fails or the context exceeds 150,000 characters; pydantic
+    # ValidationError on a malformed response; budget errors from the ledger. Side effects: LLM
+    # network call, spend accounting, receipt file.
     identity = inspect_bundle(task)
     if not identity["integrity_passed"]:
         raise ValueError("Task identity changed before specification review")

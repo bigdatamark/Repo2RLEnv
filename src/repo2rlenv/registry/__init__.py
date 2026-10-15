@@ -1,3 +1,11 @@
+# [PACKAGE DOC] Image registry support for `repo2rlenv push`: pushes bootstrap Docker images to
+# GHCR, ECR (private/public), ACR, GCP Artifact Registry or Docker Hub over the OCI distribution
+# spec so published tasks can reference a pullable digest. Submodules: auth (file-level discovery of
+# docker logins), probe (L1-L4 verification of a registry), push (docker push wrapper + digest),
+# visibility (GHCR package visibility), ecr/gar (vendor repository pre-creation), naming (image slug
+# and tag construction) and integration (the push-time orchestration). Re-exports the auth types and
+# helpers plus naming's DEFAULT_BOOTSTRAP_PREFIX, build_image_ref and slugify_repo.
+# Note: the referenced plans/ design doc is gitignored and may not exist in a clone.
 """Image registry support for `repo2rlenv push`.
 
 Unifies push to GHCR / ECR (private + public) / ACR / GCP AR / Docker Hub via

@@ -1,3 +1,12 @@
+# [MODULE DOC] The bounded, resumable quality loop (QualityLoop) that reviews a Harbor task with an
+# LLM, optionally executes controls (baseline/oracle), semantic probes (wrong_solution and
+# valid_alternative variants) and a blind rollout through an injected trial runner, and optionally
+# authors bounded repairs that produce new task revisions. All model calls are metered through a
+# RunBudget/BudgetLedger; every intermediate artifact (reviews, inventories, protocol corrections,
+# revisions, probes, run.json receipt, result.json) is persisted under the loop's output directory
+# so a run can be resumed with identical configuration. Also exposes the pure helper checks
+# (required_probe_focus, control_failures, probe_failures, validate_rollout_outcome) used both here
+# and by callers. At the end a quality label is published via quality.loop.publication.
 """A bounded, resumable quality loop with injectable model and trial adapters."""
 
 from __future__ import annotations
@@ -53,6 +62,12 @@ from repo2rlenv.quality.loop.requirements import task_probe_focus
 
 
 def required_probe_focus(task: Path) -> set[str]:
+    # [FUNCTION DOC] Returns the set of probe-focus requirement names that a task demands wrong-
+    # solution probes for. Starts from the explicitly recorded focus (requirements.task_probe_focus)
+    # and adds 'lazy_output' when the lower-cased instruction.md mentions generator/lazy output
+    # language, and 'numeric_tolerance' when it mentions absolute/relative error or numeric
+    # tolerance (regexes). Input: task dir. Output: set[str]. Raises: file errors if instruction.md
+    # is missing. Reads only.
     """Narrow explicit contracts learned from actual pilot false acceptances."""
     instruction = (task / "instruction.md").read_text().lower()
     focus: set[str] = set(task_probe_focus(task))
@@ -74,6 +89,11 @@ def required_probe_focus(task: Path) -> set[str]:
 
 
 def control_failures(trials: list[TrialRecord], success: float) -> list[str]:
+    # [FUNCTION DOC] Checks the baseline and oracle control trials. For each role, uses the latest
+    # trial with that role; reports 'Missing <role> execution evidence' if none, '<role> did not
+    # execute cleanly' if it has an exception, a non-zero agent exit code or no reward, and a
+    # contrast violation if the oracle reward != success or the baseline reward >= success. Inputs:
+    # trials (list[TrialRecord]), success (reward threshold). Output: list of failure strings.
     failures = []
     for role in ("baseline", "oracle"):
         records = [item for item in trials if item.role == role]
@@ -91,6 +111,11 @@ def control_failures(trials: list[TrialRecord], success: float) -> list[str]:
 
 
 def probe_failures(trials: list[TrialRecord], success: float) -> list[str]:
+    # [FUNCTION DOC] Checks every 'probe' trial: reports an install/execution failure when the probe
+    # was not installed, raised, exited non-zero or has no reward; reports a semantic failure when a
+    # valid_alternative did not earn exactly success or a wrong_solution earned >= success;
+    # otherwise appends any probe_behavior.behavioral_failure diagnosis. Inputs: trials, success
+    # threshold. Output: list of failure strings (empty means all probes behaved). No side effects.
     failures = []
     for trial in trials:
         if trial.role != "probe":
@@ -112,6 +137,12 @@ def probe_failures(trials: list[TrialRecord], success: float) -> list[str]:
 
 
 def validate_rollout_outcome(review: Review, trials: list[TrialRecord], success: float) -> None:
+    # [FUNCTION DOC] Verifies that a review's legitimate_success/legitimate_failure rollout label is
+    # backed by the latest 'rollout' trial; other labels are accepted without checks. Raises
+    # ValueError when there is no rollout trial, when the latest rollout has no reward or an
+    # exception other than AgentTimeoutError, or when the label disagrees with (reward >= success).
+    # Messages cite the evidence path evidence/<index>-rollout/result.json. Output: None. No side
+    # effects.
     """A legitimate outcome must agree with the latest supplied solver reward."""
     if review.rollout not in {"legitimate_success", "legitimate_failure"}:
         return
@@ -141,6 +172,11 @@ def validate_rollout_outcome(review: Review, trials: list[TrialRecord], success:
 def _reusable_probe_trial(
     trial: TrialRecord, probe: SemanticProbe, parent_hash: str, success: float
 ) -> bool:
+    # [FUNCTION DOC] HELPER: Decides whether an existing probe trial can be reused for the given
+    # probe on a task revision. Returns False unless the trial is a probe trial for exactly this
+    # probe with no probe_failures; then runs quality.labels._trial_evidence(trial, parent_hash)
+    # (raw result, completion marker, receipt and parent-hash checks) and returns True. Raises:
+    # whatever _trial_evidence raises (ValueError-style) when the evidence is not trustworthy.
     if trial.role != "probe" or trial.probe != probe or probe_failures([trial], success):
         return False
     # Use the publication gate's raw-result, completion-marker, controller
@@ -152,6 +188,13 @@ def _reusable_probe_trial(
 
 
 class QualityLoop:
+    # [CLASS DOC] Orchestrates review -> controls -> probes -> rollout -> repair over task
+    # revisions, independently of how the task was generated. Task code runs only through the
+    # injected trial_runner (methods run(task, role, key) -> TrialRecord, close(), optional
+    # identity()); the model adapter exposes ask(schema, model, system, user, key). Instance state:
+    # options (LoopOptions), directory (resolved output dir), protected_paths, task_context, budget
+    # (RunBudget), model, remote (trial runner or None) and on_event callback. Use run() as the
+    # entry point.
     """Generation-independent component; task code runs only through trial_runner.
 
     Adapters implement model_client.ask(schema, model, system, user, key) and
@@ -172,6 +215,14 @@ class QualityLoop:
         trial_runner=None,
         on_event: Callable[[ProgressEvent], None] | None = None,
     ):
+        # [FUNCTION DOC] Configures the loop. Inputs: options (LoopOptions), directory (output dir,
+        # resolved), ledger (BudgetLedger used to build a RunBudget when budget is None, with a
+        # prefix of 'quality-' + first 16 hex chars of sha256(directory) and options.max_spend_usd),
+        # budget (optional RunBudget), protected_paths (task-relative paths repairs must not touch),
+        # task_context (optional dict added to the review context), model_client (default JsonModel
+        # caching calls under directory/calls with options' reservation and token limits),
+        # trial_runner (optional remote executor), on_event (progress callback, default no-op). No
+        # filesystem side effects here.
         self.options, self.directory = options, directory.resolve()
         self.protected_paths = tuple(Path(value) for value in protected_paths)
         self.task_context = task_context
@@ -187,11 +238,20 @@ class QualityLoop:
         self.on_event = on_event or (lambda event: None)
 
     def event(self, stage: str, message: str, *, state: str = "progress"):
+        # [FUNCTION DOC] Emits a ProgressEvent (recipe='quality', given stage/state/message):
+        # appends it to directory/events.jsonl via EventJournal and forwards it to on_event. Returns
+        # None.
         event = ProgressEvent(recipe="quality", stage=stage, state=state, message=message)
         EventJournal(self.directory / "events.jsonl").emit(event)
         self.on_event(event)
 
     def _context(self, task, trials, **extra):
+        # [FUNCTION DOC] HELPER: Builds the EvidenceContext shown to the reviewer/repairer. Raises
+        # ValueError if any non-probe trial's bundle_hash differs from the task identity. Adds the
+        # task_context (moving campaign_design_guidance first) as evidence/task-context.json bounded
+        # to min(32000, context_chars // 4), and writes evidence/checks.json containing
+        # control_failures, probe_failures and any extra keyword fields. Output: the
+        # EvidenceContext.
         identity = task_identity(task)
         if any(trial.bundle_hash != identity for trial in trials if trial.role != "probe"):
             raise ValueError("Execution evidence belongs to another task revision")
@@ -229,6 +289,20 @@ class QualityLoop:
         existing_probes: list[SemanticProbe] | None = None,
         revision: int = 0,
     ):
+        # [FUNCTION DOC] HELPER: Obtains a validated, grounded Review from the model with bounded
+        # retries. Inputs: task, trials, key (record name), probe_limit (max new probes), prior
+        # (previous review), existing_probes, revision. Computes uninstalled probes
+        # (failed_installations) and nonbehavioral probes, builds the context, saves an inventory
+        # under inventories/<key>.json, and determines the still-needed probe focus/kinds. Loops
+        # max_read_rounds+1 times (plus one extra call on the escalation_model if configured): asks
+        # the model, resolves JSON/markdown citations (saving corrections under protocol/),
+        # validates citations, serves read_requests and retries, validates the rollout outcome,
+        # normalizes duplicate probes, enforces the probe limit, required focus and control kinds
+        # when the review is sound, and requires grounded probe diagnoses for uninstalled and
+        # nonbehavioral probes. Validation errors become feedback for the next call. Output:
+        # (Review, EvidenceContext); also saved to reviews/<key>.json. Raises ValueError when no
+        # call produced an acceptable review. Side effects: model calls (budget), files, progress
+        # events.
         uninstalled = failed_installations(task, trials)
         nonbehavioral = [
             {
@@ -382,6 +456,22 @@ class QualityLoop:
         probe_history=(),
         immutable_probe_names=(),
     ):
+        # [FUNCTION DOC] HELPER: Asks the repair model (repair_model or review_model) for one Repair
+        # and applies it to produce revision r<revision+1>; allows exactly one correction call after
+        # a failure. Inputs: task, review, context, probes (retained), revision, reasons (failure
+        # list), probe_history and immutable_probe_names (constrain which wrong_solution probes may
+        # be replaced). Computes a probe replacement policy (valid alternatives only with a probe
+        # diagnosis; wrong solutions only with replacement_evidence for a failed installation).
+        # Validation: normalizes verifier paths, rejects edits to protected paths, rejects task
+        # edits justified only by invalid probes, checks probe replacements (diagnosis required, no
+        # duplicates, same name/kind/focus, evidence unchanged, script must change, citations must
+        # be exact quotes from documents), verifies stored revisions match on resume, rejects
+        # repairs that remove explicit probe focus, and records wrong-solution replacement
+        # authorization. On a first failure it records feedback and fetches real source excerpts
+        # (cited document, edited files) into the context before retrying. Output: (destination
+        # revision dir, updated probe list). Raises ValueError/FileNotFoundError/ FileExistsError on
+        # the second failure; RuntimeError for the unreachable fallthrough. Side effects: model
+        # calls, writes under revisions/ and protocol/, progress events.
         feedback = []
         previous_repair = None
         probe_diagnosis = any(issue.category == "probe" for issue in review.issues)
@@ -635,6 +725,13 @@ class QualityLoop:
         probes: Path | None = None,
         resume: bool = False,
     ) -> LoopResult:
+        # [FUNCTION DOC] Public entry point: runs the quality loop on a task directory. Inputs: task
+        # (task dir), optional baseline/oracle/rollout existing trial dirs to import, probes
+        # (optional ProbeManifest JSON file), resume (allow continuing an existing run with
+        # identical configuration). Raises ValueError if the output directory is the task or inside
+        # it, RuntimeError if another process holds directory/.lock (non-blocking file lock). Always
+        # closes the remote trial runner afterwards. Output: LoopResult from _run. Side effects:
+        # creates the output directory.
         task = task.absolute()
         if self.directory == task or self.directory.is_relative_to(task):
             raise ValueError("Quality output must be outside the input task")
@@ -651,6 +748,23 @@ class QualityLoop:
                     self.remote.close()
 
     def _run(self, source, baseline, oracle, rollout, probe_file, resume):
+        # [FUNCTION DOC] HELPER: The loop body. Validates known probes (matching hash, within
+        # max_probes), imports supplied trials, builds a configuration record (paths, options,
+        # evidence, prompts hashes, execution identity, ledger path) and writes/validates the
+        # run.json receipt (an existing receipt requires resume with identical configuration, else
+        # ValueError). Snapshots the source to revisions/r0. For each revision up to max_repairs:
+        # parses the task; if executing remotely requires a single-container no-network task; runs
+        # missing baseline/oracle controls; reviews; adopts proposed probes up to max_probes; when
+        # controls pass runs (or reuses) each probe variant and, if sound with clean probes, a blind
+        # rollout; re-reviews after new evidence (and after a late rollout). Then classifies:
+        # 'usable' when sound, no failures, a legitimate rollout outcome, both probe kinds and all
+        # required focus covered; 'reviewed' when sound but evidence incomplete; 'needs_evidence' or
+        # 'needs_repair' otherwise, repairing via _repair when enabled (keeping reusable probe
+        # trials only if the bundle hash is unchanged). BudgetExceeded maps to 'budget_exhausted';
+        # ValueError, FileNotFoundError and ModelRequestError map to 'needs_evidence'. Raises
+        # ValueError if the original task changed. Writes result.json, updates run.json, publishes a
+        # label (publication.publish_label) and emits label/result events. Output: LoopResult (with
+        # budget totals).
         source_hash = task_identity(source)
         known_probes = (
             ProbeManifest.model_validate_json(probe_file.read_text()) if probe_file else None

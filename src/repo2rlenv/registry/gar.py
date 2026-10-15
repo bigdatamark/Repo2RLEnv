@@ -1,3 +1,5 @@
+# [MODULE DOC] GCP Artifact Registry helper that idempotently pre-creates the docker repository a
+# push targets, by shelling out to `gcloud` (avoids a google-cloud SDK dependency). Mirrors ecr.py.
 """GCP Artifact Registry helper: pre-create a repository before push.
 
 Same shape as `ecr.py` — the AR repository must exist before push will
@@ -16,11 +18,15 @@ logger = logging.getLogger(__name__)
 
 
 class GARError(Exception):
+    # [CLASS DOC] Raised when a GAR ref cannot be parsed, gcloud is missing, or repository creation
+    # fails.
     """Raised when a GCP AR API call fails irrecoverably."""
 
 
 @dataclass(slots=True)
 class GARRepoResult:
+    # [CLASS DOC] Result of ensure_gar_repository: project, location, repo and whether this call
+    # created the repository.
     project: str
     location: str
     repo: str
@@ -28,10 +34,15 @@ class GARRepoResult:
 
 
 def _gcloud_available() -> bool:
+    # [FUNCTION DOC] HELPER: True if a `gcloud` executable is on PATH.
     return shutil.which("gcloud") is not None
 
 
 def _parse_gar_ref(remote_ref: str) -> tuple[str, str, str, str] | None:
+    # [FUNCTION DOC] HELPER: Parses
+    # '<location>-docker.pkg.dev/<project>/<repo>/<image>[:tag|@digest]' into (location, project,
+    # repo, image). Returns None if the host lacks '-docker.pkg.dev', the location is empty, or
+    # fewer than three path components follow the host.
     """Return (location, project, repo, image) for a GAR ref, or None.
 
     Form: `<location>-docker.pkg.dev/<project>/<repo>/<image>[:<tag>]`
@@ -51,6 +62,12 @@ def _parse_gar_ref(remote_ref: str) -> tuple[str, str, str, str] | None:
 
 
 def ensure_gar_repository(remote_ref: str) -> GARRepoResult:
+    # [FUNCTION DOC] Ensures the GAR docker repository for remote_ref exists. Parses the ref,
+    # requires gcloud, runs 'gcloud artifacts repositories describe' (30s timeout) and, on failure,
+    # 'create --repository-format=docker' (120s timeout) for the parsed location/project. Output:
+    # GARRepoResult (created False/True). Raises GARError on unparsable ref, missing CLI or failed
+    # create; a subprocess timeout may propagate. Side effects: GCP API calls via subprocess; may
+    # create a repository.
     """Idempotent: ensure the GAR docker repository exists."""
     parsed = _parse_gar_ref(remote_ref)
     if parsed is None:

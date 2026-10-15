@@ -1,3 +1,8 @@
+# [MODULE DOC] Narrow static (AST-only) check that rejects Tasksmith behavioral verifier tests which
+# grade by reading implementation source text (inspect.getsource/getsourcelines, or opening/ reading
+# a module's __file__) instead of exercising behavior. Not a completeness or reward-hacking proof;
+# runtime controls and semantic review remain responsible for that. TASKSMITH_BEHAVIOR_PATH names
+# the bundle-relative location of the checked test file.
 """Reject common source-text grading mistakes in Tasksmith's behavioral tests.
 
 This narrow static check is not a completeness or reward-hacking proof. Runtime
@@ -12,6 +17,9 @@ TASKSMITH_BEHAVIOR_PATH = "tests/source/tests/tasksmith_behavior.py"
 
 
 def _is_module_path(node: ast.AST) -> bool:
+    # [FUNCTION DOC] HELPER: Returns True when an AST expression denotes a module's source path: an
+    # attribute access of __file__, or a single-argument call to Path/PurePath/PurePosixPath/str/
+    # fspath (by name or attribute) wrapping such an expression (recursively). Otherwise False.
     if isinstance(node, ast.Attribute) and node.attr == "__file__":
         return True
     if isinstance(node, ast.Call) and len(node.args) == 1:
@@ -28,6 +36,13 @@ def _is_module_path(node: ast.AST) -> bool:
 
 
 def check_behavioral_verifier(source: str) -> None:
+    # [FUNCTION DOC] Statically validates generated behavioral test source without importing it.
+    # Input: source (Python text). Output: None. Raises ValueError for invalid Python (with line and
+    # message), or for any call that inspects source (getsource/getsourcelines imported from
+    # inspect, or called on an imported inspect module alias) or that reads a file (open, .open,
+    # .read_text, .read_bytes) whose positional argument, 'file' keyword or receiver is a module
+    # path per _is_module_path; the message names the line and advises asserting observable
+    # behavior.
     """Parse generated tests without importing or executing repository code."""
     try:
         tree = ast.parse(source)

@@ -1,3 +1,11 @@
+# [MODULE DOC] Push-time orchestration between the registry primitives and hub.push_to_hub: discover
+# logins -> probe/verify -> select a registry -> push each distinct bootstrap image -> rewrite each
+# task's environment/Dockerfile FROM line and task.toml reproducibility metadata in place. Policy:
+# registry mode when a verified registry exists; otherwise inline-Dockerfile mode (bake a clean
+# rebuild recipe from the bootstrap cache) with a warning, or a hard error when require_registry is
+# set. Self-contained Dockerfiles on known public bases skip the image step. Does not upload to the
+# Hub. Entry point: prepare_dataset_for_push.
+# Note: the trailing module-level _t_start assignment/deletion is a no-op.
 """Orchestration: discover → verify → select → push → rewrite tasks.
 
 This module is the integration glue between the pure `registry/` primitives
@@ -42,6 +50,10 @@ ReproMode = Literal["registry", "inline_dockerfile", "local_only"]
 
 @dataclass(slots=True)
 class PrepareResult:
+    # [CLASS DOC] Summary returned by prepare_dataset_for_push: chosen mode (registry /
+    # inline_dockerfile / local_only), number of tasks rewritten, selected registry host/namespace,
+    # representative image remote ref and digest, visibility, whether any image was actually pushed,
+    # fallback reason, inline recipe source and sha256, all probe results and warnings.
     """What `prepare_dataset_for_push` produces. Hub upload is a separate step."""
 
     mode: ReproMode
@@ -68,6 +80,9 @@ _FROM_LINE_RE = re.compile(r"^(\s*FROM\s+)(\S+)", re.IGNORECASE | re.MULTILINE)
 
 
 def _list_task_dirs(local_dir: Path) -> list[Path]:
+    # [FUNCTION DOC] HELPER: Lists Harbor task dirs (non-hidden subdirs containing task.toml) both
+    # directly under local_dir and under local_dir/tasks. Output: list sorted by task name. Raises
+    # RuntimeError when the same task name appears in both layouts.
     """Return task directories from flat or ``tasks/`` dataset layouts.
 
     A dataset may contain tasks directly under its root or under the canonical
@@ -95,6 +110,8 @@ def _list_task_dirs(local_dir: Path) -> list[Path]:
 
 
 def _bootstrap_image_refs(task_dirs: list[Path]) -> list[tuple[str, Path]]:
+    # [FUNCTION DOC] HELPER: For each task with environment/Dockerfile, returns (first FROM image
+    # ref, Dockerfile path); tasks without a Dockerfile or FROM line are skipped. Reads files.
     """For each task with environment/Dockerfile, return (FROM-ref, dockerfile_path).
 
     Tasks without `environment/` (e.g. pr_diff lite tasks) are skipped.
@@ -112,6 +129,10 @@ def _bootstrap_image_refs(task_dirs: list[Path]) -> list[tuple[str, Path]]:
 
 
 def _distinct_local_images(refs: list[tuple[str, Path]]) -> set[str]:
+    # [FUNCTION DOC] HELPER: Returns the set of refs that look local (start with 'local/', 'local-'
+    # or 'localhost').
+    # KNOWN ISSUE: its comment claims refs without a registry host are also treated as local, but
+    # that is not implemented; the function is also unused in this module.
     """Set of bootstrap images that look local (un-pullable)."""
     locals_: set[str] = set()
     for ref, _ in refs:
@@ -143,6 +164,8 @@ _PUBLIC_DOCKER_HUB_BASES: tuple[str, ...] = (
 
 
 def _is_public_base_image(ref: str) -> bool:
+    # [FUNCTION DOC] HELPER: True if ref is an unqualified (or docker.io/library/-prefixed) Docker
+    # Hub base from the _PUBLIC_DOCKER_HUB_BASES allowlist (python:, node:, golang:, ...).
     """True if `ref` is a known-public base that consumers can pull anonymously.
 
     Conservative on purpose: only the unqualified `library/` Docker Hub bases
@@ -163,6 +186,9 @@ def _is_public_base_image(ref: str) -> bool:
 
 
 def _build_namespace_for(auth: RegistryAuth, hf_owner: str) -> str:
+    # [FUNCTION DOC] HELPER: Chooses the push namespace for a registry auth: lower-cased HF owner
+    # for GHCR and unknown kinds; 'r2e' for ECR, ACR, GCP AR and local registries; for Docker Hub,
+    # $DOCKER_USERNAME, else $DOCKERHUB_USERNAME, else the HF owner (lower-cased). Reads env vars.
     """Choose the target namespace for a given registry auth + HF owner."""
     if auth.kind is RegistryKind.GHCR:
         # Try HF owner first; caller may retry under gh-login-user on permission denied.
@@ -192,6 +218,8 @@ def _build_namespace_for(auth: RegistryAuth, hf_owner: str) -> str:
 
 
 def _registry_prefix_for(auth: RegistryAuth, namespace: str) -> str:
+    # [FUNCTION DOC] HELPER: Builds '<host>/<namespace>' for an auth, using index.docker.io as the
+    # host for Docker Hub. Equivalent to _registry_prefix_for_kind; unused in this module.
     """Build the `<host>/<namespace>` prefix used by build_image_ref."""
     if auth.kind in (RegistryKind.ECR_PRIVATE, RegistryKind.ECR_PUBLIC, RegistryKind.ACR):
         return f"{auth.host}/{namespace}"
@@ -210,6 +238,13 @@ def _select_verified_registry(
     explicit_prefix: str | None,
     require_registry: bool,
 ) -> tuple[ProbeResult | None, str, list[ProbeResult]]:
+    # [FUNCTION DOC] HELPER: Discover -> probe -> select. With explicit_prefix 'host[/namespace]'
+    # (namespace defaults to the lower-cased hf_owner) it probes only that host, using a discovered
+    # auth or a synthesized EMPTY-credential stub, and returns it only if pushable. Otherwise it
+    # probes every discovered known registry except Docker Hub (rate-limit hazard) with
+    # _build_namespace_for and picks probe.select_best. Output: (selected ProbeResult or None,
+    # namespace, all probe results). Side effects: reads docker config, network probes.
+    # KNOWN ISSUE: the require_registry parameter is accepted but never used.
     """Discover → probe → select. Returns (selected, namespace, all_probes).
 
     If `explicit_prefix` is given, we probe only that registry. Otherwise we
@@ -262,6 +297,10 @@ def _select_verified_registry(
 
 
 def _parse_local_tag(local_tag: str) -> tuple[str, str, str]:
+    # [FUNCTION DOC] HELPER: Parses a local bootstrap image ref into (owner, name, sha). Handles
+    # '.../owner__name:sha', '.../owner__name:sha__opts' (sha also cut at '-') and
+    # '.../owner__name@sha256:hex' (first 12 hex chars). The last path component is split on '__';
+    # without '__' owner is '_' and name is the whole component.
     """From `local/r2e-bootstrap/owner__name:sha[__opts]` return (owner, name, sha).
 
     Tolerates three input forms:
@@ -299,6 +338,8 @@ def _parse_local_tag(local_tag: str) -> tuple[str, str, str]:
 
 
 def _rewrite_dockerfile_from(df_path: Path, new_ref: str) -> bool:
+    # [FUNCTION DOC] HELPER: Replaces the image of the first FROM line in df_path with new_ref,
+    # writing the file. Returns True if the content changed, False otherwise.
     """Rewrite the first `FROM <ref>` line. Returns True if a change was made."""
     content = df_path.read_text(encoding="utf-8", errors="replace")
     new_content, n = _FROM_LINE_RE.subn(rf"\g<1>{new_ref}", content, count=1)
@@ -321,6 +362,12 @@ def _update_task_toml_reproducibility(
     inline_recipe_source: str | None = None,
     fallback_reason: str | None = None,
 ) -> None:
+    # [FUNCTION DOC] HELPER: Rewrites a task.toml in place: sets metadata.repo2env.spec_version to
+    # '0.2.0' and replaces metadata.repo2env.reproducibility with mode, image ref/tag/visibility,
+    # pushed_at (current UTC ISO time), pushed_by, inline recipe sha256/lines/source and
+    # fallback_reason, dropping None values. If image_ref is set, also updates bootstrap_image in
+    # the pipeline's own subtable (metadata.repo2env.<pipeline>). Uses tomllib to parse and tomli_w
+    # to write (comments/formatting in the file are lost). Returns None.
     """Patch the [metadata.repo2env.reproducibility] subtable + bump spec_version.
 
     Uses a hand-built tomllib roundtrip (parse → mutate dict → re-serialize)
@@ -358,6 +405,7 @@ def _update_task_toml_reproducibility(
 
 
 def _hash_text(s: str) -> str:
+    # [FUNCTION DOC] HELPER: Returns 'sha256:' + hex sha256 of the UTF-8 encoded string.
     import hashlib
 
     return "sha256:" + hashlib.sha256(s.encode("utf-8")).hexdigest()
@@ -366,6 +414,13 @@ def _hash_text(s: str) -> str:
 def _finalize_self_contained_tasks(
     task_dirs: list[Path], *, image_ref: str, pushed_by: str | None
 ) -> int:
+    # [FUNCTION DOC] HELPER: For tasks whose Dockerfile builds from a known public base, rewrites
+    # task.toml reproducibility to mode inline_dockerfile, visibility public, image_ref/tag =
+    # image_ref, recipe source user_dockerfile with the Dockerfile's hash and line count. Tasks
+    # missing task.toml or Dockerfile are skipped. Output: number of tasks rewritten.
+    # KNOWN ISSUE: every Dockerfile task gets the same image_ref (the caller's representative ref),
+    # so in a dataset mixing bases each task is labelled with the first sorted ref rather than its
+    # own.
     """Rewrite reproducibility metadata for self-contained Dockerfile tasks.
 
     The emitter seeds every Dockerfile-bearing task with
@@ -418,6 +473,20 @@ def prepare_dataset_for_push(
     pushed_by: str | None = None,
     on_message=None,
 ) -> PrepareResult:
+    # [FUNCTION DOC] Prepares a local dataset for Hub upload by choosing a reproducibility mode and
+    # rewriting tasks in place. Inputs: local_dir, hf_owner (default registry namespace),
+    # image_registry (explicit 'host[/ns]' to probe), inline_dockerfile (force inline mode),
+    # require_registry (fail instead of falling back), skip_image_push (reuse computed remote refs),
+    # image_visibility ('inherit' follows dataset_is_private), pushed_by (recorded in metadata),
+    # on_message (optional callback; exceptions from it are swallowed; messages are also logged at
+    # INFO). Flow: no Dockerfiles -> PrepareResult(local_only, 0). If the representative (first
+    # sorted) FROM ref is not local-looking and is a known public base -> self-contained inline
+    # result. If inline_dockerfile -> _go_inline. Else select a verified registry; none ->
+    # RuntimeError when require_registry, otherwise _go_inline with a fallback reason; found ->
+    # _go_registry. Output: PrepareResult. Side effects: rewrites Dockerfiles/task.toml, docker
+    # pushes, network probes.
+    # KNOWN ISSUE: the public-base fast path is decided from only the first sorted ref, so a dataset
+    # mixing public-base and local bootstrap images can skip pushing the local ones.
     """Run the §7.2 push-time flow: discover → verify → select → push → rewrite.
 
     Mutates `local_dir` in-place by rewriting each task's
@@ -428,6 +497,8 @@ def prepare_dataset_for_push(
     """
 
     def _emit(msg: str) -> None:
+        # [FUNCTION DOC] HELPER: Logs msg at INFO and forwards it to on_message if given, ignoring
+        # any exception the callback raises.
         logger.info(msg)
         if on_message:
             try:
@@ -556,6 +627,15 @@ def _go_inline(
     pushed_by: str | None,
     on_message,
 ) -> PrepareResult:
+    # [FUNCTION DOC] HELPER: Inline mode. For every (ref, Dockerfile) it loads (cached per ref) a
+    # clean bootstrap recipe via _load_bootstrap_recipe, and rewrites the Dockerfile as a header
+    # comment, the recipe, then the original Dockerfile minus its first FROM line (per-task
+    # overlay); updates each task.toml with mode inline_dockerfile, recipe hash/lines/source and
+    # fallback_reason. Reports a summary via on_message. Output: PrepareResult(inline_dockerfile,
+    # ...). Raises RuntimeError when a ref has no cached bootstrap recipe. local_dir and local_ref
+    # are unused.
+    # KNOWN ISSUE: the returned inline_recipe_sha256 is only the hash of the last processed recipe,
+    # not representative of multi-image datasets.
     """Bake the bootstrap's reconstructed Dockerfile into each task's image recipe.
 
     Requires the bootstrap cache to be present (we read the saved
@@ -567,6 +647,8 @@ def _go_inline(
     recipe_cache: dict[str, tuple[str | None, str | None]] = {}
 
     def _recipe_for(ref: str) -> tuple[str, str]:
+        # [FUNCTION DOC] HELPER: Returns (recipe, source) for ref from the per-call cache, loading
+        # it on first use. Raises RuntimeError if no cached bootstrap recipe exists for the ref.
         if ref not in recipe_cache:
             recipe_cache[ref] = _load_bootstrap_recipe(ref)
         rec, src = recipe_cache[ref]
@@ -640,6 +722,13 @@ _LANG_BASE_IMAGE = {
 
 
 def _build_clean_recipe(owner: str, name: str, data: dict) -> str | None:
+    # [FUNCTION DOC] HELPER: Synthesizes a buildable Dockerfile recipe from a bootstrap.json dict
+    # (not the noisy dockerfile_reconstruction). Returns None if rebuild_cmds is empty. Base image:
+    # FROM of dockerfile_reconstruction if present, else a per-language default (_LANG_BASE_IMAGE),
+    # else ubuntu:24.04. Emits: ensure git + CA certs (apt or apk, best effort), clone
+    # https://github.com/<owner>/<name>.git into /workspace, optionally fetch/checkout data['ref'],
+    # one RUN per rebuild command, and for Python/pytest repos best-effort installs of the 'tests'
+    # dependency group and pytest. Output: recipe text ending with a newline.
     """Build a *buildable* env recipe from a bootstrap result's clean fields.
 
     The bootstrap `dockerfile_reconstruction` field interleaves the agent's
@@ -702,6 +791,12 @@ def _build_clean_recipe(owner: str, name: str, data: dict) -> str | None:
 def _load_bootstrap_recipe(
     local_ref: str,
 ) -> tuple[str | None, Literal["user_dockerfile", "agent_replay"] | None]:
+    # [FUNCTION DOC] HELPER: Finds the cached bootstrap result for a local image ref and builds its
+    # recipe. Parses (owner, name, sha) from the ref; searches ./workspace/bootstrap and the legacy
+    # ./envs (relative and cwd-based) for <owner>__<name>/<slot> dirs whose name starts with the sha
+    # prefix, reading bootstrap.json and calling _build_clean_recipe. Output: (recipe,
+    # 'agent_replay') for the first usable entry, else (None, None); JSON/OS errors are ignored.
+    # Reads files only.
     """Look up the cached bootstrap result for `local_ref` and return its recipe.
 
     Prefers a clean recipe synthesized from the verified ``rebuild_cmds`` (so
@@ -759,6 +854,17 @@ def _go_registry(
     pushed_by: str | None,
     on_message,
 ) -> PrepareResult:
+    # [FUNCTION DOC] HELPER: Registry mode. Computes the registry prefix and effective visibility
+    # ('inherit' -> private if the dataset is private else public). For each distinct ref: builds
+    # the remote ref with naming.build_image_ref, pushes it via _do_push unless skip_image_push
+    # (then the digest is the remote ref itself), and for public GHCR images flips package
+    # visibility (failure -> warning, visibility 'unknown', or RuntimeError if require_registry). A
+    # PushError falls back to _go_inline for all tasks (or re-raises if require_registry). Then
+    # rewrites every task's FROM to its own image digest and updates task.toml (mode registry).
+    # Output: PrepareResult with the representative image (local_ref's, else the first pushed). Side
+    # effects: docker/network/files.
+    # KNOWN ISSUE: looks_local is derived from the single representative ref and applied to every
+    # ref, so in mixed datasets local images may skip the actual push (or vice versa).
     """Push each distinct bootstrap image to the registry; rewrite each task
     to ITS OWN image digest (multi-image aware)."""
     from collections import defaultdict
@@ -862,6 +968,8 @@ def _go_registry(
 
 
 def _registry_prefix_for_kind(kind: RegistryKind, host: str, namespace: str) -> str:
+    # [FUNCTION DOC] HELPER: Returns 'index.docker.io/<namespace>' for Docker Hub, otherwise
+    # '<host>/<namespace>'.
     """Compose `<host>/<namespace>` correctly for each registry kind."""
     if kind is RegistryKind.DOCKER_HUB:
         return f"index.docker.io/{namespace}"
@@ -869,6 +977,12 @@ def _registry_prefix_for_kind(kind: RegistryKind, host: str, namespace: str) -> 
 
 
 def _do_push(local_ref: str, remote_ref: str, looks_local: bool) -> ImagePushResult:
+    # [FUNCTION DOC] HELPER: Pushes local_ref to remote_ref via push.push_image
+    # (skip_if_exists=True) when the ref looks local. Otherwise returns a synthetic
+    # ImagePushResult(pushed=False) whose digest is the local_ref itself. Raises PushError from
+    # push_image.
+    # KNOWN ISSUE: the comment says the non-local path verifies the digest, but no verification
+    # occurs; the original ref is reused verbatim as the 'digest'.
     """Wrapper to push, with friendly error if local image truly missing."""
     if not looks_local:
         # The dataset already references a registry ref. Either it was

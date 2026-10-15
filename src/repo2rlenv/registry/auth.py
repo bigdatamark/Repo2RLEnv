@@ -1,3 +1,7 @@
+# [MODULE DOC] File-level discovery of Docker login state from the Docker CLI config.json (honouring
+# $DOCKER_CONFIG): which registry hosts appear logged in and how the credential is stored. No
+# network calls; whether credentials actually work is checked by registry.probe. Also classifies
+# registry hostnames into RegistryKind values via regexes/known host sets.
 """Read Docker login state from ~/.docker/config.json.
 
 Discovery is file-level only — answers "does the user have credentials for
@@ -23,6 +27,8 @@ logger = logging.getLogger(__name__)
 
 
 class RegistryKind(StrEnum):
+    # [CLASS DOC] String enum of supported registry families: ghcr, ecr_private, ecr_public, acr,
+    # gcp_ar, docker_hub, local (localhost/127.0.0.1) and other.
     GHCR = "ghcr"
     ECR_PRIVATE = "ecr_private"
     ECR_PUBLIC = "ecr_public"
@@ -34,6 +40,9 @@ class RegistryKind(StrEnum):
 
 
 class CredentialSource(StrEnum):
+    # [CLASS DOC] String enum describing how a host's credential is stored: INLINE (base64 auth blob
+    # in auths), CREDSTORE (global credsStore helper), CREDHELPER (per-host credHelpers entry) or
+    # EMPTY (an empty auths entry, typical of Docker Desktop).
     """How the credential is stored.
 
     INLINE   — `auths.<host>.auth` is a base64 user:pass blob in config.json
@@ -50,6 +59,8 @@ class CredentialSource(StrEnum):
 
 @dataclass(slots=True)
 class RegistryAuth:
+    # [CLASS DOC] A discovered login: normalized host, its RegistryKind, the CredentialSource and,
+    # for helper-backed sources, the helper binary name (e.g. 'ecr-login', 'desktop'), else None.
     host: str
     kind: RegistryKind
     cred_source: CredentialSource
@@ -68,6 +79,11 @@ _DOCKER_HUB_HOSTS = frozenset(
 
 
 def classify_host(host: str) -> RegistryKind:
+    # [FUNCTION DOC] Maps a config.json auths key / hostname to a RegistryKind. Strips whitespace,
+    # scheme, trailing slashes and a trailing /v1; then checks, in order, Docker Hub aliases,
+    # ghcr.io, public.ecr.aws, private ECR, ACR (*.azurecr.io, case-insensitive), GCP AR
+    # (*-docker.pkg.dev) and localhost/127.0.0.1 (with optional port). Empty input or no match
+    # returns OTHER.
     """Map a docker config.json `auths` key to a RegistryKind.
 
     Docker Hub's config.json key is sometimes the legacy v1 URL
@@ -101,6 +117,8 @@ def classify_host(host: str) -> RegistryKind:
 
 
 def _config_path() -> Path:
+    # [FUNCTION DOC] HELPER: Returns the Docker CLI config.json path: $DOCKER_CONFIG/config.json
+    # (user-expanded) when the env var is set, else ~/.docker/config.json. Reads the environment.
     """The active Docker CLI config path. Respects $DOCKER_CONFIG."""
     if env := os.environ.get("DOCKER_CONFIG"):
         return Path(env).expanduser() / "config.json"
@@ -108,6 +126,8 @@ def _config_path() -> Path:
 
 
 def _normalize_host(raw: str) -> str:
+    # [FUNCTION DOC] HELPER: Normalizes an auths key to a bare host by stripping whitespace,
+    # http(s):// scheme, trailing slashes and a trailing '/v1'. Output: str.
     """Normalize a config.json auths key to a bare hostname.
 
     The Docker CLI accepts both the v1 URL and a bare hostname as the auths
@@ -121,6 +141,12 @@ def _normalize_host(raw: str) -> str:
 
 
 def discover_logged_in_registries(config_path: Path | None = None) -> list[RegistryAuth]:
+    # [FUNCTION DOC] Returns the registries the user appears logged into, without validating them.
+    # Input: config_path (optional; default _config_path()). Returns [] if the file is missing or
+    # unreadable/invalid JSON (logged at debug). First every credHelpers entry becomes a CREDHELPER
+    # auth (helper name recorded); then each auths entry not already seen becomes INLINE (non-empty
+    # 'auth'), CREDSTORE (global credsStore set; helper = store name) or EMPTY. Hosts are normalized
+    # and deduplicated. Output: list[RegistryAuth] in that order. Side effects: reads the file.
     """Return the list of registries the user appears logged into.
 
     File-level only — does not validate that credentials actually work.
@@ -199,5 +225,6 @@ def discover_logged_in_registries(config_path: Path | None = None) -> list[Regis
 
 
 def filter_known_registries(auths: list[RegistryAuth]) -> list[RegistryAuth]:
+    # [FUNCTION DOC] Returns the given auths without entries classified as RegistryKind.OTHER.
     """Drop entries classified as OTHER. Convenience for the push path."""
     return [a for a in auths if a.kind is not RegistryKind.OTHER]

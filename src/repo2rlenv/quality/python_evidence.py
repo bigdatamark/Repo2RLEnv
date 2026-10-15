@@ -1,3 +1,5 @@
+# [MODULE DOC] Extracts excerpts of specific repository test functions as reviewer evidence by
+# parsing test files statically (ast), never importing the target code.
 """Select repository test evidence statically, without importing target code."""
 
 from __future__ import annotations
@@ -7,6 +9,10 @@ from pathlib import Path
 
 
 def _methods(node: ast.AST, parents: tuple[str, ...] = ()):
+    # [FUNCTION DOC] HELPER: Generator yielding (parent class-name tuple, function node) for every
+    # function/async function directly in node or nested inside classes (recursively through
+    # classes, not into function bodies). Input: AST node, parents prefix. Output: iterator of
+    # tuples.
     for child in ast.iter_child_nodes(node):
         if isinstance(child, ast.ClassDef):
             yield from _methods(child, (*parents, child.name))
@@ -17,6 +23,14 @@ def _methods(node: ast.AST, parents: tuple[str, ...] = ()):
 def test_excerpts(
     root: Path, identities: list[str], *, additional_sources: dict[str, str] | None = None
 ) -> dict[str, str]:
+    # [FUNCTION DOC] Returns source excerpts for the requested test identities. Inputs: root (repo
+    # dir, searched recursively for test*.py), identities (dotted module path then '.' or '::', e.g.
+    # 'pkg.test_x::TestC::test_y[param]'), additional_sources (optional relative-path -> source text
+    # overrides/additions). For each file with matching identities it keeps the module's top-level
+    # imports plus every function whose '<module>[.<Class>...]::<name>' equals an identity with its
+    # parametrization suffix stripped, including decorators. Output: dict relative path -> excerpts
+    # joined by blank lines. Raises ValueError if nothing matched; SyntaxError on unparsable files.
+    # Side effects: reads files.
     excerpts = {}
     additions = additional_sources or {}
     paths = set(root.rglob("test*.py")) | {root / name for name in additions}
