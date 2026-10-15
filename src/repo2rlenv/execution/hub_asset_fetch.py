@@ -1,6 +1,3 @@
-# [MODULE DOC] Standalone image-build program (exec'd inside a Docker RUN, no credentials) that
-# downloads pinned public Hugging Face files into a cache and writes the tasksmith-assets.json
-# manifest.
 """Standalone image-build program; never import target models or receive credentials."""
 
 from __future__ import annotations
@@ -11,12 +8,6 @@ from pathlib import Path
 
 
 def fetch_assets(assets: list[dict], cache: Path) -> None:
-    # [FUNCTION DOC] For each asset dict (repo_id, revision, filenames, max_bytes, ...), anonymously
-    # reads Hub metadata for each file and requires the commit hash to equal revision and a known
-    # size (ValueError otherwise); rejects totals above max_bytes. Downloads each file into cache,
-    # verifies its size, and records filename/bytes/sha256. Writes refs/main = revision so offline
-    # "main" lookups resolve to the pin. Finally writes cache/tasksmith-assets.json listing each
-    # asset with its files and offline_main. Side effects: network downloads and filesystem writes.
     from huggingface_hub import get_hf_file_metadata, hf_hub_download, hf_hub_url
 
     manifests = []

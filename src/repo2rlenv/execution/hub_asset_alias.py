@@ -1,7 +1,3 @@
-# [MODULE DOC] Standalone image-build program (exec'd inside a Docker RUN) that creates cache-local
-# relative symlink aliases for pinned public Hugging Face model assets, after verifying canonical
-# identity, and writes tasksmith-asset-aliases.json. Expects hub_asset_fetch to have produced the
-# cache.
 """Image-build cache aliases for explicitly pinned public Hub assets."""
 
 from __future__ import annotations
@@ -15,17 +11,6 @@ from pathlib import Path, PurePosixPath
 
 
 def install_aliases(assets: list[dict], cache: Path) -> None:
-    # [FUNCTION DOC] For each asset (repo_id, revision, cache_aliases), verifies against the
-    # canonical cache manifest tasksmith-assets.json: unique repos, 40-hex revision equal to the
-    # manifest revision and offline_main, a direct non-symlink models--<repo> directory whose
-    # refs/main equals revision, and each declared file with a safe name, inside the repo cache,
-    # with matching size and SHA-256. For each alias, validates the repo id, rejects collisions and
-    # existing non-alias entries, and checks via the Hub API (anonymous, network) that the alias
-    # resolves to the canonical repo and revision. Refuses (ValueError) if an existing alias
-    # manifest differs. Then creates relative directory symlinks, confirms offline hf_hub_download
-    # for both main and the revision returns the canonical files, and atomically writes the alias
-    # manifest. On any error removes symlinks it created and re-raises. Inputs: assets (list of
-    # dicts), cache (Path, must exist). Output: None.
     """Verify canonical identity before creating cache-local relative links."""
     from huggingface_hub import HfApi, hf_hub_download
     from huggingface_hub.utils import validate_repo_id
