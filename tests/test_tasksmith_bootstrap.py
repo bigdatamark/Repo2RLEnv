@@ -1,3 +1,8 @@
+# [MODULE DOC] Tests for TaskSmith repository bootstrap safety: cpu_build and bootstrap_smoke.check refuse to
+# run on the controller (outside REPO2RLENV_REMOTE_WORKER), WorkerSpec/Options snapshot rules,
+# generated Dockerfile recipes (pinned commit checkout, offline HF, CUDA, rust for tokenizers),
+# rejection of non-commit refs and multi-line install repairs, smoke checks rejecting packages
+# imported from outside the pinned checkout, and GPU run budget settlement on Modal failures.
 from __future__ import annotations
 
 import pytest
@@ -9,6 +14,8 @@ from repo2rlenv.tasksmith.models import Options
 
 
 def test_bootstrap_never_executes_targets_on_controller(tmp_path, monkeypatch):
+    # [FUNCTION DOC] Unsets REPO2RLENV_REMOTE_WORKER and expects RuntimeError 'remote only' from cpu_build and
+    # 'remotely only' from check.
     monkeypatch.delenv("REPO2RLENV_REMOTE_WORKER", raising=False)
     spec = RepositoryBootstrap(name="accelerate", ref="a" * 40)
     with pytest.raises(RuntimeError, match="remote only"):
@@ -18,6 +25,8 @@ def test_bootstrap_never_executes_targets_on_controller(tmp_path, monkeypatch):
 
 
 def test_snapshot_is_modal_only_and_exclusive_with_registry_image():
+    # [FUNCTION DOC] Expects ValueError when WorkerSpec uses snapshot_id with a non-Modal provider or together
+    # with image, and when Options sets worker_snapshot with provider daytona.
     with pytest.raises(ValueError, match="snapshot"):
         WorkerSpec(name="test", provider="daytona", snapshot_id="im-example")
     with pytest.raises(ValueError, match="snapshot"):
@@ -27,6 +36,8 @@ def test_snapshot_is_modal_only_and_exclusive_with_registry_image():
 
 
 def test_gpu_recipe_pins_actual_checkout_without_local_context():
+    # [FUNCTION DOC] Asserts the gpu clone=True Dockerfile fetches the exact ref, verifies HEAD, has no COPY,
+    # sets HF_HUB_OFFLINE=1, uses cuda12.8 and not the CPU torch index.
     spec = RepositoryBootstrap(name="peft", ref="a" * 40)
     recipe = dockerfile(spec, "gpu", clone=True)
     assert f"git fetch --depth=1 {spec.url} {spec.ref}" in recipe
@@ -38,6 +49,8 @@ def test_gpu_recipe_pins_actual_checkout_without_local_context():
 
 
 def test_reject_non_commit_refs_and_multiline_repairs():
+    # [FUNCTION DOC] Expects ValueError for a branch name ref and ValueError 'single lines' for an extra_install
+    # entry containing a newline.
     with pytest.raises(ValueError):
         RepositoryBootstrap(name="peft", ref="main")
     with pytest.raises(ValueError, match="single lines"):
@@ -48,11 +61,15 @@ def test_reject_non_commit_refs_and_multiline_repairs():
 
 
 def test_tokenizers_builds_rust_source():
+    # [FUNCTION DOC] Asserts the tokenizers CPU recipe installs rustup and editable-installs ./bindings/python.
     recipe = dockerfile(RepositoryBootstrap(name="tokenizers", ref="b" * 40), "cpu")
     assert "sh.rustup.rs" in recipe and "-e ./bindings/python" in recipe
 
 
 def test_smoke_rejects_installed_package_outside_pinned_checkout(monkeypatch):
+    # [FUNCTION DOC] Sets the remote-worker env var and patches importlib.import_module to return a module whose
+    # __file__ is in site-packages; expects RuntimeError 'outside its pinned checkout' from
+    # check('peft', 'cpu').
     from types import SimpleNamespace
 
     from repo2rlenv.tasksmith import bootstrap_smoke
@@ -71,6 +88,11 @@ def test_smoke_rejects_installed_package_outside_pinned_checkout(monkeypatch):
 def test_gpu_failures_settle_known_builds_and_retain_unknown_creates(
     tmp_path, monkeypatch, error_kind
 ):
+    # [FUNCTION DOC] Parametrized over 'build' and 'lost_create'. Injects a fake 'modal' module into sys.modules
+    # whose Sandbox.create raises ImageBuildError or TimeoutError. Runs run_gpu_repository and
+    # asserts status failed and the operation.json receipt: build_failed releases the 6 USD
+    # reservation and accounts >= 1 USD; creation_uncertain keeps the 6 USD reserved with nothing
+    # accounted. Writes ledger/receipt files under tmp_path.
     import json
     import sys
     from types import SimpleNamespace
@@ -79,12 +101,15 @@ def test_gpu_failures_settle_known_builds_and_retain_unknown_creates(
     from repo2rlenv.tasksmith.matrix_runner import run_gpu_repository
 
     class ImageBuildError(Exception):
+        # [CLASS DOC] Stand-in for modal.exception.ImageBuildError.
         pass
 
     campaign = tmp_path / "campaign"
     ledger = BudgetLedger(campaign / "budget.sqlite3", limit_usd="50")
 
     def create(*args, **kwargs):
+        # [FUNCTION DOC] HELPER: fake modal Sandbox.create; asserts 6 USD is reserved in the ledger, then raises
+        # ImageBuildError for the build case or TimeoutError otherwise. Never returns.
         assert ledger.status()["reserved_usd"] == "6.000000"
         if error_kind == "build":
             raise ImageBuildError("fixture build failed before sandbox creation")

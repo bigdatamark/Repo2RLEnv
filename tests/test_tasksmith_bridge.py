@@ -1,3 +1,10 @@
+# [MODULE DOC] Tests for the TaskSmith author AgentBridge (tasksmith.author.bridge), the local HTTP proxy that
+# external agent runtimes call for model turns (/v1/messages) and tools (/tool). Covers usage cost
+# and cache normalization, auth and model matching, turn and cost admission (including in-flight
+# reservations and global/candidate scopes), tool sequencing and cancellation, runtime inference-
+# setting overrides, failure on empty/truncated turns after metering, and gating tool execution on
+# model EOF/validation. Uses a deterministic in-process LocalProvider instead of the Anthropic
+# API; skipped without aiohttp. One test runs the real opencode runtime when available.
 from __future__ import annotations
 
 import asyncio
@@ -24,12 +31,20 @@ from repo2rlenv.tasksmith.author.inference import (
 
 
 def Budget(path, limit, scope=None, scope_limit=None):
+    # [FUNCTION DOC] HELPER: Builds an AuthorBudget for tests: a BudgetLedger at path with the given USD limit,
+    # wrapped in a RunBudget scope 'bridge' whose limit is scope_limit when scope is truthy else
+    # limit, with charges stored under path.parent/charges and label 'test'. scope only acts as a
+    # flag; its value is not used as a name. Output: AuthorBudget. Side effects: creates the
+    # ledger file.
     ledger = BudgetLedger(path, limit_usd=str(limit))
     budget = RunBudget(ledger, "bridge", str(scope_limit if scope else limit))
     return AuthorBudget(budget, path.parent / "charges", "test")
 
 
 def test_provider_usage_accounts_cache_without_double_charging():
+    # [FUNCTION DOC] Asserts usage_cost charges input, output, cache creation (1h tier weighted higher) and cache
+    # reads at the expected total 265 for prices 1/2, raises ValueError 'incomplete usage' without
+    # input_tokens, and normalize_cache strips ttl from cache_control.
     usage = {
         "input_tokens": 100,
         "output_tokens": 50,
@@ -47,9 +62,13 @@ def test_provider_usage_accounts_cache_without_double_charging():
 
 @pytest.mark.asyncio
 async def test_bridge_denies_unauthenticated_tools_and_unmatched_models(tmp_path):
+    # [FUNCTION DOC] Over real HTTP: a /tool call without a bearer token gets 401, an authenticated one runs the
+    # handler, and a /v1/messages call naming a different model gets 502 and sets bridge.failed.
+    # Asserts only one effect and zero spend.
     effects = []
 
     async def remote(command):
+        # [FUNCTION DOC] HELPER: fake shell handler recording the command and returning 'remote response'.
         effects.append(command)
         return "remote response"
 
@@ -85,13 +104,19 @@ async def test_bridge_denies_unauthenticated_tools_and_unmatched_models(tmp_path
 
 
 class BridgeRequest:
+    # [CLASS DOC] Minimal stand-in for an aiohttp request: holds a JSON body, an x-api-key header from token
+    # and an optional Event set when the body is parsed.
     def __init__(self, body, *, token="", parsed=None):
+        # [FUNCTION DOC] HELPER: stores body and parsed event and sets headers {'x-api-key': token}. Inputs: body
+        # dict; keyword token (default ''), parsed (asyncio.Event or None).
         self.body, self.parsed = body, parsed
         self.headers = {"x-api-key": token}
 
     async def json(self):
         # Both concurrent requests finish the admission preamble before either
         # JSON body is available, reproducing the original admission race.
+        # [FUNCTION DOC] HELPER: yields to the event loop once (to reproduce concurrent admission races), sets
+        # the parsed event if given, and returns a shallow copy of the body.
         await asyncio.sleep(0)
         if self.parsed is not None:
             self.parsed.set()
@@ -100,13 +125,19 @@ class BridgeRequest:
 
 @pytest.mark.asyncio
 async def test_artifact_stage_reserves_final_calls_for_submission(tmp_path):
+    # [FUNCTION DOC] Calls bridge.tool directly with varying bridge.turns under max_turns 5: early shell calls
+    # run and report remaining model calls, near the limit shell is refused ('Command not
+    # executed'), while submit_artifact still runs. Asserts recorded effects.
     effects = []
 
     async def shell(command):
+        # [FUNCTION DOC] HELPER: fake shell handler recording the command and returning file contents.
         effects.append(command)
         return "file contents"
 
     async def submit(**artifact):
+        # [FUNCTION DOC] HELPER: fake submit_artifact handler recording kwargs and returning 'Artifact
+        # committed'.
         effects.append(artifact)
         return "Artifact committed"
 
@@ -139,11 +170,17 @@ async def test_artifact_stage_reserves_final_calls_for_submission(tmp_path):
 
 
 class LocalProvider:
+    # [CLASS DOC] Deterministic fake for the aiohttp ClientSession and response used by the bridge: records
+    # posted request bodies, returns configurable usage/blocks/stop_reason as JSON or SSE, and can
+    # hold the stream open until `finish` is set. No network.
     """Deterministic provider responses; no upstream HTTP requests are made."""
 
     status = 200
 
     def __init__(self):
+        # [FUNCTION DOC] HELPER: initializes requests list, called/finish events (finish set), default usage 100
+        # in/50 out, one text block, stop_reason end_turn, and content=self so
+        # response.content.iter_any works.
         self.requests = []
         self.called = asyncio.Event()
         self.finish = asyncio.Event()
@@ -154,6 +191,8 @@ class LocalProvider:
         self.content = self
 
     def post(self, url, *, json, headers):
+        # [FUNCTION DOC] HELPER: asserts the Anthropic messages URL and dummy API key header, records the JSON
+        # body, sets called, and returns self as the response context manager.
         assert url == "https://api.anthropic.com/v1/messages"
         assert headers["x-api-key"] == "dummy-provider-key"
         self.requests.append(json)
@@ -161,19 +200,27 @@ class LocalProvider:
         return self
 
     async def __aenter__(self):
+        # [FUNCTION DOC] HELPER: returns self.
         return self
 
     async def __aexit__(self, *args):
+        # [FUNCTION DOC] HELPER: no-op.
         pass
 
     async def close(self):
+        # [FUNCTION DOC] HELPER: no-op session close.
         pass
 
     async def json(self):
+        # [FUNCTION DOC] HELPER: waits for finish, then returns a non-streaming message dict with usage, content
+        # blocks and stop_reason.
         await self.finish.wait()
         return {"usage": self.usage, "content": self.blocks, "stop_reason": self.stop_reason}
 
     async def iter_any(self):
+        # [FUNCTION DOC] HELPER: async generator yielding one bytes chunk of SSE events (message_start, a
+        # content_block_start per block, message_delta with stop_reason, message_stop), then waits
+        # for finish before ending.
         events = [
             {"type": "message_start", "message": {"usage": self.usage}},
             *[
@@ -193,6 +240,9 @@ class LocalProvider:
 
 @pytest.fixture
 def local_provider(monkeypatch):
+    # [FUNCTION DOC] Pytest fixture installing a LocalProvider as bridge_module.ClientSession, setting
+    # ANTHROPIC_API_KEY to a dummy, and patching litellm.get_model_info prices (1e-5 in, 2e-5 out
+    # per token). Output: the provider.
     import litellm
 
     provider = LocalProvider()
@@ -207,6 +257,9 @@ def local_provider(monkeypatch):
 
 
 def make_bridge(tmp_path, **overrides):
+    # [FUNCTION DOC] HELPER: Creates an AgentBridge with defaults (model anthropic/claude-mock, 10 USD Budget, no
+    # tools/handlers, trace file, max_turns 2, max_cost 1) overridden by keyword overrides. Not
+    # entered; caller manages lifecycle.
     config = {
         "model": "anthropic/claude-mock",
         "budget": Budget(tmp_path / "budget.json", 10),
@@ -220,6 +273,8 @@ def make_bridge(tmp_path, **overrides):
 
 
 def model_request():
+    # [FUNCTION DOC] HELPER: Returns a BridgeRequest for a claude-mock message with empty messages and max_tokens
+    # 100 (no token).
     return BridgeRequest({"model": "claude-mock", "messages": [], "max_tokens": 100})
 
 
@@ -227,6 +282,8 @@ def model_request():
 async def test_model_admission_enforces_turn_limit_after_reading_concurrent_bodies(
     tmp_path, local_provider
 ):
+    # [FUNCTION DOC] With max_turns 1, two concurrent _messages calls yield exactly one BudgetExceeded and one
+    # provider request.
     async with make_bridge(tmp_path, max_turns=1) as bridge:
         replies = await asyncio.gather(
             bridge._messages(model_request()),
@@ -239,6 +296,8 @@ async def test_model_admission_enforces_turn_limit_after_reading_concurrent_bodi
 
 @pytest.mark.asyncio
 async def test_agent_cost_limit_includes_the_next_reservation(tmp_path, local_provider):
+    # [FUNCTION DOC] With max_cost 0.01 the next reservation does not fit; expects BudgetExceeded 'Runtime agent
+    # budget', no spend, no turns, no provider request.
     async with make_bridge(tmp_path, max_cost=0.01) as bridge:
         with pytest.raises(BudgetExceeded, match="Runtime agent budget"):
             await bridge._messages(model_request())
@@ -249,6 +308,8 @@ async def test_agent_cost_limit_includes_the_next_reservation(tmp_path, local_pr
 
 @pytest.mark.asyncio
 async def test_agent_cost_limit_counts_an_inflight_model_reservation(tmp_path, local_provider):
+    # [FUNCTION DOC] Holds the first model call in flight; a second call raises BudgetExceeded because both
+    # reservations exceed max_cost 0.40. Asserts one provider request and final spend 0.002.
     local_provider.finish.clear()
     # With the fixture's prices, one request fits but two reservations do not.
     async with make_bridge(tmp_path, max_cost=0.40) as bridge:
@@ -272,6 +333,8 @@ async def test_agent_cost_limit_counts_an_inflight_model_reservation(tmp_path, l
 async def test_bridge_keeps_global_and_candidate_reservation_limits(
     tmp_path, local_provider, budget_options
 ):
+    # [FUNCTION DOC] Parametrized over a tiny ledger limit or a tiny run-scope limit; expects BudgetExceeded with
+    # no spend and no provider request.
     budget = Budget(tmp_path / "limited.json", **budget_options)
     async with make_bridge(tmp_path, budget=budget) as bridge:
         with pytest.raises(BudgetExceeded):
@@ -282,10 +345,14 @@ async def test_bridge_keeps_global_and_candidate_reservation_limits(
 
 @pytest.mark.asyncio
 async def test_cancelling_bridge_owner_cancels_active_and_queued_tool_effects(tmp_path):
+    # [FUNCTION DOC] Cancels the task owning the bridge context while one tool call is active and another is
+    # queued; asserts both are cancelled, the active handler's finally ran, no effects recorded,
+    # and later tool calls raise HTTPServiceUnavailable.
     started, cancelled, queued, ready = (asyncio.Event() for _ in range(4))
     effects = []
 
     async def remote(command):
+        # [FUNCTION DOC] HELPER: fake shell that signals start and blocks forever; sets cancelled in finally.
         started.set()
         try:
             await asyncio.Event().wait()
@@ -296,6 +363,7 @@ async def test_cancelling_bridge_owner_cancels_active_and_queued_tool_effects(tm
     bridge = make_bridge(tmp_path, handlers={"shell": remote})
 
     async def owner():
+        # [FUNCTION DOC] HELPER: enters the bridge context, signals ready and waits forever.
         async with bridge:
             ready.set()
             await asyncio.Event().wait()
@@ -336,10 +404,15 @@ async def test_cancelling_bridge_owner_cancels_active_and_queued_tool_effects(tm
 
 @pytest.mark.asyncio
 async def test_tool_failure_rejects_queued_effects_and_preserves_the_first_error(tmp_path):
+    # [FUNCTION DOC] First tool raises RuntimeError after a queued second call arrives; asserts first reply
+    # status 409, the queued call is cancelled without effect, and bridge.failure keeps the first
+    # error.
     started, release, queued = (asyncio.Event() for _ in range(3))
     effects = []
 
     async def remote(command):
+        # [FUNCTION DOC] HELPER: for 'first', signals start, waits for release, then raises RuntimeError;
+        # otherwise records an effect.
         if command == "first":
             started.set()
             await release.wait()
@@ -376,21 +449,32 @@ async def test_tool_failure_rejects_queued_effects_and_preserves_the_first_error
 
 @pytest.fixture
 def local_runtime(monkeypatch, tmp_path, local_provider):
+    # [FUNCTION DOC] Pytest fixture replacing the external runtime process: patches external_agent.AgentBridge
+    # with DrainBridge, runtime_path, and asyncio.create_subprocess_exec with a fake that
+    # validates the runtime config file (no API key in env, max tokens, timeout, inference
+    # options) and returns a RuntimeProcess. Clears provider finish so EOF stays pending.
     """An in-process runtime exits at message_stop while provider EOF is pending."""
     local_provider.finish.clear()
 
     class DrainBridge(AgentBridge):
+        # [CLASS DOC] AgentBridge subclass that releases the provider stream when the bridge context exits.
         async def __aexit__(self, *args):
+            # [FUNCTION DOC] HELPER: sets local_provider.finish, then delegates to AgentBridge.__aexit__.
             local_provider.finish.set()
             return await super().__aexit__(*args)
 
     class RuntimeProcess:
+        # [CLASS DOC] Fake subprocess that streams one model call through the bridge over HTTP.
         returncode = None
 
         def __init__(self, config):
+            # [FUNCTION DOC] HELPER: stores the runtime config dict.
             self.config = config
 
         async def communicate(self):
+            # [FUNCTION DOC] HELPER: posts a streaming /v1/messages request to the bridge, reads until
+            # message_stop, sets returncode 0 and returns (JSON result bytes with turns 1 and cost
+            # 0, None).
             async with ClientSession() as client:
                 async with client.post(
                     self.config["bridge_url"] + "/v1/messages",
@@ -405,6 +489,8 @@ def local_runtime(monkeypatch, tmp_path, local_provider):
             return json.dumps({"messages": [], "turns": 1, "cost": 0}).encode(), None
 
     async def create_runtime(*args, **kwargs):
+        # [FUNCTION DOC] HELPER: fake create_subprocess_exec; asserts the config passed as the third argument and
+        # returns RuntimeProcess.
         assert "ANTHROPIC_API_KEY" not in kwargs["env"]
         config = json.loads(Path(args[2]).read_text())
         assert config["max_tokens"] == MAX_OUTPUT_TOKENS
@@ -421,6 +507,8 @@ def local_runtime(monkeypatch, tmp_path, local_provider):
 async def test_runtime_result_cost_waits_for_stream_settlement(
     tmp_path, local_provider, local_runtime
 ):
+    # [FUNCTION DOC] run_external_agent returns cost equal to budget spend 0.002 (settled after the stream ends,
+    # not the runtime's reported 0) and turns 1.
     budget = Budget(tmp_path / "budget.json", 10)
     result = await external_agent.run_external_agent(
         engine="pi",
@@ -441,6 +529,8 @@ async def test_runtime_result_cost_waits_for_stream_settlement(
 async def test_runtime_propagates_accounting_errors_after_message_stop(
     tmp_path, local_provider, local_runtime
 ):
+    # [FUNCTION DOC] With usage missing input_tokens, run_external_agent raises ValueError 'incomplete usage';
+    # the reservation remains (spent > 0, operations reserved).
     local_provider.usage = {"output_tokens": 50}
     budget = Budget(tmp_path / "budget.json", 10)
     with pytest.raises(ValueError, match="incomplete usage"):
@@ -465,6 +555,10 @@ async def test_runtime_propagates_accounting_errors_after_message_stop(
 async def test_bridge_overrides_runtime_inference_settings_and_preserves_opaque_thinking(
     tmp_path, local_provider, model
 ):
+    # [FUNCTION DOC] Parametrized over models. Asserts the forwarded request uses MAX_OUTPUT_TOKENS, keeps
+    # thinking/redacted_thinking blocks verbatim, drops temperature/top_p/top_k, applies
+    # anthropic_options thinking/output_config, keeps tool_choice, and logs inference settings and
+    # timeout in the trace.
     opaque = [
         {"type": "thinking", "thinking": "", "signature": "opaque-signed-reasoning"},
         {"type": "redacted_thinking", "data": "opaque-redacted-reasoning"},
@@ -498,17 +592,24 @@ async def test_bridge_overrides_runtime_inference_settings_and_preserves_opaque_
 
 @pytest.fixture
 def in_memory_sse(monkeypatch):
+    # [FUNCTION DOC] Pytest fixture replacing bridge_module.web.StreamResponse with a no-op stub so streaming
+    # replies need no real HTTP transport.
     class StreamResponse:
+        # [CLASS DOC] No-op stub of aiohttp StreamResponse.
         def __init__(self, **kwargs):
+            # [FUNCTION DOC] HELPER: ignores kwargs.
             pass
 
         async def prepare(self, request):
+            # [FUNCTION DOC] HELPER: no-op.
             pass
 
         async def write(self, chunk):
+            # [FUNCTION DOC] HELPER: no-op; discards the chunk.
             pass
 
         async def write_eof(self):
+            # [FUNCTION DOC] HELPER: no-op.
             pass
 
     monkeypatch.setattr(bridge_module.web, "StreamResponse", StreamResponse)
@@ -520,6 +621,10 @@ def in_memory_sse(monkeypatch):
 async def test_empty_and_truncated_provider_turns_fail_after_metering_and_trace(
     tmp_path, local_provider, in_memory_sse, stream, failure
 ):
+    # [FUNCTION DOC] Parametrized over stream mode and failure (max_tokens/length stop, empty content, thinking-
+    # only). Asserts reply 502, bridge failed, cost 0.002 metered and settled, trace kinds
+    # model_request/model/runtime_error with usage and preserved signature, and the error mentions
+    # truncation or missing text/tool calls.
     if failure in {"max_tokens", "length"}:
         local_provider.stop_reason = failure
     else:
@@ -556,6 +661,8 @@ async def test_empty_and_truncated_provider_turns_fail_after_metering_and_trace(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stream", [False, True])
 async def test_tool_only_provider_turn_is_usable(tmp_path, local_provider, in_memory_sse, stream):
+    # [FUNCTION DOC] A turn with only a tool_use block is accepted (no failure) and costs 0.002, streaming or
+    # not.
     local_provider.blocks = [{"type": "tool_use", "id": "tool-1", "name": "shell", "input": {}}]
     local_provider.stop_reason = "tool_use"
     async with make_bridge(tmp_path) as bridge:
@@ -571,6 +678,9 @@ async def test_tool_only_provider_turn_is_usable(tmp_path, local_provider, in_me
 async def test_tool_waits_for_delayed_model_eof_and_validation(
     tmp_path, local_provider, in_memory_sse, stop_reason
 ):
+    # [FUNCTION DOC] Parametrized stop_reason. A tool call arriving before the model stream ends waits (no
+    # effect, cost 0). After EOF: tool_use runs the tool once with cost already settled;
+    # max_tokens cancels the tool and records a truncation failure. Checks trace kinds.
     local_provider.finish.clear()
     local_provider.stop_reason = stop_reason
     local_provider.blocks = [{"type": "tool_use", "id": "tool-1", "name": "shell", "input": {}}]
@@ -578,6 +688,8 @@ async def test_tool_waits_for_delayed_model_eof_and_validation(
     parsed = asyncio.Event()
 
     async def shell():
+        # [FUNCTION DOC] HELPER: fake shell recording execution and the bridge cost observed at that moment;
+        # returns 'done'.
         effects.append("executed")
         observed_costs.append(bridge.cost)
         return "done"
@@ -630,11 +742,14 @@ async def test_tool_waits_for_delayed_model_eof_and_validation(
 async def test_cancelling_waiting_tool_does_not_cancel_model_settlement(
     tmp_path, local_provider, in_memory_sse
 ):
+    # [FUNCTION DOC] Cancelling a tool call gated on model EOF does not cancel the model task or set a failure;
+    # after EOF cost is 0.002 and no effect ran.
     local_provider.finish.clear()
     parsed = asyncio.Event()
     effects = []
 
     async def shell():
+        # [FUNCTION DOC] HELPER: fake shell that must not run; records an effect if it does.
         effects.append("must not execute")
         return "unexpected"
 
@@ -675,17 +790,22 @@ async def test_cancelling_waiting_tool_does_not_cancel_model_settlement(
 async def test_bridge_shutdown_cancels_model_and_gated_tool_without_deadlock(
     tmp_path, local_provider, in_memory_sse
 ):
+    # [FUNCTION DOC] Cancelling the bridge owner while a model stream and gated tool are pending cancels both
+    # without deadlock, clears internal task sets, runs no effect and keeps the uncertain
+    # reservation (spent > 0).
     local_provider.finish.clear()
     ready, parsed = asyncio.Event(), asyncio.Event()
     effects = []
 
     async def shell():
+        # [FUNCTION DOC] HELPER: fake shell that must not run.
         effects.append("must not execute")
         return "unexpected"
 
     bridge = make_bridge(tmp_path, handlers={"shell": shell})
 
     async def owner():
+        # [FUNCTION DOC] HELPER: enters the bridge context, signals ready and waits forever.
         async with bridge:
             ready.set()
             await asyncio.Event().wait()
@@ -727,6 +847,10 @@ async def test_bridge_shutdown_cancels_model_and_gated_tool_without_deadlock(
 async def test_actual_opencode_truncated_tool_response_cannot_execute_before_eof(
     tmp_path, local_provider, monkeypatch
 ):
+    # [FUNCTION DOC] Skips unless the opencode runtime is installed. Streams a max_tokens-truncated tool_use
+    # through the real runtime; asserts the tool request arrives but does not execute before EOF,
+    # the run raises RuntimeError 'truncated', spend is 0.002 and trace kinds are
+    # input/model_request/model/runtime_error. Spawns a real subprocess.
     try:
         external_agent.runtime_path("opencode")
     except RuntimeError as exc:
@@ -737,15 +861,20 @@ async def test_actual_opencode_truncated_tool_response_cannot_execute_before_eof
     bridges = []
 
     class ObservedBridge(AgentBridge):
+        # [CLASS DOC] AgentBridge subclass recording instances and signalling when a tool request arrives.
         def __init__(self, **kwargs):
+            # [FUNCTION DOC] HELPER: initializes the AgentBridge and appends self to the outer bridges list.
             super().__init__(**kwargs)
             bridges.append(self)
 
         async def tool(self, request):
+            # [FUNCTION DOC] HELPER: sets the arrived event then delegates to AgentBridge.tool.
             arrived.set()
             return await super().tool(request)
 
     async def stream():
+        # [FUNCTION DOC] HELPER: replacement iter_any yielding a full Anthropic SSE sequence for a tool_use
+        # truncated by max_tokens, then waiting for finish.
         events = [
             {
                 "type": "message_start",
@@ -792,6 +921,7 @@ async def test_actual_opencode_truncated_tool_response_cannot_execute_before_eof
         await local_provider.finish.wait()
 
     async def shell(command):
+        # [FUNCTION DOC] HELPER: fake shell that must not run; records the command.
         effects.append(command)
         return "must not execute"
 

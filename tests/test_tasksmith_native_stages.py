@@ -1,3 +1,8 @@
+# [MODULE DOC] Tests for TaskSmith native (GPU-capable) construction stages with provider execution mocked:
+# Options GPU limits and Modal-only GPU selection, Profile rejection of overlapping source roots
+# or excluded paths inside source roots, NativeStages.construct running healthy and defective GPU
+# contrasts and caching by identical inputs, refusal to treat uncertain allocations as repairable
+# failures, and worker prepare_native evidence transfer on success and failure.
 """GPU construction contracts with provider execution mocked at its boundary."""
 
 import json
@@ -12,6 +17,8 @@ from repo2rlenv.tasksmith.native_stages import NativeStages
 
 
 def test_gpu_selection_never_falls_back_to_an_unvalidated_provider():
+    # [FUNCTION DOC] Asserts Options(gpus=2) is accepted, gpus with provider daytona raises ValueError 'native
+    # Modal', and gpus=3 raises ValueError.
     assert Options(gpus=2).gpus == 2
     with pytest.raises(ValueError, match="native Modal"):
         Options(provider="daytona", gpus=1)
@@ -24,6 +31,8 @@ def test_gpu_selection_never_falls_back_to_an_unvalidated_provider():
     [(["src", "src/model"], []), (["src"], ["src/answer.md"])],
 )
 def test_profile_rejects_invalid_submission_boundaries_before_bootstrap(source, excluded):
+    # [FUNCTION DOC] Parametrized over nested source roots and a public_exclude path inside a source root;
+    # expects Profile construction to raise ValueError 'Source roots must be disjoint'.
     with pytest.raises(ValueError, match="Source roots must be disjoint"):
         Profile(
             reasoning="Inspect the pinned source and exercise local behavior.",
@@ -40,6 +49,12 @@ def test_profile_rejects_invalid_submission_boundaries_before_bootstrap(source, 
 
 
 def test_construct_runs_both_gpu_contrasts_and_reuses_only_identical_inputs(tmp_path, monkeypatch):
+    # [FUNCTION DOC] Skips without harbor. Builds a base and defective tree, a GPU Profile and Design, and
+    # patches native_stages.check_context with a fake. Asserts construct completes, runs 'healthy'
+    # then 'defective' contrasts, emits a Harbor task with 2 GPUs for agent and separate verifier,
+    # one /workspace/lib artifact and a contract listing lib roots/files; a repeat call returns
+    # the cached result without re-running checks; a changed design raises ValueError 'inputs
+    # changed'.
     pytest.importorskip("harbor")
     from harbor.models.task.task import Task
 
@@ -95,6 +110,10 @@ def test_construct_runs_both_gpu_contrasts_and_reuses_only_identical_inputs(tmp_
     seen = []
 
     async def check(context, profile, output, budget, gpus, **kwargs):
+        # [FUNCTION DOC] HELPER: fake async check_context. Asserts gpus == 2 and that the context source file
+        # matches the healthy or defective variant by output directory name, records the name and
+        # returns TestResults where test_new fails only for defective (returncode 1) and test_old
+        # passes.
         assert gpus == 2
         broken = output.name == "defective"
         assert (context / "source/lib/core.py").read_text() == (
@@ -140,6 +159,9 @@ def test_construct_runs_both_gpu_contrasts_and_reuses_only_identical_inputs(tmp_
 
 
 def test_unknown_allocation_is_not_fed_back_as_a_verifier_repair(tmp_path):
+    # [FUNCTION DOC] Writes an allocation receipt with state creation_uncertain and expects NativeStages.failure
+    # to raise RuntimeError 'Reconcile native allocation' instead of returning a repairable
+    # failure.
     path = tmp_path / "check/allocations/receipt.json"
     path.parent.mkdir(parents=True)
     path.write_text(json.dumps({"state": "creation_uncertain"}))
@@ -149,6 +171,11 @@ def test_unknown_allocation_is_not_fed_back_as_a_verifier_repair(tmp_path):
 
 @pytest.mark.parametrize("failed", [False, True])
 def test_native_snapshot_transfer_preserves_profile_failure(tmp_path, monkeypatch, failed):
+    # [FUNCTION DOC] Parametrized on failure. Runs worker.main for a prepare_native request with
+    # Profile.model_validate bypassed and prepare_native faked. On success the snapshot file is
+    # transferred; on failure stage-result is failed naming unhandled.md, a traceback.txt is
+    # included, the snapshot is not transferred but remains locally with its symlink. Sets env var
+    # and sys.argv; writes under tmp_path.
     from repo2rlenv.execution.artifacts import unpack_evidence
     from repo2rlenv.tasksmith import worker
 
@@ -162,6 +189,9 @@ def test_native_snapshot_transfer_preserves_profile_failure(tmp_path, monkeypatc
     monkeypatch.setattr(worker.Profile, "model_validate", lambda value: value)
 
     def prepare(source, profile, checkout, destination):
+        # [FUNCTION DOC] HELPER: fake prepare_native creating destination/snapshot/module.py; when failed, adds a
+        # symlink and raises ValueError mentioning unhandled.md, otherwise returns {base_relative:
+        # snapshot}.
         snapshot = destination / "snapshot"
         snapshot.mkdir()
         (snapshot / "module.py").write_text("value = 1\n")

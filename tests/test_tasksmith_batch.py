@@ -1,3 +1,9 @@
+# [MODULE DOC] Tests for tasksmith.batch campaign scheduling with fake controllers (no target code or providers
+# run): target counting and no over-dispatch, prior verified inventory checks and admission
+# rechecks before allocation, GPU parallelism caps, drain requests, retained unverified outputs,
+# batch and global budget headroom, reconciliation stops after crashes or pending cleanup, frozen
+# configuration/runtime/controller tamper detection, orphan import, budget scope sharing in child
+# runs, and real subprocess isolation of frozen controllers.
 """Campaign scheduling uses fake controllers; target code and providers never run."""
 
 from concurrent.futures import Future
@@ -13,6 +19,8 @@ from repo2rlenv.tasksmith.models import Options
 
 
 def candidate(number):
+    # [FUNCTION DOC] HELPER: Returns a batch.Candidate for accelerate PR number `number` with
+    # Options(worker_reservation_usd 3, max_spend_usd 10).
     return batch.Candidate(
         url=f"https://github.com/huggingface/accelerate/pull/{number}",
         options=Options(worker_reservation_usd="3", max_spend_usd="10"),
@@ -20,18 +28,25 @@ def candidate(number):
 
 
 class ImmediatePool:
+    # [CLASS DOC] Fake ThreadPoolExecutor whose submit runs the function synchronously and returns an already-
+    # completed Future, making admission deterministic.
     """Completed fake futures make admission behavior deterministic."""
 
     def __init__(self, **kwargs):
+        # [FUNCTION DOC] HELPER: stores kwargs['max_workers'] as maximum (KeyError if absent).
         self.maximum = kwargs["max_workers"]
 
     def __enter__(self):
+        # [FUNCTION DOC] HELPER: returns self for use as a context manager.
         return self
 
     def __exit__(self, *args):
+        # [FUNCTION DOC] HELPER: returns False so exceptions propagate.
         return False
 
     def submit(self, fn, *args):
+        # [FUNCTION DOC] HELPER: calls fn(*args) immediately; returns a Future holding its result or the raised
+        # exception.
         result = Future()
         try:
             result.set_result(fn(*args))
@@ -42,6 +57,10 @@ class ImmediatePool:
 
 @pytest.fixture
 def local_batch(tmp_path, monkeypatch):
+    # [FUNCTION DOC] Pytest fixture: writes a fake wheel, creates a 1000 USD campaign budget ledger, and patches
+    # batch.check_runtime_wheel (to digest), _controller_identity ('controller-1'),
+    # ThreadPoolExecutor (ImmediatePool) and _freeze_controller (no-op). Output: tuple (run
+    # directory, campaign directory, wheel path).
     wheel = tmp_path / "owned.whl"
     wheel.write_text("frozen owned runtime")
     campaign = tmp_path / "campaign"
@@ -54,6 +73,8 @@ def local_batch(tmp_path, monkeypatch):
 
 
 def success(url):
+    # [FUNCTION DOC] HELPER: Returns a fake 'verified' candidate row for url, with a verified proof whose
+    # bundle_hash and quality_result path derive from batch._key(url).
     return {
         "url": url,
         "status": "verified",
@@ -66,9 +87,12 @@ def success(url):
 
 
 def test_target_counts_unique_prs_and_never_overdispatches(local_batch, monkeypatch):
+    # [FUNCTION DOC] With target 2 and four candidates, asserts exactly two dispatches, verified/new_verified 2,
+    # stop_reason target_reached, two pending, and an event mentioning '2 isolated PR workers'.
     calls, events = [], []
 
     def run(config, item):
+        # [FUNCTION DOC] HELPER: fake _supervise_candidate recording the url and returning success.
         calls.append(item["url"])
         return success(item["url"])
 
@@ -89,16 +113,22 @@ def test_target_counts_unique_prs_and_never_overdispatches(local_batch, monkeypa
 def test_approved_prior_inventory_is_checked_once_before_allocation(
     local_batch, monkeypatch, changed
 ):
+    # [FUNCTION DOC] Parametrized on whether the prior proof changed. Changed: run_batch raises ValueError
+    # 'differs from the approved inventory' with no configuration, runtime or dispatch. Unchanged:
+    # verified totals 2 with one dispatch. Either way the prior path is verified exactly once.
     directory, campaign, wheel = local_batch
     expected = success(candidate(1).url)["verified"]
     fresh = dict(expected, bundle_hash="sha256:changed") if changed else expected
     checked, dispatched = [], []
 
     def verify(path):
+        # [FUNCTION DOC] HELPER: fake verified_result recording the path and returning the (possibly changed)
+        # proof.
         checked.append(path)
         return fresh
 
     def run(config, item):
+        # [FUNCTION DOC] HELPER: fake _supervise_candidate recording the url and returning success.
         dispatched.append(item["url"])
         return success(item["url"])
 
@@ -134,19 +164,24 @@ def test_approved_prior_inventory_is_checked_once_before_allocation(
 def test_campaign_admission_recheck_follows_prior_proofs_and_precedes_dispatch(
     local_batch, monkeypatch, denied
 ):
+    # [FUNCTION DOC] Parametrized on denial. Asserts ordering prior -> recheck -> dispatch; when
+    # preallocation_check raises, run_batch propagates ValueError and nothing dispatches.
     events = []
     prior = success(candidate(1).url)["verified"]
 
     def verify(path):
+        # [FUNCTION DOC] HELPER: records 'prior' and returns the prior proof.
         events.append("prior")
         return prior
 
     def recheck():
+        # [FUNCTION DOC] HELPER: records 'recheck'; raises ValueError 'Peer capacity changed' when denied.
         events.append("recheck")
         if denied:
             raise ValueError("Peer capacity changed")
 
     def supervise(config, item):
+        # [FUNCTION DOC] HELPER: records 'dispatch' and returns success.
         events.append("dispatch")
         return success(item["url"])
 
@@ -168,16 +203,22 @@ def test_campaign_admission_recheck_follows_prior_proofs_and_precedes_dispatch(
 
 
 def test_gpu_cap_allows_cpu_work_without_overlapping_more_gpu_jobs(local_batch, monkeypatch):
+    # [FUNCTION DOC] Three 2-GPU and three CPU candidates with max_parallel 4 and max_gpu_parallel 2; patches
+    # wait to complete all active jobs per wave. Asserts the first wave is GPU 0,1 plus CPU 3,4,
+    # no wave has more than two GPU jobs, all six dispatched once and target reached.
     items = [candidate(i) for i in range(1, 7)]
     for item in items[:3]:
         item.options.gpus = 2
     admitted, waves = [], []
 
     def run(config, item):
+        # [FUNCTION DOC] HELPER: fake _supervise_candidate recording the url and returning success.
         admitted.append(item["url"])
         return success(item["url"])
 
     def complete(active, **kwargs):
+        # [FUNCTION DOC] HELPER: fake concurrent.futures.wait recording active URLs as a wave and reporting all
+        # done, none pending.
         waves.append(list(active.values()))
         return set(active), set()
 
@@ -194,14 +235,20 @@ def test_gpu_cap_allows_cpu_work_without_overlapping_more_gpu_jobs(local_batch, 
 
 
 def test_drain_collects_active_children_and_never_admits_pending_work(local_batch, monkeypatch):
+    # [FUNCTION DOC] Fake wait writes drain-request.json and completes only one future at a time. Asserts two
+    # dispatches, wait sizes [2, 1], two generated_unverified, stop_reason drained and two
+    # pending.
     output, _, _ = local_batch
     calls, waits = [], []
 
     def run(config, item):
+        # [FUNCTION DOC] HELPER: records the url and returns a generated_unverified row with one task.
         calls.append(item["url"])
         return {"url": item["url"], "status": "generated_unverified", "tasks": ["saved/task"]}
 
     def complete(active, **kwargs):
+        # [FUNCTION DOC] HELPER: fake wait recording active count, writing a drain request and returning the
+        # first future as done and the rest pending.
         waits.append(len(active))
         save_record(output / "drain-request.json", {"reason": "Use the next frozen runtime"})
         # Keep one child active so the next loop must drain it without replacing
@@ -220,6 +267,8 @@ def test_drain_collects_active_children_and_never_admits_pending_work(local_batc
 
 
 def test_existing_drain_request_prevents_any_dispatch(local_batch, monkeypatch):
+    # [FUNCTION DOC] Pre-writes a drain request; asserts no dispatch, stop_reason drained and the candidate
+    # remains pending.
     output, _, _ = local_batch
     save_record(output / "drain-request.json", {"reason": "Do not resume this batch"})
     monkeypatch.setattr(
@@ -231,9 +280,13 @@ def test_existing_drain_request_prevents_any_dispatch(local_batch, monkeypatch):
 
 
 def test_generated_failures_retained_while_next_pr_fills_target(local_batch, monkeypatch):
+    # [FUNCTION DOC] First PR yields generated_unverified with a retained task; asserts three dispatches to reach
+    # 2 new verified, one generated_unverified, and the retained task recorded.
     calls = []
 
     def run(config, item):
+        # [FUNCTION DOC] HELPER: returns generated_unverified for URLs ending '/1', success otherwise; records
+        # calls.
         calls.append(item["url"])
         if item["url"].endswith("/1"):
             return {
@@ -256,6 +309,8 @@ def test_generated_failures_retained_while_next_pr_fills_target(local_batch, mon
 
 
 def test_batch_headroom_stops_dispatch_without_deleting_pending(local_batch, monkeypatch):
+    # [FUNCTION DOC] max_spend_usd 2 is below the 3 USD worker reservation; asserts budget_headroom stop,
+    # candidate still pending, zero reserved.
     monkeypatch.setattr(
         batch, "_supervise_candidate", lambda *_: pytest.fail("No dispatch authorized")
     )
@@ -267,6 +322,8 @@ def test_batch_headroom_stops_dispatch_without_deleting_pending(local_batch, mon
 
 
 def test_global_headroom_also_stops_dispatch(local_batch, monkeypatch):
+    # [FUNCTION DOC] Reserves 999 USD as an uncertain prior operation in the shared ledger; asserts
+    # budget_headroom with 1.000000 available and the reservation untouched.
     _, campaign, _ = local_batch
     ledger = BudgetLedger(campaign / "budget.sqlite3")
     ledger.reserve("previous-uncertain", "999", "existing operation")
@@ -282,9 +339,12 @@ def test_global_headroom_also_stops_dispatch(local_batch, monkeypatch):
 
 
 def test_controller_crash_blocks_new_dispatch_and_preserves_children(local_batch, monkeypatch):
+    # [FUNCTION DOC] Children raise RuntimeError; asserts reconciliation_required after two dispatches, and a
+    # rerun dispatches nothing more.
     calls = []
 
     def run(config, item):
+        # [FUNCTION DOC] HELPER: records the url and raises RuntimeError.
         calls.append(item["url"])
         raise RuntimeError("child crashed after provider dispatch")
 
@@ -299,9 +359,12 @@ def test_controller_crash_blocks_new_dispatch_and_preserves_children(local_batch
 
 
 def test_unresolved_provider_cleanup_stops_new_work(local_batch, monkeypatch):
+    # [FUNCTION DOC] Children return blocked with cleanup_pending; asserts reconciliation_required after two
+    # dispatches.
     calls = []
 
     def run(config, item):
+        # [FUNCTION DOC] HELPER: records the url and returns a blocked row with a pending worker cleanup.
         calls.append(item["url"])
         return {
             "url": item["url"],
@@ -317,9 +380,11 @@ def test_unresolved_provider_cleanup_stops_new_work(local_batch, monkeypatch):
 
 
 def test_completed_blocked_candidates_are_not_retried_implicitly(local_batch, monkeypatch):
+    # [FUNCTION DOC] A blocked candidate is not redispatched on a second run; stop_reason panel_exhausted.
     calls = []
 
     def run(config, item):
+        # [FUNCTION DOC] HELPER: records the url and returns a blocked row.
         calls.append(item["url"])
         return {"url": item["url"], "status": "blocked", "reason": "unsupported source language"}
 
@@ -332,6 +397,8 @@ def test_completed_blocked_candidates_are_not_retried_implicitly(local_batch, mo
 
 
 def test_frozen_inputs_reject_silent_changes(local_batch, monkeypatch):
+    # [FUNCTION DOC] After a first run, a changed max_spend_usd or a different controller identity makes
+    # run_batch raise ValueError 'Frozen batch inputs changed'.
     plan = batch.BatchPlan(name="test", candidates=[candidate(1)], max_spend_usd="2")
     batch.run_batch(plan, *local_batch, on_event=lambda _: None)
     changed = plan.model_copy(update={"max_spend_usd": "3"})
@@ -343,6 +410,8 @@ def test_frozen_inputs_reject_silent_changes(local_batch, monkeypatch):
 
 
 def test_frozen_wheel_rejects_tampering(local_batch):
+    # [FUNCTION DOC] After a first run, modifying the frozen runtime wheel copy makes run_batch raise ValueError
+    # 'Frozen runtime changed'.
     plan = batch.BatchPlan(name="test", candidates=[candidate(1)], max_spend_usd="2")
     batch.run_batch(plan, *local_batch, on_event=lambda _: None)
     output, _, wheel = local_batch
@@ -352,9 +421,12 @@ def test_frozen_wheel_rejects_tampering(local_batch):
 
 
 def test_finished_orphan_is_imported_without_redispatch(local_batch, monkeypatch):
+    # [FUNCTION DOC] First run's child crashes; a batch-result.json then written for it is imported on rerun
+    # (generated_unverified 1) without dispatching again.
     calls = []
 
     def run(config, item):
+        # [FUNCTION DOC] HELPER: records the url and raises RuntimeError.
         calls.append(item["url"])
         raise RuntimeError("lost parent-child response")
 
@@ -372,6 +444,8 @@ def test_finished_orphan_is_imported_without_redispatch(local_batch, monkeypatch
 
 
 def test_retained_inventory_includes_incomplete_task_and_cleanup_receipt(tmp_path):
+    # [FUNCTION DOC] Asserts batch._outcome lists a revision directory with task.toml as a retained task and a
+    # creating worker receipt as cleanup_pending, status generated_unverified.
     task = tmp_path / "candidates" / "a" / "quality" / "revisions" / "r1"
     task.mkdir(parents=True)
     (task / "task.toml").write_text("incomplete but retained")
@@ -383,6 +457,8 @@ def test_retained_inventory_includes_incomplete_task_and_cleanup_receipt(tmp_pat
 
 
 def test_duplicate_and_nonfinite_plan_limits_are_rejected():
+    # [FUNCTION DOC] Expects ValueError 'unique' for URLs differing only by a trailing slash and 'finite and
+    # positive' for NaN/Infinity/0/-1 max_spend_usd.
     with pytest.raises(ValueError, match="unique"):
         batch.BatchPlan(
             name="test",
@@ -397,6 +473,10 @@ def test_duplicate_and_nonfinite_plan_limits_are_rejected():
 
 
 def test_child_shares_scopes_and_reconciles_only_confirmed_worker(local_batch, monkeypatch):
+    # [FUNCTION DOC] Runs batch._run_candidate with FakeTasksmith that spends through author, quality, native and
+    # worker scopes. Asserts generated_unverified with no cleanup pending, source records
+    # forwarded, four ledger operations all prefixed by the batch prefix, accounted 1.602111 USD
+    # (worker charge computed from runtime/spec) and nothing reserved.
     from repo2rlenv.quality.loop.client import RunBudget
     from repo2rlenv.tasksmith import runner as runner_module
     from repo2rlenv.tasksmith.author.budget import AuthorBudget
@@ -408,11 +488,17 @@ def test_child_shares_scopes_and_reconciles_only_confirmed_worker(local_batch, m
     seen = {}
 
     class FakeTasksmith:
+        # [CLASS DOC] Fake Tasksmith that exercises budget scopes set up by _run_candidate.
         def __init__(self, directory, campaign, options, wheel):
+            # [FUNCTION DOC] HELPER: stores directory and opens the campaign ledger; options and wheel ignored.
             self.directory = directory
             self.ledger = BudgetLedger(campaign / "budget.sqlite3")
 
         def run(self, panel, **kwargs):
+            # [FUNCTION DOC] HELPER: records kwargs, asserts budget sharing flags, reserves/settles author,
+            # review, native allocation charges, reserves a worker operation and writes a
+            # terminated worker receipt, report.json and a retained task directory. Relies on
+            # self.budget and self.prefix being injected by the caller.
             seen.update(kwargs)
             assert self.budget.shared is False
             assert self.budget.ledger.shared is True
@@ -464,12 +550,15 @@ def test_child_shares_scopes_and_reconciles_only_confirmed_worker(local_batch, m
 
 
 def test_prior_verified_pr_is_skipped_not_counted_twice(local_batch, monkeypatch):
+    # [FUNCTION DOC] A candidate already in prior_verified is skipped; asserts prior 1, new 1, verified 2 and
+    # only the second PR dispatched.
     prior_path = local_batch[0].parent / "prior-quality.json"
     prior_proof = success(candidate(1).url)["verified"]
     monkeypatch.setattr(batch, "verified_result", lambda _: prior_proof)
     calls = []
 
     def run(config, item):
+        # [FUNCTION DOC] HELPER: records the url and returns success.
         calls.append(item["url"])
         return success(item["url"])
 
@@ -488,6 +577,9 @@ def test_prior_verified_pr_is_skipped_not_counted_twice(local_batch, monkeypatch
 
 
 def frozen_test_controller(tmp_path, body):
+    # [FUNCTION DOC] HELPER: Builds a fake controller wheel zip containing repo2rlenv/tasksmith/batch.py with the
+    # given source body and a late.py MARKER module, freezes it via batch._freeze_controller into
+    # tmp_path/frozen, and returns a configuration dict with directory, wheel and controller_root.
     import zipfile
 
     wheel = tmp_path / "controller.whl"
@@ -508,6 +600,10 @@ def frozen_test_controller(tmp_path, body):
 def test_fresh_subprocess_imports_frozen_controller_and_preserves_private_logs(
     tmp_path, monkeypatch
 ):
+    # [FUNCTION DOC] Puts a poisoned live package on PYTHONPATH and runs _supervise_candidate. Asserts the child
+    # imported the frozen controller in a different pid, inherited env vars unchanged, os.environ
+    # unmodified, stdout captured to controller.stdout with mode 0600, and a second dispatch
+    # raises ValueError 'dispatch already exists'.
     import os
 
     body = """
@@ -545,6 +641,8 @@ def _run_candidate(configuration, candidate):
 
 
 def test_subprocess_failure_keeps_diagnostics_and_never_exposes_them(tmp_path):
+    # [FUNCTION DOC] Child raises; expects RuntimeError 'retained private logs' without the diagnostic text,
+    # which is kept in controller.stderr, and dispatch.json exists.
     configuration = frozen_test_controller(
         tmp_path,
         "def _run_candidate(*args):\n    raise RuntimeError('private diagnostic detail')\n",
@@ -558,6 +656,8 @@ def test_subprocess_failure_keeps_diagnostics_and_never_exposes_them(tmp_path):
 
 
 def test_frozen_controller_rejects_changed_file_before_subprocess(tmp_path):
+    # [FUNCTION DOC] Modifies a frozen controller file; expects ValueError 'Frozen controller files changed' and
+    # no dispatch.json.
     configuration = frozen_test_controller(tmp_path, "def _run_candidate(*args):\n    pass\n")
     late = Path(configuration["controller_root"]) / "repo2rlenv/tasksmith/late.py"
     late.chmod(0o644)
@@ -569,6 +669,8 @@ def test_frozen_controller_rejects_changed_file_before_subprocess(tmp_path):
 
 
 def test_prepared_task_requires_source_and_forbids_generation_import(tmp_path):
+    # [FUNCTION DOC] Expects Candidate validation ValueError 'Prepared tasks require' without a source_record and
+    # 'cannot use generation_run' when combined with generation_run.
     selected = candidate(1).model_dump(mode="json")
     with pytest.raises(ValueError, match="Prepared tasks require"):
         batch.Candidate.model_validate({**selected, "prepared_task": str(tmp_path)})
@@ -584,6 +686,8 @@ def test_prepared_task_requires_source_and_forbids_generation_import(tmp_path):
 
 
 def test_supervisors_run_two_real_isolated_controllers_concurrently(tmp_path):
+    # [FUNCTION DOC] Runs two real _supervise_candidate subprocesses from a thread pool with a controller that
+    # waits (5s deadline) until both are ready; asserts two distinct child pids.
     from concurrent.futures import ThreadPoolExecutor
 
     body = """

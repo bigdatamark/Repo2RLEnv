@@ -1,3 +1,9 @@
+# [MODULE DOC] Tests for reuse of prepared (pre-authored) designs in the Tasksmith runner: a PreparedDesign
+# bound exactly to the frozen PR source and a matching PreparedProfile skips design authoring but
+# still requires a fresh bootstrap, construction and quality review; mismatched bindings,
+# inconsistent seeds, unknown ids or combination with imported/prepared tasks fail before any paid
+# work; bootstrap profile repairs and construction failures fall back to the ordinary bounded
+# authoring loop with reuse receipts recorded. Remote, author and review calls are monkeypatched.
 """Prepared designs save authoring only after exact-source, fresh-profile validation."""
 
 from __future__ import annotations
@@ -24,6 +30,13 @@ from repo2rlenv.tasksmith.models import (
 
 @pytest.fixture
 def setup(tmp_path, monkeypatch):
+    # [FUNCTION DOC] Pytest fixture building a source record (id = first 12 hex of sha256 over
+    # url/head/source_diff), a CPU Profile, a Design, and Options with
+    # prepared_profiles/prepared_designs bound to the source (incl. source_diff sha256 and profile
+    # canonical digest) plus an unrelated bootstrap hint. Creates a budget ledger (20 USD) and a
+    # Tasksmith runner, and patches API-key resolution, runtime wheel check and external agent
+    # runtime path. Output: tuple (runner, source, profile, design). Side effects: files under
+    # tmp_path.
     source = {
         "url": "https://github.com/example/project/pull/7",
         "repo": "https://github.com/example/project",
@@ -98,11 +111,20 @@ def setup(tmp_path, monkeypatch):
 def stages(
     monkeypatch, setup, *, bootstrap_failures=0, construction_failures=0, changed_profile=False
 ):
+    # [FUNCTION DOC] HELPER: Patches runner.remote, runner.author and runner.review_candidate with fakes that
+    # record ('remote'|'author'|'quality', stage, payload copy) into a list. Inputs: monkeypatch,
+    # setup tuple; keyword bootstrap_failures (0) and construction_failures (0) say how many first
+    # attempts fail; changed_profile (False) makes re-authored profiles change a dependency pin.
+    # Output: the calls list.
     runner, _source, profile, design = setup
     calls = []
     bootstraps = constructions = 0
 
     def remote(root, stage, payload):
+        # [FUNCTION DOC] HELPER: fake runner.remote. 'inspect' returns a checkout; 'bootstrap' fails the first
+        # bootstrap_failures times then returns readiness, cache info and image 'fresh-image';
+        # 'construct' asserts the fresh image, fails the first construction_failures times then
+        # completes. Any other stage raises AssertionError (no dependency preseed allowed).
         nonlocal bootstraps, constructions
         calls.append(("remote", stage, deepcopy(payload)))
         if payload["stage"] == "inspect":
@@ -128,6 +150,9 @@ def stages(
         raise AssertionError("Prepared inputs must skip unrelated dependency preseed")
 
     def author(root, stage, schema, inputs, checkout, *, validate=None):
+        # [FUNCTION DOC] HELPER: fake runner.author. For Profile returns a copy of the profile (optionally with a
+        # changed pin) after running the supplied async validate on it; for Design returns a copy
+        # with a revised instruction. Records the call.
         calls.append(("author", stage, deepcopy(inputs)))
         if schema is Profile:
             value = profile.model_copy(deep=True)
@@ -141,6 +166,7 @@ def stages(
         return value
 
     def quality(root, current_source, constructed):
+        # [FUNCTION DOC] HELPER: fake review_candidate recording a 'quality' call and returning status usable.
         calls.append(("quality", "fresh", None))
         return {"status": "usable"}
 
@@ -151,6 +177,8 @@ def stages(
 
 
 def run(setup, **kwargs):
+    # [FUNCTION DOC] HELPER: Runs the setup runner on a Panel named 'prepared-design' with the single source URL
+    # and source_records=[source], forwarding extra kwargs. Returns the runner result dict.
     runner, source, _, _ = setup
     return runner.run(
         Panel(name="prepared-design", prs=[source["url"]]), source_records=[source], **kwargs
@@ -158,6 +186,8 @@ def run(setup, **kwargs):
 
 
 def reuse_receipts(setup):
+    # [FUNCTION DOC] HELPER: Loads and returns every JSON receipt under run/candidates/<source id>/prepared-
+    # design.
     runner, source, _, _ = setup
     root = runner.directory / "candidates" / source["id"] / "prepared-design"
     return [json.loads(p.read_text()) for p in root.glob("*.json")]
@@ -166,6 +196,9 @@ def reuse_receipts(setup):
 def test_exact_design_skips_author_but_runs_fresh_bootstrap_construction_and_quality(
     monkeypatch, setup
 ):
+    # [FUNCTION DOC] Asserts the call sequence inspect, bootstrap-1, construct-1, quality with no author calls,
+    # construct gets the prepared design, one usable result, and a 'reused' receipt with
+    # bootstrap_attempt 1 plus profile and readiness digests.
     calls = stages(monkeypatch, setup)
     result = run(setup)
     assert [(kind, stage) for kind, stage, _ in calls] == [
@@ -186,6 +219,8 @@ def test_exact_design_skips_author_but_runs_fresh_bootstrap_construction_and_qua
     "field", ["url", "head", "base", "source_diff_sha256", "workspace_strategy"]
 )
 def test_source_binding_mismatch_fails_before_any_paid_work(monkeypatch, setup, field):
+    # [FUNCTION DOC] Parametrized over binding fields; corrupts one and expects ValueError 'Prepared design
+    # differs from the frozen PR source' with no stage calls.
     runner, source, _, _ = setup
     prepared = runner.options.prepared_designs[source["id"]]
     setattr(prepared, field, "wrong" if field == "workspace_strategy" else "c" * 64)
@@ -199,6 +234,8 @@ def test_source_binding_mismatch_fails_before_any_paid_work(monkeypatch, setup, 
     "change", ["profile_digest", "profile_content", "missing_profile", "invalid_design"]
 )
 def test_inconsistent_seed_is_rejected_before_remote_preseed(monkeypatch, setup, change):
+    # [FUNCTION DOC] Parametrized: wrong profile digest, mutated prepared profile, missing profile, or
+    # additional_tests using inspect.getsource. Expects ValueError and no stage calls.
     runner, source, _, _ = setup
     prepared = runner.options.prepared_designs[source["id"]]
     if change == "profile_digest":
@@ -220,6 +257,8 @@ def test_inconsistent_seed_is_rejected_before_remote_preseed(monkeypatch, setup,
 
 
 def test_unknown_source_id_cannot_allocate(monkeypatch, setup):
+    # [FUNCTION DOC] Rekeys the prepared design to an unknown id and expects ValueError 'outside the selected
+    # sources' with no calls.
     runner, source, _, _ = setup
     runner.options.prepared_designs["c" * 12] = runner.options.prepared_designs.pop(source["id"])
     calls = stages(monkeypatch, setup)
@@ -230,6 +269,8 @@ def test_unknown_source_id_cannot_allocate(monkeypatch, setup):
 
 @pytest.mark.parametrize("mode", ["imported", "prepared_task"])
 def test_generated_task_and_design_reuse_are_not_combined(monkeypatch, setup, tmp_path, mode):
+    # [FUNCTION DOC] Parametrized: an imported generated task or a prepared_task argument alongside a prepared
+    # design must raise ValueError 'prepared design or generated task' with no calls.
     runner, source, _, _ = setup
     calls = stages(monkeypatch, setup)
     if mode == "imported":
@@ -244,6 +285,10 @@ def test_generated_task_and_design_reuse_are_not_combined(monkeypatch, setup, tm
 
 
 def test_bootstrap_profile_repair_falls_back_to_author_with_clear_receipt(monkeypatch, setup):
+    # [FUNCTION DOC] First bootstrap fails and the re-investigated profile changes, so the run authors design-0
+    # normally. Asserts the call sequence, a 'profile_changed' receipt at bootstrap attempt 2, a
+    # design differing from the prepared one, and an events.jsonl message about authoring a new
+    # design.
     calls = stages(monkeypatch, setup, bootstrap_failures=1, changed_profile=True)
     result = run(setup)
     assert [(kind, stage) for kind, stage, _ in calls] == [
@@ -262,6 +307,8 @@ def test_bootstrap_profile_repair_falls_back_to_author_with_clear_receipt(monkey
 
 
 def test_failed_construction_uses_existing_bounded_author_repair(monkeypatch, setup):
+    # [FUNCTION DOC] First construction fails; asserts one author call for design-1 receiving previous_design
+    # (the prepared design) and previous_failure, design_attempt 2 and a single receipt.
     calls = stages(monkeypatch, setup, construction_failures=1)
     result = run(setup)
     authored = [(stage, inputs) for kind, stage, inputs in calls if kind == "author"]
@@ -273,6 +320,9 @@ def test_failed_construction_uses_existing_bounded_author_repair(monkeypatch, se
 
 
 def test_prepared_design_counts_toward_the_construction_attempt_limit(monkeypatch, setup):
+    # [FUNCTION DOC] With max_stage_attempts 3 and all constructions failing, asserts authoring of design-1 and
+    # design-2 only, status construction_failed at design_attempt 3, one receipt and no quality
+    # review.
     setup[0].options.max_stage_attempts = 3
     calls = stages(monkeypatch, setup, construction_failures=3)
     result = run(setup)
@@ -284,6 +334,8 @@ def test_prepared_design_counts_toward_the_construction_attempt_limit(monkeypatc
 
 
 def test_retry_with_unchanged_profile_still_requires_fresh_readiness(monkeypatch, setup):
+    # [FUNCTION DOC] First bootstrap fails but the re-authored profile is unchanged; asserts usable result, only
+    # investigate-1 authored and a 'reused' receipt at bootstrap attempt 2.
     calls = stages(monkeypatch, setup, bootstrap_failures=1)
     assert run(setup)["usable"] == 1
     assert [stage for kind, stage, _ in calls if kind == "author"] == ["investigate-1"]
@@ -292,6 +344,8 @@ def test_retry_with_unchanged_profile_still_requires_fresh_readiness(monkeypatch
 
 
 def test_no_design_reuse_when_bootstrap_never_passes(monkeypatch, setup):
+    # [FUNCTION DOC] With max_stage_attempts 2 and both bootstraps failing, asserts no design stage, no receipts
+    # and status bootstrap_failed.
     setup[0].options.max_stage_attempts = 2
     calls = stages(monkeypatch, setup, bootstrap_failures=2)
     result = run(setup)
@@ -301,6 +355,8 @@ def test_no_design_reuse_when_bootstrap_never_passes(monkeypatch, setup):
 
 
 def test_changed_design_cannot_resume_existing_frozen_run(monkeypatch, setup):
+    # [FUNCTION DOC] Completes a run, mutates the prepared design instruction and expects ValueError
+    # 'configuration changed' with no new calls.
     calls = stages(monkeypatch, setup)
     run(setup)
     before = len(calls)
@@ -312,6 +368,8 @@ def test_changed_design_cannot_resume_existing_frozen_run(monkeypatch, setup):
 
 
 def test_old_options_without_design_seed_keep_ordinary_authoring(monkeypatch, setup):
+    # [FUNCTION DOC] Re-validates Options without the prepared_designs key; asserts ordinary design-0 authoring,
+    # a usable result and no receipts.
     runner, _, _, _ = setup
     old = runner.options.model_dump(mode="json")
     del old["prepared_designs"]

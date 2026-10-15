@@ -1,3 +1,9 @@
+# [MODULE DOC] Tests for prepared counterexample probes in TaskSmith: a ProbeManifest supplied with a prepared
+# task must be bound to that task's bundle hash, fit quality.max_probes, have unique names and
+# cover required_probe_focus; invalid bindings fail at batch.Candidate admission and in
+# Tasksmith.run before any work or budget operations; trial rewards are not accepted as input;
+# valid definitions reach the QualityLoop unchanged and are frozen into panel/batch configuration
+# so later changes cannot resume. Quality loop, trials, workers and dispatch are faked.
 """Prepared counterexample definitions remain bound and frozen without old rewards."""
 
 from __future__ import annotations
@@ -20,6 +26,10 @@ from repo2rlenv.tasksmith.models import Options, Panel
 
 @pytest.fixture
 def prepared(tmp_path):
+    # [FUNCTION DOC] Pytest fixture writing a minimal Harbor task bundle (tasksmith metadata bound to a synthetic
+    # PR source) under tmp_path/tasks and a ProbeManifest with a wrong_solution and a
+    # valid_alternative probe bound to the bundle's task_identity. Output: SimpleNamespace(task,
+    # source, probes).
     source = {
         "url": "https://github.com/example/project/pull/7",
         "repo": "https://github.com/example/project",
@@ -79,6 +89,9 @@ def prepared(tmp_path):
 
 @pytest.fixture
 def runner(tmp_path, monkeypatch):
+    # [FUNCTION DOC] Pytest fixture creating a 100 USD budget ledger and a Tasksmith runner with
+    # worker_reservation_usd 3 and quality.max_probes 2, patching API-key resolution, runtime
+    # wheel check and external agent runtime path. Output: the runner.
     campaign = tmp_path / "campaign"
     BudgetLedger(campaign / "budget.sqlite3", limit_usd="100")
     options = Options(worker_reservation_usd="3")
@@ -93,6 +106,8 @@ def runner(tmp_path, monkeypatch):
 
 
 def arguments(prepared):
+    # [FUNCTION DOC] HELPER: Returns the run kwargs dict: source_records [source], prepared_task and
+    # prepared_probes from the fixture.
     return {
         "source_records": [prepared.source],
         "prepared_task": prepared.task,
@@ -107,6 +122,9 @@ def test_invalid_bindings_stop_at_admission_and_before_runner_work(
     runner,
     monkeypatch,
 ):
+    # [FUNCTION DOC] Parametrized over missing task, wrong bundle hash, too many probes, duplicate names, and an
+    # uncovered required focus. Expects the matching ValueError both from batch.Candidate and from
+    # runner.run (with runner._run patched to fail), no run directory and no ledger operations.
     args = arguments(prepared)
     options = runner.options
     if invalid == "missing_task":
@@ -145,6 +163,8 @@ def test_invalid_bindings_stop_at_admission_and_before_runner_work(
 
 
 def test_trial_rewards_are_not_a_prepared_probe_input(prepared, runner):
+    # [FUNCTION DOC] Adds a 'trials' list to the manifest JSON and expects Candidate to raise ValueError 'Extra
+    # inputs are not permitted' with no ledger operations.
     value = prepared.probes.model_dump(mode="json")
     value["trials"] = [{"reward": 1.0, "role": "probe"}]
     with pytest.raises(ValueError, match="Extra inputs are not permitted"):
@@ -165,6 +185,11 @@ def test_definitions_reach_quality_and_changed_definitions_cannot_resume(
     monkeypatch,
     required_focus,
 ):
+    # [FUNCTION DOC] Parametrized over required focus (none or model_behavior, which re-annotates the task and
+    # rebinds the hash). Patches QualityLoop, RemoteTrials and ready_worker. Asserts the run is
+    # reviewed, the loop got exactly the manifest via a probes file with only probes/resume
+    # kwargs, panel.json freezes the probes without trials, and a changed probe script raises
+    # ValueError 'Pilot configuration changed' without new calls or ledger operations.
     if required_focus:
         from repo2rlenv.quality.loop.requirements import with_probe_requirements
 
@@ -179,10 +204,14 @@ def test_definitions_reach_quality_and_changed_definitions_cannot_resume(
     seen, worker_calls = [], []
 
     class Loop:
+        # [CLASS DOC] Fake QualityLoop accepting any constructor args.
         def __init__(self, *args, **kwargs):
+            # [FUNCTION DOC] HELPER: ignores all arguments.
             pass
 
         def run(self, task, **kwargs):
+            # [FUNCTION DOC] HELPER: records (task, kwargs, parsed probes file) and returns a 'reviewed'
+            # LoopResult with hashes from task_identity and zero cost.
             seen.append((task, kwargs, json.loads(kwargs["probes"].read_text())))
             return LoopResult(
                 status="reviewed",
@@ -219,14 +248,22 @@ def test_definitions_reach_quality_and_changed_definitions_cannot_resume(
 
 
 def test_candidate_dispatch_forwards_typed_definitions(prepared, runner, tmp_path, monkeypatch):
+    # [FUNCTION DOC] Patches runner_module.Tasksmith with FakeTasksmith and batch identity/wheel checks, then
+    # calls batch._run_candidate with a serialized Candidate. Asserts the run receives a typed
+    # ProbeManifest equal to the original, the resolved task path, the source records,
+    # reuse_evidence False, generation_run None, and no ledger operations.
     seen = {}
 
     class FakeTasksmith:
+        # [CLASS DOC] Fake Tasksmith capturing run kwargs.
         def __init__(self, directory, campaign, options, wheel):
+            # [FUNCTION DOC] HELPER: stores directory and reuses the fixture runner's ledger; other args ignored.
             self.directory = directory
             self.ledger = runner.ledger
 
         def run(self, panel, **kwargs):
+            # [FUNCTION DOC] HELPER: copies kwargs into the outer seen dict and writes report.json with one
+            # reviewed candidate via save_record.
             seen.update(kwargs)
             save_record(self.directory / "report.json", {"candidates": [{"status": "reviewed"}]})
 
@@ -258,6 +295,10 @@ def test_candidate_dispatch_forwards_typed_definitions(prepared, runner, tmp_pat
 
 
 def test_batch_configuration_freezes_inline_definitions(prepared, runner, tmp_path, monkeypatch):
+    # [FUNCTION DOC] Runs batch.run_batch with a 1 USD plan (stops with budget_headroom, dispatch patched to
+    # fail) and asserts configuration.json freezes the inline probes; a plan with a changed probe
+    # rationale then raises ValueError 'Frozen batch inputs changed' and no ledger operations
+    # occur.
     wheel = tmp_path / "owned.whl"
     wheel.write_text("owned runtime fixture")
     monkeypatch.setattr(batch, "check_runtime_wheel", digest)

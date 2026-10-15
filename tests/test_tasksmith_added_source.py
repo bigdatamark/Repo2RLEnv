@@ -1,3 +1,9 @@
+# [MODULE DOC] Tests for TaskSmith handling of PRs that ADD new source files: intake
+# (tasksmith.source.resolve_pr) keeps 'added' operations and a stable content-derived id;
+# repository export omits added modules from the agent workspace and private tests while keeping
+# them in the reference solution; submission validation tolerates new helpers but rejects changed
+# fixed files and symlinks; remote pytest contrast deletes added files before running. No real
+# Docker or network: gh/docker calls are monkeypatched.
 """Added-file packaging and collection contracts, without target execution."""
 
 import hashlib
@@ -13,6 +19,12 @@ from repo2rlenv.tasksmith import source
 
 
 def test_intake_preserves_added_operations_and_identity(monkeypatch):
+    # [FUNCTION DOC] Monkeypatches source._run_gh (returns PR JSON, or the paged files list when the endpoint
+    # contains '/files?') and source.fetch_pr_diff. Asserts resolve_pr reports source_operations
+    # [{path, operation: added}] and that the id is the first 12 hex chars of sha256 over the
+    # sort_keys JSON of {url, head, source_diff}. Then bumps changed_files to 2 and expects
+    # ValueError 'inventory is incomplete'. Inputs: monkeypatch fixture. Side effects: none beyond
+    # patching.
     rows = [{"filename": "lib/new.py", "status": "added", "additions": 1, "deletions": 0}]
     pull = {
         "merged_at": "yes",
@@ -41,6 +53,14 @@ def test_intake_preserves_added_operations_and_identity(monkeypatch):
 
 
 def test_added_modules_are_absent_and_new_helpers_can_be_submitted(tmp_path, monkeypatch):
+    # [FUNCTION DOC] Builds a small base tree in tmp_path, exports a task where lib/new/model.py is
+    # defective=None (absent) with a byte reference. Asserts the file is missing from
+    # environment/source and tests/source, present in solution/reference, that solve.sh creates
+    # its directory, and that the Harbor Task artifact source is /workspace/lib. Then exercises
+    # validate_submission on environment/source: passes initially and with a new helper file,
+    # raises ValueError 'must remain unchanged' when a fixed non-source file changes, and
+    # ValueError 'symlink' when a helper is a symlink. os.chown is monkeypatched to a no-op.
+    # Writes files under tmp_path.
     base = tmp_path / "base"
     for name, text in {
         "lib/__init__.py": "",
@@ -89,11 +109,20 @@ def test_added_modules_are_absent_and_new_helpers_can_be_submitted(tmp_path, mon
 
 
 def test_contrast_removes_added_file_before_remote_pytest(tmp_path, monkeypatch):
+    # [FUNCTION DOC] Patches execution.python_repository._run with a fake recording docker argv: 'docker inspect'
+    # returns exit code 1 state, 'docker cp' of results.xml writes a JUnit file with one failing
+    # and one passing case. Calls test_image with removals=('lib/new.py',) and asserts returncode
+    # 1, that the docker create command ends with 'sh -c' running 'rm -f -- /workspace/lib/new.py
+    # && exec python -m pytest...', and that the last call is 'docker rm -f' cleanup.
     from repo2rlenv.execution import python_repository as module
 
     calls = []
 
     def run(argv, **kwargs):
+        # [FUNCTION DOC] HELPER: fake subprocess runner. Inputs: argv list, ignored kwargs. Appends argv to the
+        # enclosing calls list; for 'docker inspect' returns JSON with ExitCode 1, for 'docker cp
+        # ...:/tmp/results.xml DEST' writes a JUnit XML to DEST. Returns a CompletedProcess with
+        # returncode 0 and the text as stdout.
         calls.append(argv)
         text = json.dumps([{"State": {"ExitCode": 1}}]) if argv[:2] == ["docker", "inspect"] else ""
         if argv[:2] == ["docker", "cp"] and argv[2].endswith(":/tmp/results.xml"):

@@ -1,3 +1,9 @@
+# [MODULE DOC] Tests for tasksmith.build_logs and worker build-failure handling: failed Docker builds keep
+# complete private stdout/stderr plus a sha256 receipt and surface the causal exception even when
+# buried mid-log; dependency-image cache hits skip building; timeouts keep partial streams and
+# redact credentials/commands; oversized streams are bounded while retaining the middle exception;
+# authenticated URLs are redacted; public image build failures are recorded before bootstrap
+# raises. subprocess.run is mocked, so no Docker runs.
 """Build failures retain causal evidence without executing Docker or target code."""
 
 from __future__ import annotations
@@ -17,6 +23,9 @@ CAUSE = "ValueError: Asset exceeds download allowance: hf-internal-testing/dummy
 
 
 def failed_build_output():
+    # [FUNCTION DOC] HELPER: Returns a synthetic, very long Docker build stderr string: many progress lines, a
+    # traceback ending in CAUSE, then a 'failed to solve' line with a huge echoed inline command,
+    # so CAUSE is not in the last 6000 chars.
     return (
         "#6 installing dependencies\n" * 600
         + "#7 0.21 Traceback (most recent call last):\n"
@@ -30,9 +39,16 @@ def failed_build_output():
 
 
 def mock_docker(monkeypatch, *, stderr="", returncode=0, present=False):
+    # [FUNCTION DOC] HELPER: Patches worker.subprocess.run with a fake. 'docker build' returns the given
+    # returncode with stdout 'build progress' and the given stderr; 'docker image inspect' with
+    # --format returns 'sha256:image', without it returns 0 if present else 1; any other argv
+    # fails an assertion. Inputs: monkeypatch; keyword stderr (''), returncode (0), present
+    # (False). Output: the list that records (argv, kwargs) for each call.
     calls = []
 
     def run(argv, **kwargs):
+        # [FUNCTION DOC] HELPER: the fake subprocess.run described in mock_docker; records each call and returns
+        # a CompletedProcess.
         calls.append((argv, kwargs))
         if argv[:2] == ["docker", "build"]:
             return subprocess.CompletedProcess(argv, returncode, "build progress\n", stderr)
@@ -46,6 +62,11 @@ def mock_docker(monkeypatch, *, stderr="", returncode=0, present=False):
 
 
 def test_failed_dependency_build_transfers_complete_private_logs_and_cause(tmp_path, monkeypatch):
+    # [FUNCTION DOC] Runs worker.main for a 'dependencies' stage request with a failing build, unpacks the
+    # evidence tarball and asserts stage-result.json is failed with CAUSE in error and in a
+    # truncated (<6000 chars) log excerpt, full stdout/stderr files are kept, the log receipt
+    # marks stderr complete with the correct sha256, and no dependency-cache.json is written. Sets
+    # REPO2RLENV_REMOTE_WORKER and sys.argv.
     stderr = failed_build_output()
     assert CAUSE not in stderr[-6000:]  # The previous error policy lost this exception.
     mock_docker(monkeypatch, stderr=stderr, returncode=1)
@@ -87,6 +108,10 @@ def test_failed_dependency_build_transfers_complete_private_logs_and_cause(tmp_p
 def test_successful_dependency_build_preserves_recipe_cache_and_commands(
     tmp_path, monkeypatch, present
 ):
+    # [FUNCTION DOC] Parametrized on whether the image is already present. Asserts build_dependency_image's
+    # cache_hit, image_id and key (sha256 of recipe + image id), that docker build runs only on a
+    # miss with argv [docker build -t IMAGE context] and timeout 600, and that log files are
+    # written only on a miss.
     calls = mock_docker(monkeypatch, stderr="build warning\n", present=present)
     result = worker.build_dependency_image("python:3.12-slim", ["pytest==8.4.2"], tmp_path)
     assert result["cache_hit"] is present
@@ -112,11 +137,17 @@ def test_successful_dependency_build_preserves_recipe_cache_and_commands(
 def test_timeout_keeps_partial_streams_and_does_not_echo_command_or_credentials(
     tmp_path, monkeypatch
 ):
+    # [FUNCTION DOC] Makes subprocess.run raise TimeoutExpired with partial bytes including a secret from an env
+    # var. Expects worker.run to raise ValueError 'timed out after 600s' that contains CAUSE but
+    # neither the command arguments nor the secret; the saved stdout is kept and stderr contains
+    # [REDACTED] with the secret absent in all written files.
     secret = "fixture-model-api-key-should-not-be-recorded"
     monkeypatch.setenv("TEST_API_KEY", secret)
     stderr = (CAUSE + "\nAuthorization: Bearer " + secret + "\n").encode()
 
     def timed_out(argv, **kwargs):
+        # [FUNCTION DOC] HELPER: fake subprocess.run that always raises TimeoutExpired with partial stdout/stderr
+        # bytes.
         raise subprocess.TimeoutExpired(argv, kwargs["timeout"], b"partial stdout", stderr)
 
     monkeypatch.setattr(worker.subprocess, "run", timed_out)
@@ -136,6 +167,10 @@ def test_timeout_keeps_partial_streams_and_does_not_echo_command_or_credentials(
 
 
 def test_oversized_stream_has_explicit_bound_and_retains_middle_exception(tmp_path, monkeypatch):
+    # [FUNCTION DOC] Lowers build_logs.MAX_STREAM_BYTES to 16384 and saves a large stderr. Asserts the retained
+    # file is within the bound, contains CAUSE and an 'omitted middle' marker, the returned detail
+    # contains CAUSE, and the receipt is incomplete with redacted_bytes equal to the full size and
+    # retained_bytes equal to the file size.
     monkeypatch.setattr(build_logs, "MAX_STREAM_BYTES", 16_384)
     text = "leading progress\n" * 3000 + CAUSE + "\n" + "trailing progress\n" * 3000
     detail = build_logs.save_build_logs(tmp_path / "dependency-build", "", text)
@@ -151,6 +186,8 @@ def test_oversized_stream_has_explicit_bound_and_retains_middle_exception(tmp_pa
 
 
 def test_public_build_log_redacts_authenticated_urls(tmp_path):
+    # [FUNCTION DOC] Saves stdout with a user:password URL and asserts the credential is absent from the detail
+    # and replaced by [REDACTED]@host in the saved stdout file.
     raw = "Fetching https://build-user:credential-value@example.org/package.whl\n"
     detail = build_logs.save_build_logs(tmp_path / "public-build", raw, "")
     assert "credential-value" not in detail
@@ -160,6 +197,10 @@ def test_public_build_log_redacts_authenticated_urls(tmp_path):
 
 
 def test_public_image_failure_is_recorded_before_bootstrap_returns(tmp_path, monkeypatch):
+    # [FUNCTION DOC] Stubs worker source materialization, dependency image, snapshot and test_image, and makes
+    # the docker build fail. Expects worker.bootstrap to raise ValueError mentioning the asset
+    # allowance cause, and asserts public-build.stderr contains CAUSE and public-build.logs.json
+    # exists.
     base = tmp_path / "base"
     base.mkdir()
     monkeypatch.setattr(worker, "materialize_source", lambda *args: base)
