@@ -1,3 +1,11 @@
+# [MODULE DOC] pr_diff pipeline (SWE-RL style): lists merged PRs/MRs through the source provider
+# (GitHub or GitLab), fetches each diff, applies metadata and quality filters, and emits a Harbor
+# task whose oracle is the full PR diff and whose reward is the 6-component diff-similarity verifier
+# (_pr_diff_verifier.py, shipped as tests/ aux files). Generation needs no sandbox; when
+# options.emit_harbor_env is true the task also gets a thin python:3.12-slim Dockerfile that clones
+# the repo at the base commit and scrubs git history, plus a tests/test.sh shim. Also provides the
+# info-leak scrubber (_strip_info_leak) reused by other pipelines. Side effects: network calls via
+# the provider, files under out_dir, logging.
 """PR-diff mining (SWE-RL-style) → Harbor-runnable env.
 
 Generation is text-only (no sandbox): for each merged PR within scope:
@@ -117,6 +125,13 @@ _SQUASH_SUFFIX_RE = re.compile(
 
 
 def _strip_info_leak(body: str) -> str:
+    # [FUNCTION DOC] HELPER: Removes solution-pointing references from PR/issue text, in order:
+    # markdown-link Closes/Fixes/Resolves and See/Refs/follow-up issue refs, markdown links to
+    # GitHub pull/issues/commit URLs, bare Closes/Refs #N lists, bare [#N](url) links, bare GitHub
+    # pull/issues/commit URLs (incl. subdomains), and Co-authored-by/Signed-off-by/Reviewed-
+    # by/Acked-by trailer lines; then trims trailing spaces before newlines, collapses 3+ newlines,
+    # and strips.
+    # Input: body (str). Output: str. Side effects: none.
     """Remove patterns that hint at the patch the agent should produce.
 
     The goal: leave the natural-language problem description intact, but
@@ -142,6 +157,11 @@ def _strip_info_leak(body: str) -> str:
 
 
 def _build_instruction(pr: PullRequestSummary) -> str:
+    # [FUNCTION DOC] HELPER: Builds the issue-style markdown instruction from a PR: title with any
+    # squash suffix like " (#123)" removed, scrubbed body (placeholder when empty), and a "## Task"
+    # footer naming the first 12 chars of base_sha and describing diff-similarity scoring. Input: pr
+    # (PullRequestSummary).
+    # Output: str.
     """Strip leakage patterns from the PR body + title; emit issue-style prose."""
     title = _SQUASH_SUFFIX_RE.sub("", (pr.title or "").strip())
     body = _strip_info_leak((pr.body or "").strip())
@@ -167,6 +187,9 @@ def _build_instruction(pr: PullRequestSummary) -> str:
 
 
 def _verifier_source() -> str:
+    # [FUNCTION DOC] HELPER: Reads and returns the text of the sibling _pr_diff_verifier.py (UTF-8)
+    # to ship as tests/verifier.py. Output: str. Raises: OSError if the file is missing. Side
+    # effects: file read.
     """Read the standalone verifier module's source for base64 embedding.
 
     Kept as a separate module (``_pr_diff_verifier.py``) so the verifier is
@@ -178,6 +201,16 @@ def _verifier_source() -> str:
 
 
 def build_pr_diff_environment_dockerfile(*, repo_url: str, base_commit: str) -> str:
+    # [FUNCTION DOC] Builds the Harbor environment Dockerfile for a pr_diff task (keyword-only
+    # repo_url, base_commit). Normalizes repo_url: git@github.com:/git@gitlab.com: and http:// forms
+    # to https://, drops any userinfo from the netloc, strips trailing slash and ensures a .git
+    # suffix. Chooses a GITLAB_TOKEN build arg for gitlab.com URLs, else GITHUB_TOKEN, and builds a
+    # shell-quoted token-authenticated URL where only the token expansion is left unquoted-for-
+    # expansion. Output Dockerfile: FROM python:3.12-slim, ARG token (empty default), apt install
+    # git/ca-certificates/curl, git global config, clone with blob:none (authed if token set) then
+    # reset origin to the clean URL, fetch base commit (best effort), hard reset + clean, then the
+    # _env_guard git_history_scrub snippet. The oracle/verifier are not baked in. Output: str. Side
+    # effects: none.
     """Build the minimal Harbor environment/Dockerfile for a pr_diff task.
 
     No bootstrap LLM agent — just python:3.12-slim + git + the repo checked
@@ -259,6 +292,11 @@ def build_pr_diff_environment_dockerfile(*, repo_url: str, base_commit: str) -> 
 
 
 def build_pr_diff_eval_script(*, base_commit: str) -> str:
+    # [FUNCTION DOC] Builds tests/test.sh (keyword-only base_commit): bash script that cds to
+    # /workspace, removes any pre-existing reward files in /logs/verifier, stages all changes (git
+    # add -A, so new files are included), writes git diff --cached against base_commit to
+    # /tmp/predicted.patch, runs tests/verifier.py with oracle.patch, the predicted patch and
+    # instruction.md, and always exits 0 (reward is in the files the verifier writes). Output: str.
     """Build the tests/test.sh that Harbor runs after the agent's edits.
 
     Thin shim — the 6-component reward logic lives in ``verifier.py``,
@@ -310,6 +348,9 @@ def build_pr_diff_eval_script(*, base_commit: str) -> str:
 
 
 def _pr_diff_aux_files(*, oracle_diff: str, instruction: str) -> dict[str, str]:
+    # [FUNCTION DOC] HELPER: Returns the tests/ aux files mapping (keyword-only oracle_diff,
+    # instruction): tests/verifier.py (verifier source), tests/oracle.patch, tests/instruction.md.
+    # Output: dict[str, str]. Side effects: reads the verifier source file.
     """The plain ``tests/`` artifacts the eval script reads at verify time.
 
     Harbor mounts a task's ``tests/`` into the container only during
@@ -337,6 +378,9 @@ _DOC_PATH_RE = re.compile(r"(?:^|/)(?:docs?|examples?)/|\.(?:md|rst|txt)$", re.I
 
 
 def _diff_changed_files(diff: str) -> list[str]:
+    # [FUNCTION DOC] HELPER: Returns the unique b/ paths from "diff --git a/X b/Y" header lines in
+    # order of first appearance. Input: diff (str). Output: list[str].
+    # Note: paths containing whitespace do not match the header regex and are silently dropped.
     """Extract b/ file paths from a unified diff."""
     out: list[str] = []
     seen: set[str] = set()
@@ -351,6 +395,9 @@ def _diff_changed_files(diff: str) -> list[str]:
 
 
 def _diff_loc_changed(diff: str) -> int:
+    # [FUNCTION DOC] HELPER: Counts lines starting with + or - excluding "+++ " / "--- " file
+    # headers.
+    # Input: diff (str). Output: int.
     """Count real +/- lines (excluding +++ / --- file markers)."""
     n = 0
     for line in diff.splitlines():
@@ -360,6 +407,12 @@ def _diff_loc_changed(diff: str) -> int:
 
 
 def _quality_filter(pr: PullRequestSummary, diff: str, options: PRDiffOptions) -> str | None:
+    # [FUNCTION DOC] HELPER: Heuristic gate returning a skip reason or None: "no_files_in_diff",
+    # "test_only_diff" (all files look like tests), "docs_only_diff" (all
+    # docs/examples/.md/.rst/.txt), "revert_pr" (title starts with "Revert "/"revert "),
+    # "diff_too_small" (changed lines below options.min_loc_changed), "instruction_too_thin"
+    # (scrubbed body empty and title under 5 words).
+    # Inputs: pr, diff, options (PRDiffOptions). Output: str or None.
     """Heuristic gates: drop PRs that obviously make bad RL-env tasks.
 
     Returns a short skip_reason on failure, or None to keep.
@@ -395,6 +448,11 @@ def _quality_filter(pr: PullRequestSummary, diff: str, options: PRDiffOptions) -
 
 
 def _compute_no_op_baseline(oracle_diff: str) -> float:
+    # [FUNCTION DOC] HELPER: Computes the reward an empty predicted diff would get against
+    # oracle_diff using the verifier's deterministic components (format_valid, size_sanity,
+    # file_targeting, region_overlap, similarity) with llm_judge None, combined with the verifier's
+    # default weights. Used for per-task reward calibration. Input: oracle_diff (str). Output: float
+    # (0.0 with current weights).
     """Compute the reward an EMPTY predicted diff would get against this oracle.
 
     Used for per-task calibration (stamped in `task.toml.metadata`).
@@ -435,6 +493,8 @@ def _compute_no_op_baseline(oracle_diff: str) -> float:
 
 
 def _difficulty_for(oracle_diff: str) -> tuple[int, str]:
+    # [FUNCTION DOC] HELPER: Returns (loc_changed, bucket) for the oracle diff: <=5 "trivial", <=20
+    # "small", <=80 "medium", else "large". Input: oracle_diff (str). Output: tuple[int, str].
     """Return (loc_changed, difficulty_bucket) for the oracle diff.
 
     Buckets:
@@ -454,6 +514,9 @@ def _difficulty_for(oracle_diff: str) -> tuple[int, str]:
 
 
 class PRDiffPipeline:
+    # [CLASS DOC] Pipeline implementation for PipelineName.PR_DIFF. Class attributes: name,
+    # required_capabilities={PULL_REQUESTS}, requires_bootstrap=False, experimental=False. Holds
+    # input, PRDiffOptions and an optional progress callback; no bootstrap needed.
     """PR-diff mining: sandbox-free generation, Docker-runnable output.
 
     Implements the `Pipeline` Protocol.
@@ -465,12 +528,18 @@ class PRDiffPipeline:
     experimental: ClassVar[bool] = False  # stable
 
     def __init__(self, input: GenerationInput, options: PRDiffOptions, bootstrap=None):
+        # [FUNCTION DOC] Stores input and options; bootstrap is accepted for Protocol uniformity and
+        # ignored.
+        # Inputs: input (GenerationInput); options (PRDiffOptions); bootstrap (any, default None).
         # bootstrap is unused for pr_diff — accepted for Protocol uniformity
         self.input = input
         self.options = options
         self._progress_cb = None  # set via set_progress_callback for live UI
 
     def set_progress_callback(self, cb) -> None:
+        # [FUNCTION DOC] Registers a progress callback called with keywords name, outcome
+        # ("emit"/"skip"/"error"), reason. Input: cb. Output: None. Side effects: sets
+        # self._progress_cb.
         """Wire a per-candidate callback so a CLI live view can update.
 
         Callable signature: cb(name: str, outcome: "emit"|"skip"|"error", reason: str = "")
@@ -478,6 +547,9 @@ class PRDiffPipeline:
         self._progress_cb = cb
 
     def _emit_progress(self, name: str, outcome: str, reason: str = "") -> None:
+        # [FUNCTION DOC] HELPER: Invokes the progress callback if set, logging (debug) and
+        # swallowing its exceptions.
+        # Inputs: name, outcome, reason (default ""). Output: None.
         if self._progress_cb is not None:
             try:
                 self._progress_cb(name=name, outcome=outcome, reason=reason)
@@ -485,6 +557,13 @@ class PRDiffPipeline:
                 logger.debug("progress callback failed: %s", exc)
 
     def run(self, out_dir: Path) -> PipelineResult:
+        # [FUNCTION DOC] Executes the pipeline: creates out_dir, resolves the repo token
+        # (RuntimeError when private and none), lists merged PRs via the provider with
+        # limit/since/until/skip_drafts (RuntimeError wrapping GitHubError/GitLabError). For each
+        # PR: _should_skip; fetch the diff (provider error -> "diff_fetch_failed", logged warning);
+        # skip "empty_diff"; apply _quality_filter; otherwise build and write the task. Input:
+        # out_dir (Path). Output: PipelineResult(candidates=number of PRs listed, emitted, skipped,
+        # out_dir, skip_reasons). Side effects: network, filesystem, logging, callbacks.
         out_dir.mkdir(parents=True, exist_ok=True)
 
         token = resolve_repo_token(self.input.repo, self.input.auth)
@@ -558,6 +637,10 @@ class PRDiffPipeline:
         )
 
     def _should_skip(self, pr: PullRequestSummary) -> str | None:
+        # [FUNCTION DOC] HELPER: Metadata gate returning "draft" (draft and skip_drafts), "no_files"
+        # (no changed files), "too_many_files" (more than max_files_per_pr), "not_merged" (no
+        # merged_at), else None.
+        # Input: pr (PullRequestSummary). Output: str or None.
         if pr.is_draft and self.options.skip_drafts:
             return "draft"
         if not pr.changed_files:
@@ -569,6 +652,17 @@ class PRDiffPipeline:
         return None
 
     def _build_task(self, pr: PullRequestSummary, diff: str) -> HarborTask:
+        # [FUNCTION DOC] HELPER: Builds the HarborTask for a PR: id "<owner>__<repo>-<number>",
+        # repo2env metadata (pipeline_version "0.3.0", base SHA ref, PR URL reference, reward_kinds
+        # ["diff_similarity"], optional synthesis_llm, pr_diff details, reward_calibration with no-
+        # op baseline, LOC and difficulty). When emit_harbor_env, adds the Dockerfile, test.sh and
+        # tests/ aux files; otherwise they are None/empty (pure text task). Difficulty "trivial" is
+        # mapped to "easy"; category "bugfix".
+        # Inputs: pr, diff (oracle). Output: HarborTask.
+        # KNOWN ISSUE: unlike the runtime pipelines, no egress-guard docker-compose is emitted, so
+        # the agent's container keeps network access to github.com and could fetch the merged PR
+        # (the oracle), contrary to the project invariant that every emitted task blackholes fix-
+        # source egress.
         owner, name = self.input.repo.owner_name
         task_id = f"{owner}__{name}-{pr.number}"
 

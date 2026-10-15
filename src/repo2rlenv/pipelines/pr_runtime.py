@@ -1,3 +1,13 @@
+# [MODULE DOC] pr_runtime pipeline plus the shared runtime-task toolkit reused by commit_runtime and
+# cve_patches. The pipeline lists merged PRs/MRs via the source provider, fetches each diff, splits
+# it into a source patch (oracle) and a test patch, applies metadata/structural/Lite filters,
+# validates FAIL_TO_PASS / PASS_TO_PASS sets inside the bootstrap Docker image
+# (pr_runtime_validate.validate_pr), and emits Harbor tasks with a Dockerfile reset to the PR base
+# commit (git history scrubbed), a graded tests/test.sh, plain verifier/F2P/P2P artifacts and an
+# egress-guard compose overlay. Shared helpers: leak scrubbing and body reflow for instructions,
+# test-path classification, diff splitting/counting, eval script and Dockerfile builders, and test-
+# command normalization/targeting per runner (pytest, go, cargo, jest/mocha/vitest). Side effects:
+# network via provider, Docker, files under out_dir, logging.
 """Sandbox-verified PR mining (SWE-bench-style).
 
 For each merged PR within scope:
@@ -134,12 +144,20 @@ _LEAK_PATTERNS: tuple[re.Pattern[str], ...] = (
 
 
 def _linked_issue_number(pr_body: str) -> int | None:
+    # [FUNCTION DOC] HELPER: Returns the issue number referenced by a close/fix/resolve keyword
+    # followed by "#N" or "[#N" in the text, else None. Input: pr_body (str or None). Output: int or
+    # None.
     """Return the issue number this PR closes, if any (`Closes #123`)."""
     m = _LINKED_ISSUE_RE.search(pr_body or "")
     return int(m.group(1)) if m else None
 
 
 def _strip_info_leak(text: str) -> str:
+    # [FUNCTION DOC] HELPER: Applies every _LEAK_PATTERNS regex in order, deleting cherry-
+    # pick/backport/commit SHA mentions, bare 40-char SHAs, markdown and bare GitHub
+    # pull/issues/commit links, close/fix/see/ref #N refs (incl. owner/repo#N), [#N](url) links, "
+    # (#N)" squash suffixes and name#N cross-repo refs. Does not trim whitespace. Input: text (str).
+    # Output: str. Side effects: none.
     """Remove solution-pointing references (SHAs, fix-PR links, #refs)."""
     out = text
     for pat in _LEAK_PATTERNS:
@@ -156,6 +174,10 @@ _MAX_BODY_CHARS = 4000
 
 
 def _reflow_pr_body(body: str) -> str:
+    # [FUNCTION DOC] HELPER: Tidies a PR/issue body: removes HTML comments, truncates at the first
+    # boilerplate header line (checklist, changelog, release notes, how to test, test plan, tests
+    # added/updated, testing, types of changes, reviewer notes), collapses 3+ newlines, strips, and
+    # caps at 4000 chars appending a "(truncated)" marker. Input: body (str). Output: str.
     """Tidy a verbose PR body into a focused problem statement.
 
     - drop HTML comment blocks (PR-template guidance)
@@ -189,6 +211,10 @@ _DOC_PREFIX_DIRS = {"docs", "doc", "documentation", "examples", "example"}
 
 
 def _path_is_test(path: str) -> bool:
+    # [FUNCTION DOC] HELPER: Classifies a repo path as a test file: False for empty paths or paths
+    # whose first component is a docs/examples root; True if any directory component is
+    # test/tests/testing/e2e/ __tests__; else True for basenames test_*.py/.js/.ts, *_test.py,
+    # *_test.go, *.test.ts/js, *.spec.ts/js. Case-insensitive. Input: path (str). Output: bool.
     """True if the file is a real test file, false for docs / src files
     that merely contain a test keyword in their path.
 
@@ -227,6 +253,13 @@ _DIFF_HEADER_RE = re.compile(r"^diff --git a/(\S+) b/(\S+)$", re.MULTILINE)
 
 
 def split_patch_and_test_patch(unified_diff: str) -> tuple[str, str]:
+    # [FUNCTION DOC] Splits a unified diff into (source patch, test patch) by per-file "diff --git"
+    # blocks: a block goes to the test patch if either its a/ or b/ path satisfies _path_is_test,
+    # else to the source patch. Blank input returns ("", ""); input with no diff headers is returned
+    # entirely as the source patch. Input: unified_diff (str). Output: tuple[str, str].
+    # KNOWN ISSUE: the docstring describes SWE-bench's substring rule ("path contains
+    # test/tests/e2e/ testing") but the code uses the stricter path-component/basename classifier
+    # _path_is_test.
     """Split a PR's unified diff into (source patch, test patch).
 
     SWE-bench rule: a file hunk goes into `test_patch` iff its path contains
@@ -269,6 +302,14 @@ def _build_instruction(
     token: str | None = None,
     provider=github,
 ) -> str:
+    # [FUNCTION DOC] HELPER: Builds the markdown task instruction for a PR. Inputs: pr; owner, name
+    # (default ""); token (keyword-only, default None); provider (keyword-only, module/object with
+    # fetch_issue, default the github module). If the PR body links an issue and owner/name are
+    # given, fetches the issue and uses its title/body (fallbacks to PR values when empty). Body
+    # then has Closes #N removed, leak patterns stripped, and is reflowed (placeholder when empty);
+    # title is leak-stripped (falls back to the raw PR title). Output: "# Issue" / Title / "##
+    # Description" / "## Task" (base = first 12 chars of base_sha). Side effects: possible network
+    # issue fetch.
     """Build the task instruction (problem statement).
 
     Sources the problem from the **linked issue** (the bug *report*) when the
@@ -311,6 +352,7 @@ def _build_instruction(
 
 
 def _word_count(text: str) -> int:
+    # [FUNCTION DOC] HELPER: Counts regex word tokens in text (None treated as empty). Output: int.
     return len(re.findall(r"\b\w+\b", text or ""))
 
 
@@ -331,11 +373,18 @@ _NON_BUG_TITLE_RE = re.compile(
 
 
 def _is_non_bug_pr(title: str) -> bool:
+    # [FUNCTION DOC] HELPER: True when the title matches _NON_BUG_TITLE_RE (backport, cherry-pick,
+    # revert, bump, release, changelog, forward-merge, version bump, resync, merge ... into, merge
+    # branch/main/..., sync main/...). Input: title (str or None). Output: bool.
     """True if the PR title marks a backport / cherry-pick / release / revert."""
     return bool(_NON_BUG_TITLE_RE.search(title or ""))
 
 
 def _verifier_source() -> str:
+    # [FUNCTION DOC] HELPER: Reads and returns the text of the sibling _pr_runtime_verifier.py.
+    # Output: str. Raises: OSError if missing. Side effects: file read.
+    # KNOWN ISSUE: the docstring says the source is baked into test.sh as base64, but it is now
+    # shipped as the plain tests/verifier.py artifact via _runtime_aux_files.
     """Read the standalone graded verifier's source for base64 embedding.
 
     Mirrors pr_diff: the verifier (`_pr_runtime_verifier.py`) runs inside
@@ -346,6 +395,12 @@ def _verifier_source() -> str:
 
 
 def build_environment_dockerfile(bootstrap_image: str, base_commit: str) -> str:
+    # [FUNCTION DOC] Builds the per-task Dockerfile: FROM bootstrap_image (tag for local images,
+    # registry digest for pushed ones; chosen by the caller), WORKDIR /workspace, best-effort
+    # install of git + ca-certificates and python3 via apt-get or apk, mark safe.directory, fetch
+    # base_commit (or unshallow) best effort, hard reset to base_commit and git clean -fdx keeping
+    # dependency dirs (_GIT_CLEAN_EXCLUDES), then append _env_guard.git_history_scrub(base_commit).
+    # Inputs: bootstrap_image (str); base_commit (SHA str). Output: str. Side effects: none.
     """Build the per-task environment/Dockerfile.
 
     The bootstrap image has the repo at the bootstrap-time HEAD (whatever
@@ -405,6 +460,10 @@ def build_environment_dockerfile(bootstrap_image: str, base_commit: str) -> str:
 
 
 def _path_prelude_for_language(language: str | None) -> str:
+    # [FUNCTION DOC] HELPER: Returns an "export PATH=..." line prepending known toolchain dirs for
+    # go, rust, node or java (case-insensitive), or "" for other/None languages. Input: language
+    # (str or None).
+    # Output: str.
     """Shell snippet that prepends common toolchain dirs to $PATH.
 
     The bootstrap agent often installs language toolchains (Go, Rust,
@@ -441,6 +500,18 @@ def build_eval_script(
     fail_to_pass: list[str] | None = None,
     pass_to_pass: list[str] | None = None,
 ) -> str:
+    # [FUNCTION DOC] Builds tests/test.sh run by Harbor after the agent's edits. Inputs:
+    # base_commit; test_patch (hidden test diff); test_cmds (list joined with &&); keyword-only
+    # language (for PATH prelude), fail_to_pass and pass_to_pass (lists or None). Script: bash with
+    # set -uxo pipefail, optional PATH prelude, cd /workspace, mark safe.directory, mkdir
+    # /logs/verifier, checkout test files touched by the test patch from base_commit (tolerating
+    # failure), apply the test patch from a heredoc with git apply --reject and fail closed (reward
+    # 0 + reward-details.json with "test_patch_apply_failed", exit 0) if it does not apply, run the
+    # test block in a subshell capturing output to /logs/verifier/test_output.log, record exit code,
+    # and print the log. Without fail_to_pass: binary reward 1.0/0.0 from the exit code. With
+    # fail_to_pass: runs $SCRIPT_DIR/verifier.py with the log, f2p.json, p2p.json, quoted test
+    # commands, exit code and out dir, falling back to the binary reward if the verifier fails. Both
+    # paths reset the test files again and exit 0. Output: str. Side effects: none.
     """Build the `tests/test.sh` content that Harbor runs after the model patch.
 
     Adapted from SWE-bench's `harness/test_spec/utils.py:make_eval_script_list_common`.
@@ -547,6 +618,10 @@ def build_eval_script(
 
 
 def _runtime_aux_files(fail_to_pass: list[str], pass_to_pass: list[str]) -> dict[str, str]:
+    # [FUNCTION DOC] HELPER: Returns the plain tests/ artifacts for the graded verifier:
+    # tests/verifier.py (source), tests/f2p.json and tests/p2p.json (pretty JSON lists; P2P None ->
+    # []). Inputs: fail_to_pass, pass_to_pass (list[str]). Output: dict[str, str]. Side effects:
+    # reads verifier source file.
     """The plain task artifacts the graded test.sh reads from /tests.
 
     Shipping these as files (vs base64 inside test.sh) keeps task semantics
@@ -561,6 +636,9 @@ def _runtime_aux_files(fail_to_pass: list[str], pass_to_pass: list[str]) -> dict
 
 
 def _files_in_patch(unified_diff: str) -> list[str]:
+    # [FUNCTION DOC] HELPER: Returns unique b/ paths from "diff --git" headers in order; [] for
+    # blank input.
+    # Input: unified_diff (str). Output: list[str].
     """Extract the unique 'b/' file paths touched by a unified diff."""
     if not unified_diff.strip():
         return []
@@ -582,6 +660,9 @@ _NEW_TEST_FUNC_RE = re.compile(
 
 
 def _diff_loc_changed(unified_diff: str) -> int:
+    # [FUNCTION DOC] HELPER: Counts +/- lines excluding "+++ "/"--- " headers; None treated as
+    # empty.
+    # Input: unified_diff. Output: int.
     """Count real +/- lines in a unified diff (excludes +++/--- file markers)."""
     n = 0
     for line in (unified_diff or "").splitlines():
@@ -591,6 +672,8 @@ def _diff_loc_changed(unified_diff: str) -> int:
 
 
 def _difficulty_bucket(f2p_count: int, loc_changed: int) -> str:
+    # [FUNCTION DOC] HELPER: Coarse difficulty: "trivial" when loc <= 5 and F2P <= 1, else "small"
+    # (loc <= 20), "medium" (<= 80), "large". Inputs: f2p_count, loc_changed (int). Output: str.
     """Coarse difficulty from oracle size — lets consumers slice train/eval.
 
     Combines the fix size (LOC) and how many distinct behaviours must be
@@ -606,6 +689,9 @@ def _difficulty_bucket(f2p_count: int, loc_changed: int) -> str:
 
 
 def _count_new_test_funcs(test_patch: str) -> int:
+    # [FUNCTION DOC] HELPER: Counts added lines (starting with +) that define a new test: Python def
+    # test_* or class *Test*, Go func Test*, JS it(/test(/describe(. Input: test_patch (str).
+    # Output: int (0 if blank).
     """Count new test-function definitions added in a unified diff.
 
     Used to filter out PRs whose test_patch is comment-only or docstring-only
@@ -617,6 +703,14 @@ def _count_new_test_funcs(test_patch: str) -> int:
 
 
 def normalize_test_cmds_for_runtime(test_cmds: list[str]) -> list[str]:
+    # [FUNCTION DOC] Rewrites bootstrap test commands so they actually run tests with per-test
+    # output. For every command: strips trailing "| head/tail ...", "2>&1", ">/dev/null" redirects
+    # and trailing pipe/ ampersand chars. pytest: removes --collect-only/--co and -q/--quiet, adds
+    # -v if no verbosity flag. go test: inserts -v after "go test" if missing. cargo test: removes
+    # -q/--quiet. jest/mocha/ vitest/npm|yarn|pnpm test: removes --silent; vitest: removes --verbose
+    # and adds --reporter=verbose if no reporter; jest/mocha: adds --verbose if no verbose/reporter
+    # flag.
+    # Input: test_cmds (list[str]). Output: new list[str] (stripped). Side effects: none.
     """Adapt bootstrap-recorded test commands for actual per-PR execution.
 
     Bootstrap prefers fast/tolerant commands (e.g. `pytest --collect-only`)
@@ -704,6 +798,9 @@ _JEST_TARGETABLE_EXT = (".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs")
 
 
 def _go_packages_from_test_files(test_files: list[str]) -> list[str]:
+    # [FUNCTION DOC] HELPER: Maps *_test.go file paths to unique "./<dir>" package paths ("./" for
+    # root-level files), preserving order; non-Go-test files are ignored. Input: test_files. Output:
+    # list[str].
     """Map `pkg/foo/bar_test.go` → `./pkg/foo` for Go's package-path CLI."""
     pkgs: list[str] = []
     for f in test_files:
@@ -718,6 +815,12 @@ def _go_packages_from_test_files(test_files: list[str]) -> list[str]:
 
 
 def targeted_test_cmds_for_pr(test_cmds: list[str], test_files: list[str]) -> list[str]:
+    # [FUNCTION DOC] Narrows test commands to the files touched by the test patch. If test_files is
+    # empty, returns test_cmds unchanged (same list). pytest commands: append .py test files unless
+    # a positional path argument already follows the pytest token. go test: replace "./..." with the
+    # package dirs, or append them if no ./path is present. jest/mocha/vitest: append JS/TS test
+    # files unless a path argument exists. Other runners (e.g. cargo) are unchanged.
+    # Inputs: test_cmds (list[str]); test_files (list[str]). Output: list[str].
     """Limit the test invocation to the file paths the PR's test_patch touches.
 
     Running the whole suite on every PR is 10-50× slower than running only
@@ -782,6 +885,10 @@ def targeted_test_cmds_for_pr(test_cmds: list[str], test_files: list[str]) -> li
 
 
 class PRRuntimePipeline:
+    # [CLASS DOC] Pipeline implementation for PipelineName.PR_RUNTIME. Class attributes: name,
+    # required_capabilities={PULL_REQUESTS}, requires_bootstrap=True, experimental=False. Holds
+    # input, PRRuntimeOptions, BootstrapResult, optional progress callback; run() also sets _token
+    # and _provider used later when building instructions.
     """Sandbox-verified PR mining. Implements the `Pipeline` Protocol."""
 
     name: ClassVar[PipelineName] = PipelineName.PR_RUNTIME
@@ -795,6 +902,9 @@ class PRRuntimePipeline:
         options: PRRuntimeOptions,
         bootstrap: BootstrapResult | None = None,
     ):
+        # [FUNCTION DOC] Stores input/options/bootstrap and clears the progress callback. Inputs:
+        # input (GenerationInput); options (PRRuntimeOptions); bootstrap (BootstrapResult or None).
+        # Raises: RuntimeError when bootstrap is None.
         if bootstrap is None:
             raise RuntimeError(
                 "pr_runtime requires a BootstrapResult (set requires_bootstrap=True "
@@ -806,9 +916,14 @@ class PRRuntimePipeline:
         self._progress_cb = None
 
     def set_progress_callback(self, cb) -> None:
+        # [FUNCTION DOC] Registers the progress callback (keywords name, outcome, reason). Input:
+        # cb. Output: None.
         self._progress_cb = cb
 
     def _emit_progress(self, name: str, outcome: str, reason: str = "") -> None:
+        # [FUNCTION DOC] HELPER: Invokes the progress callback if set; its exceptions are logged at
+        # debug and swallowed.
+        # Inputs: name, outcome, reason (default ""). Output: None.
         if self._progress_cb is not None:
             try:
                 self._progress_cb(name=name, outcome=outcome, reason=reason)
@@ -818,6 +933,17 @@ class PRRuntimePipeline:
     # ----- run loop -----------------------------------------------------------
 
     def run(self, out_dir: Path) -> PipelineResult:
+        # [FUNCTION DOC] Executes the pipeline. Resolves the token and provider (stored on self),
+        # raising RuntimeError for a private repo without a token; lists merged PRs with
+        # limit/since/until/skip_drafts (RuntimeError on provider errors). For each PR: _pre_filter;
+        # fetch diff (provider error -> "diff_fetch_failed" with a warning); split patches; skip
+        # "empty_source_patch"/"no_test_patch"; _structural_quality_filter; _lite_filter. Unless
+        # skip_validation, lazily starts one shared sandbox and runs validate_pr at base_sha with
+        # normalized+targeted test commands; skips "no_fail_to_pass" (progress reason =
+        # outcome.reason when present) if require_fail_to_pass and F2P count < min_fail_to_pass.
+        # Builds and writes the task. Sandbox cleaned up in finally.
+        # Input: out_dir (Path). Output: PipelineResult(candidates=len(prs), emitted, skipped,
+        # out_dir, skip_reasons). Side effects: network, Docker, filesystem, logging, callbacks.
         out_dir.mkdir(parents=True, exist_ok=True)
 
         token = resolve_repo_token(self.input.repo, self.input.auth)
@@ -962,6 +1088,10 @@ class PRRuntimePipeline:
     # ----- filters ------------------------------------------------------------
 
     def _pre_filter(self, pr: PullRequestSummary) -> str | None:
+        # [FUNCTION DOC] HELPER: Diff-free gate returning "draft" (draft and skip_drafts),
+        # "not_merged", "no_files", "non_bug_pr" (title matches non-bug patterns),
+        # "problem_statement_too_short" (when min_problem_statement_words > 0 and PR body is
+        # shorter), else None. Input: pr. Output: str/None.
         """Cheap filters that don't need the diff."""
         if pr.is_draft and self.options.skip_drafts:
             return "draft"
@@ -982,6 +1112,9 @@ class PRRuntimePipeline:
         return None
 
     def _structural_quality_filter(self, source_patch: str, test_patch: str) -> str | None:
+        # [FUNCTION DOC] HELPER: Returns "ci_only_patch" when skip_ci_only and all source files are
+        # under .github/, "no_new_test_funcs" when require_new_test_funcs and the test patch adds no
+        # test definition, else None. Inputs: source_patch, test_patch (str). Output: str or None.
         """Cheap diff-level filters that catch over-emitted task types.
 
         Returns a skip reason string, or None to keep.
@@ -1010,6 +1143,13 @@ class PRRuntimePipeline:
         return None
 
     def _lite_filter(self, pr: PullRequestSummary, source_patch: str) -> str | None:
+        # [FUNCTION DOC] HELPER: SWE-bench Lite-style gate. Always: "too_many_source_files" if more
+        # than max_source_files_per_pr. When options.lite_filter: "lite_not_single_source_file" (not
+        # exactly 1 file), "lite_problem_too_short" (body < 40 words), "lite_has_image" (markdown
+        # image or <img>), "lite_has_external_link" (http(s) URL not starting with github.com/),
+        # "lite_has_commit_sha" (7-40 hex chars). Inputs: pr, source_patch. Output: str or None.
+        # Note: the hex check also matches ordinary hex-looking words in the body (e.g. "deadbeef",
+        # "1234567"), rejecting some legitimate PRs.
         """SWE-bench Lite-style structural filters."""
         source_files = _files_in_patch(source_patch)
         if len(source_files) > self.options.max_source_files_per_pr:
@@ -1032,6 +1172,9 @@ class PRRuntimePipeline:
     # ----- sandbox -----------------------------------------------------------
 
     def _start_validation_sandbox(self):
+        # [FUNCTION DOC] HELPER: Starts a DockerSandbox on the bootstrap image tag with an empty
+        # temp marker dir (with .keep) as repo_dir (the repo is already inside the image). Output:
+        # sandbox (caller cleans up). Side effects: temp dir (not removed), Docker container.
         """Spin up a DockerSandbox from the bootstrap image (shared across PRs)."""
         # The bootstrap image already contains the repo at the bootstrap-time HEAD.
         # We pass repo_dir=None? No — DockerSandbox.start requires a repo_dir to copy in.
@@ -1063,6 +1206,17 @@ class PRRuntimePipeline:
         pass_to_pass: list[str],
         validation_status: str,
     ) -> HarborTask:
+        # [FUNCTION DOC] HELPER: Builds the HarborTask for a PR. Inputs: pr, patch (oracle),
+        # test_patch; keyword-only fail_to_pass, pass_to_pass, validation_status. Id
+        # "<owner>__<repo>-<number>". Eval script from build_eval_script with normalized+targeted
+        # commands and F2P/P2P (graded when F2P non-empty); Dockerfile on image digest if pushed
+        # else tag at base_sha. repo2env metadata: pipeline_version "0.3.0", PR URL reference,
+        # optional synthesis_llm, pr_runtime block (reward_mode "graded"), reward_calibration with
+        # counts, LOC and difficulty bucket. Instruction via _build_instruction using the stored
+        # token/provider (defaults when run() was not called). Task difficulty is fixed to "medium"
+        # (the computed bucket is only in metadata); category "bugfix". Aux files: verifier +
+        # F2P/P2P JSON (only when F2P non-empty) plus egress-guard compose. Output: HarborTask. Side
+        # effects: possible network issue fetch.
         owner, name = self.input.repo.owner_name
         task_id = f"{owner}__{name}-{pr.number}"
 

@@ -1,3 +1,10 @@
+# [MODULE DOC] cve_patches pipeline: queries the OSV API for vulnerabilities of the repo's package,
+# maps each in-scope vuln (severity filter, has a fix commit in this GitHub repo) to its first fix
+# commit, fetches the commit diff and parent via the GitHub API, splits it into source/test patches,
+# and builds an F2P oracle either from a shipped test patch or from an LLM-synthesized PoC test
+# (one-shot prompt or agentic, Python only) validated in the bootstrap sandbox. Emits leak-scrubbed
+# Harbor tasks. Side effects: network (OSV, GitHub, LLM), Docker sandboxes, files under out_dir,
+# logging, optional debug dump to /tmp/poc_debug when R2E_POC_DEBUG is set.
 """Map OSV vulnerability records to fixing commits in the target repo.
 
 Workflow:
@@ -95,6 +102,12 @@ STRICT RULES:
 
 
 def _poc_user_prompt(vuln: OSVVuln, patch: str, vuln_code: str = "") -> str:
+    # [FUNCTION DOC] HELPER: Builds the user prompt for one-shot PoC test synthesis: CVE id (or OSV
+    # id), summary + details (truncated to 3000 chars), optional vulnerable source (truncated to
+    # 9000 chars) in a python fence, the fix diff (truncated to 6000 chars), and a closing
+    # instruction.
+    # Inputs: vuln (OSVVuln); patch (str); vuln_code (str, default ""). Output: str joined by
+    # newlines.
     desc = (vuln.summary or "") + "\n\n" + (vuln.details or "")
     parts = [f"CVE: {vuln.cve_id or vuln.id}\n\nDescription:\n{desc.strip()[:3000]}\n"]
     if vuln_code:
@@ -135,6 +148,15 @@ _LEAK_TOKEN_RES = [
 
 
 def _strip_fix_leaks(text: str) -> str:
+    # [FUNCTION DOC] HELPER: Scrubs fix-pointers from advisory text: removes markdown sections whose
+    # heading is fix-oriented (references, remediation, workarounds, credits, links, ...), whole
+    # lines mentioning apply/see/backport, "fixed in vX.Y", "upgrade to", then inline URLs, CVE/GHSA
+    # ids, PR/commit/issue refs, #NN refs and 7-40 char hex strings; collapses 3+ newlines to 2 and
+    # strips.
+    # Input: text (str). Output: str. Side effects: none.
+    # KNOWN ISSUE: the bare-hex SHA regex also removes ordinary 7+ char hex-looking words/numbers
+    # (e.g. "deadbeef", "1234567") from the symptom text, and the "see" line rule deletes any line
+    # containing the word "see".
     """Remove fix-pointers so a web-capable agent can't fetch the patch.
 
     Drops fix-oriented sections, then scrubs inline ids/URLs/PR refs/SHAs.
@@ -151,6 +173,14 @@ def _strip_fix_leaks(text: str) -> str:
 
 
 def _build_instruction(vuln: OSVVuln) -> str:
+    # [FUNCTION DOC] HELPER: Renders the leak-free task instruction for a vuln: "# Security
+    # advisory" with scrubbed title (fallback generic), severity text (or "unknown"), CWE ids (or
+    # "(no CWE tag)"), scrubbed description (or placeholder), and a "## Task" section asking to
+    # patch the vulnerability without fetching the upstream fix. Input: vuln (OSVVuln). Output: str.
+    # Side effects: none.
+    # Note: the prompt does include a "do not search/fetch" request, which the project invariants
+    # say should be enforced by environment rather than asked in the prompt (the egress guard also
+    # applies).
     """Render the CVE description into a leak-free, task-prompt-shaped string.
 
     The visible prompt never names the CVE/GHSA id, the fixing PR/commit, or a
@@ -180,6 +210,9 @@ def _build_instruction(vuln: OSVVuln) -> str:
 
 
 class CVEPatchesPipeline:
+    # [CLASS DOC] Pipeline implementation for PipelineName.CVE_PATCHES. Class attributes: name,
+    # required_capabilities={COMMIT_API}, requires_bootstrap=True, experimental=True. Holds input,
+    # CVEPatchesOptions, BootstrapResult, optional progress callback and accumulated LLM cost.
     """OSV-driven CVE → fix-commit pipeline."""
 
     name: ClassVar[PipelineName] = PipelineName.CVE_PATCHES
@@ -193,6 +226,10 @@ class CVEPatchesPipeline:
         options: CVEPatchesOptions,
         bootstrap: BootstrapResult | None = None,
     ):
+        # [FUNCTION DOC] Stores input, options, bootstrap; initializes progress callback None and
+        # LLM cost 0.0.
+        # Inputs: input (GenerationInput); options (CVEPatchesOptions); bootstrap (BootstrapResult
+        # or None). Raises: RuntimeError when bootstrap is None.
         if bootstrap is None:
             raise RuntimeError(
                 "cve_patches requires a BootstrapResult (set requires_bootstrap=True "
@@ -207,6 +244,14 @@ class CVEPatchesPipeline:
     def _synthesize_poc_test(
         self, vuln: OSVVuln, patch: str, owner: str, name: str, base_sha: str, token: str | None
     ) -> str | None:
+        # [FUNCTION DOC] HELPER: One-shot LLM synthesis of a pytest regression test for the CVE.
+        # Inputs: vuln (OSVVuln); patch (source fix diff); owner, name (repo); base_sha (pre-fix
+        # commit); token (GitHub token or None). Fetches the pre-fix content of up to the first 2
+        # changed files via the GitHub API and includes it in the prompt. Calls the LLM with
+        # _POC_SYSTEM; on exception logs a warning and returns None. Adds cost to
+        # self._llm_cost_usd; strips a leading markdown fence. If env var R2E_POC_DEBUG is set,
+        # writes the code to /tmp/poc_debug/<id>.py. Output: code string if it contains "def test"
+        # and is longer than 40 chars, else None (also None when no LLM).
         """LLM-write the regression test the CVE fix omitted. Returns file content or None.
 
         Feeds the LLM the *full vulnerable source* of the changed files (not just
@@ -244,14 +289,24 @@ class CVEPatchesPipeline:
 
     @staticmethod
     def _poc_test_patch(test_code: str, slug: str) -> str:
+        # [FUNCTION DOC] HELPER (staticmethod): Wraps test code (ensuring trailing newline) as a
+        # new-file unified diff at tests/test_cve_<slug lowercased, '-' to '_'>.py via
+        # code_instruct.new_file_hunk.
+        # Inputs: test_code (str); slug (CVE/OSV id). Output: diff str.
         """Wrap synthesized test code as a new-file `git apply` diff under tests/."""
         path = f"tests/test_cve_{slug.lower().replace('-', '_')}.py"
         return new_file_hunk(test_code if test_code.endswith("\n") else test_code + "\n", path)
 
     def set_progress_callback(self, cb) -> None:
+        # [FUNCTION DOC] Registers the progress callback (called with name, outcome, reason
+        # keywords). Input: cb.
+        # Output: None. Side effects: sets self._progress_cb.
         self._progress_cb = cb
 
     def _emit_progress(self, name: str, outcome: str, reason: str = "") -> None:
+        # [FUNCTION DOC] HELPER: Calls the progress callback if set; its exceptions are logged at
+        # debug and ignored.
+        # Inputs: name, outcome, reason (default ""). Output: None.
         if self._progress_cb is not None:
             try:
                 self._progress_cb(name=name, outcome=outcome, reason=reason)
@@ -261,6 +316,23 @@ class CVEPatchesPipeline:
     # ----- run loop -----------------------------------------------------------
 
     def run(self, out_dir: Path) -> PipelineResult:
+        # [FUNCTION DOC] Executes the pipeline. Resolves a GitHub token (RuntimeError if repo
+        # private and none); ecosystem = options.osv_ecosystem or guess_ecosystem(owner), package =
+        # options.osv_package or the lowercased repo name; queries OSV (RuntimeError wrapping
+        # OSVError). Keeps vulns meeting min_severity with at least one fix commit in this repo
+        # (first commit chosen). Loops until options.limit tasks emitted: fetch parent SHA (skip
+        # "no_parent_commit"), fetch diff (GitHubError -> "diff_fetch_failed"), split patches, skip
+        # "empty_source_patch" / "too_many_source_files". Oracle: unless skip_validation, validate a
+        # shipped test patch; else if synthesize_poc_test, the language is python and an LLM is set,
+        # generate candidates (agentic poc agent with spend cap, or up to poc_max_attempts one-shot
+        # attempts) and accept the first whose F2P count reaches min_fail_to_pass (status
+        # "poc_synthesized"). Skip "no_verifiable_oracle" when require_fail_to_pass and F2P is too
+        # small; truncate P2P to max_pass_to_pass; build and write the task. Sandbox is created
+        # lazily, shared, and cleaned up in finally.
+        # Input: out_dir (Path). Output: PipelineResult(candidates=len(in-scope vulns), emitted,
+        # skipped, out_dir, skip_reasons). Side effects: network, Docker, LLM cost, files, logging.
+        # Note: with skip_validation, validation_status stays "no_test_patch" even when the fix
+        # commit shipped a real test patch.
         out_dir.mkdir(parents=True, exist_ok=True)
         token = resolve_github_token(self.input.repo, self.input.auth)
         if self.input.repo.access == "private" and not token:
@@ -359,6 +431,13 @@ class CVEPatchesPipeline:
                 lang = self.bootstrap.language.value
 
                 def _validate(tp: str, base: str, src_patch: str, language: str):
+                    # [FUNCTION DOC] HELPER (closure): Lazily starts the shared sandbox (nonlocal)
+                    # and runs validate_pr for a test patch candidate at base, with targeted test
+                    # commands derived from the candidate's files.
+                    # Inputs: tp (test patch diff); base (parent SHA); src_patch (source diff);
+                    # language (str).
+                    # Output: validation outcome (fail_to_pass, pass_to_pass, status, reason). Side
+                    # effects: Docker.
                     nonlocal sandbox
                     if sandbox is None:
                         sandbox = self._start_validation_sandbox()
@@ -484,6 +563,9 @@ class CVEPatchesPipeline:
     # ----- sandbox -----------------------------------------------------------
 
     def _start_validation_sandbox(self):
+        # [FUNCTION DOC] HELPER: Starts a DockerSandbox on the bootstrap image tag with an empty
+        # temp marker directory (containing .keep) as repo_dir. Output: sandbox. Side effects: temp
+        # dir (not removed), container.
         from repo2rlenv.bootstrap.docker import DockerSandbox
 
         marker = Path(tempfile.mkdtemp(prefix="r2e-cve-patches-"))
@@ -508,6 +590,15 @@ class CVEPatchesPipeline:
         pass_to_pass: list[str],
         validation_status: str,
     ) -> HarborTask:
+        # [FUNCTION DOC] HELPER: Builds the HarborTask (all args keyword-only): vuln, fix_sha,
+        # parent_sha, patch (oracle), test_patch, fail_to_pass, pass_to_pass, validation_status.
+        # Task id "<owner>__<repo>-cve-<CVE or OSV id with / replaced>". Graded targeted eval script
+        # (F2P/P2P passed as None when empty -> binary fallback), Dockerfile on image digest/tag at
+        # parent SHA, repo2env metadata (pipeline_version "0.8.5", GitHub commit reference URL,
+        # cve_patches block with ids, CWEs, severity, commits, oracle lists, poc flag, LLM cost,
+        # image). difficulty "hard", category "security". Aux files: verifier/F2P/P2P (when F2P non-
+        # empty) plus egress-guard compose.
+        # Output: HarborTask. Side effects: none.
         owner, name = self.input.repo.owner_name
         # Use the CVE id (or fallback to OSV id) for the task slug — stable + human-readable
         slug_id = (vuln.cve_id or vuln.id).replace("/", "_")

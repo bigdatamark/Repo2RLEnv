@@ -1,3 +1,11 @@
+# [MODULE DOC] commit_runtime pipeline: mines commits (not PRs) from a deep shallow clone of the
+# target repo, filters them by metadata (merges, excluded authors, message length, bugfix signal)
+# and by diff structure, splits each commit diff into source patch and test patch, validates an
+# F2P/P2P oracle inside the bootstrap Docker image (via pr_runtime_validate.validate_pr), and emits
+# a Harbor task per surviving commit. Instructions come from an optional LLM rewrite or from the
+# scrubbed commit message / linked issue. Reuses most helpers from pr_runtime. Side effects: git
+# clone into a temp dir, Docker containers, optional LLM calls (cost tracked), optional GitHub issue
+# fetches, files written under out_dir, logging via the module logger.
 """Commit-level mining (SWE-GEN style).
 
 For each commit on the target branch within scope:
@@ -105,6 +113,9 @@ _BUGFIX_KEYWORD_RE = re.compile(
 
 
 def _word_count(text: str) -> int:
+    # [FUNCTION DOC] HELPER: Counts word tokens (regex word-boundary sequences of word characters)
+    # in text.
+    # Input: text (str, None treated as empty). Output: int. Raises: nothing. Side effects: none.
     return len(re.findall(r"\b\w+\b", text or ""))
 
 
@@ -130,11 +141,17 @@ STRICT RULES:
 
 
 def _files_changed_in_diff(unified_diff: str) -> list[str]:
+    # [FUNCTION DOC] HELPER: Thin alias of pr_runtime._files_in_patch: returns the list of b/ file
+    # paths touched by a unified diff. Input: unified_diff (str). Output: list[str]. Side effects:
+    # none.
     """Same `b/` path extractor pr_runtime uses; lifted here for the filter layer."""
     return _files_in_patch(unified_diff)
 
 
 def _strip_commit_prefix(subject: str) -> str:
+    # [FUNCTION DOC] HELPER: Removes one leading conventional-commit prefix (fix:, feat(scope):,
+    # chore:, ...; case-insensitive) from a commit subject and trims whitespace. Input: subject
+    # (str). Output: str.
     """Drop conventional-commit type prefix from subject, leaving the description."""
     cleaned = _CC_PREFIX_RE.sub("", subject, count=1)
     return cleaned.strip()
@@ -145,6 +162,13 @@ def build_instruction_from_commit(
     *,
     issue: tuple[str, str] | None = None,
 ) -> str:
+    # [FUNCTION DOC] Builds the raw (non-LLM) markdown task instruction for a commit.
+    # Inputs: commit (CommitInfo); issue (optional (title, body) tuple of a linked issue, keyword-
+    # only). If issue is given, title/body come from the issue; otherwise from the commit subject
+    # (prefix stripped) and body. Both paths remove Closes/Fixes #N trailers from the body, run
+    # _strip_info_leak and _reflow_pr_body. Empty title falls back to the stripped subject or "(no
+    # title)". Output: string with "# Issue" + Title, optional "## Description", and a "## Task"
+    # section naming the first 12 chars of the parent SHA as base commit. Side effects: none.
     """Render a commit's subject + body (or a linked issue) into the task prompt.
 
     Sourcing order — same lesson as Arc 2's `pr_runtime` fix:
@@ -178,6 +202,10 @@ def build_instruction_from_commit(
 
 
 class CommitRuntimePipeline:
+    # [CLASS DOC] Pipeline implementation for PipelineName.COMMIT_RUNTIME. Class attributes: name,
+    # requires_bootstrap=True, experimental=False. Holds the generation input, CommitRuntimeOptions,
+    # the BootstrapResult (image, test commands, language), an optional progress callback and an
+    # accumulated LLM cost (float USD) that is written into each task's metadata.
     """Commit-level mining with sandbox-verified F2P/P2P oracles."""
 
     name: ClassVar[PipelineName] = PipelineName.COMMIT_RUNTIME
@@ -192,6 +220,11 @@ class CommitRuntimePipeline:
         options: CommitRuntimeOptions,
         bootstrap: BootstrapResult | None = None,
     ):
+        # [FUNCTION DOC] Stores input, options and bootstrap; initializes progress callback to None
+        # and LLM cost to 0.
+        # Inputs: input (GenerationInput); options (CommitRuntimeOptions); bootstrap
+        # (BootstrapResult or None, default None). Raises: RuntimeError if bootstrap is None. Side
+        # effects: none.
         if bootstrap is None:
             raise RuntimeError(
                 "commit_runtime requires a BootstrapResult (set requires_bootstrap=True "
@@ -206,6 +239,13 @@ class CommitRuntimePipeline:
     def _synthesize_problem_statement(
         self, commit: CommitInfo, issue: tuple[str, str] | None
     ) -> str | None:
+        # [FUNCTION DOC] HELPER: Asks the configured LLM (system prompt _SYNTH_SYSTEM) to rewrite
+        # the commit subject/body plus optional linked issue into a leak-free symptom-focused bug
+        # report.
+        # Inputs: commit (CommitInfo); issue ((title, body) or None). Output: stripped LLM text, or
+        # None when no LLM is configured, the call raises (logged as warning, swallowed), or the
+        # result has fewer than 10 words. Side effects: network LLM call via llm.complete using
+        # options.max_llm_tokens and llm_temperature; adds resp.cost_usd to self._llm_cost_usd.
         """LLM-rewrite the commit/issue into a clean, leak-free problem statement.
 
         Returns the `**Title:** … ## Description …` body, or None on failure /
@@ -232,6 +272,12 @@ class CommitRuntimePipeline:
         return body if _word_count(body) >= 10 else None
 
     def _build_instruction(self, commit: CommitInfo, *, issue: tuple[str, str] | None) -> str:
+        # [FUNCTION DOC] HELPER: Returns the final instruction. When options.synthesize_with_llm is
+        # set and synthesis succeeds, wraps the synthesized text under "# Issue" with the standard
+        # "## Task" footer (base = parent SHA prefix); otherwise falls back to
+        # build_instruction_from_commit.
+        # Inputs: commit (CommitInfo); issue (keyword-only, tuple or None). Output: str. Side
+        # effects: may call the LLM (see _synthesize_problem_statement).
         """Synthesized (clean) problem statement when enabled, else raw commit text."""
         if self.options.synthesize_with_llm:
             synth = self._synthesize_problem_statement(commit, issue)
@@ -245,9 +291,15 @@ class CommitRuntimePipeline:
         return build_instruction_from_commit(commit, issue=issue)
 
     def set_progress_callback(self, cb) -> None:
+        # [FUNCTION DOC] Registers a progress callback invoked as cb(name=..., outcome=...,
+        # reason=...) per candidate.
+        # Input: cb (callable). Output: None. Side effects: mutates self._progress_cb.
         self._progress_cb = cb
 
     def _emit_progress(self, name: str, outcome: str, reason: str = "") -> None:
+        # [FUNCTION DOC] HELPER: Invokes the progress callback if one is set; exceptions from it are
+        # logged at debug and swallowed. Inputs: name (task/candidate label); outcome ("skip",
+        # "error", "emit"); reason (str, default ""). Output: None.
         if self._progress_cb is not None:
             try:
                 self._progress_cb(name=name, outcome=outcome, reason=reason)
@@ -257,6 +309,23 @@ class CommitRuntimePipeline:
     # ----- run loop -----------------------------------------------------------
 
     def run(self, out_dir: Path) -> PipelineResult:
+        # [FUNCTION DOC] Executes the pipeline and writes Harbor tasks into out_dir.
+        # Steps: create out_dir; resolve repo token (RuntimeError if repo is private and no token);
+        # clone the repo at input.repo.ref with depth options.clone_depth into a temp dir
+        # (RuntimeError on failure); list commits with since/until/limit/branch (RuntimeError on
+        # GitError); warn if candidate count reaches clone_depth (history may be truncated). For
+        # each commit: apply _metadata_filter; fetch the diff with show_diff (skip
+        # "diff_fetch_failed" on GitError); split into patch/test_patch; skip "empty_source_patch",
+        # "no_test_patch", structural-filter reasons, or "root_commit" (no parent). Unless
+        # skip_validation, lazily start one shared sandbox and run validate_pr with targeted test
+        # commands at the parent SHA; cap P2P to options.max_pass_to_pass preferring tests whose
+        # name contains a changed file path; skip "no_fail_to_pass" when require_fail_to_pass and
+        # F2P count is below min_fail_to_pass. If the commit message links an issue and the source
+        # supports issues, fetch it (failures logged at debug, ignored). Build and write the task,
+        # count emitted, report progress. Finally clean up the sandbox and remove the clone.
+        # Input: out_dir (Path). Output: PipelineResult(candidates, emitted, skipped=sum of skip
+        # reasons, out_dir, skip_reasons dict). Side effects: filesystem, git, Docker, network (LLM,
+        # issue API), logging, progress callbacks.
         out_dir.mkdir(parents=True, exist_ok=True)
         token = resolve_repo_token(self.input.repo, self.input.auth)
         if self.input.repo.access == "private" and not token:
@@ -465,6 +534,14 @@ class CommitRuntimePipeline:
     # ----- filters ------------------------------------------------------------
 
     def _metadata_filter(self, commit: CommitInfo) -> str | None:
+        # [FUNCTION DOC] HELPER: Cheap commit-metadata filter. Returns the first matching skip
+        # reason or None: "merge_commit" (when skip_merge_commits and commit is a merge),
+        # "excluded_author" (author email in exclude_authors), "short_message" (word count <
+        # min_message_words), "problem_statement_too_short" (when min_problem_statement_words > 0
+        # and message shorter), "non_bugfix_type" (subject starts with a non-bug conventional type
+        # such as chore/docs/feat/...), "no_bugfix_signal" (no fix: prefix, no linked issue trailer,
+        # and no bugfix keyword in the subject). Input: commit (CommitInfo).
+        # Output: str or None. Side effects: none.
         """Cheap filters that don't need the diff content.
 
         Bugfix detection runs in two stages: (a) reject conventional-commit
@@ -499,6 +576,11 @@ class CommitRuntimePipeline:
         return None
 
     def _structural_filter(self, source_patch: str, test_patch: str) -> str | None:
+        # [FUNCTION DOC] HELPER: Diff-level filter. Returns "ci_only_patch" if skip_ci_only and
+        # every source file is under .github/, "too_many_source_files" if source file count exceeds
+        # max_source_files_per_commit, "no_new_test_funcs" if require_new_test_funcs and the test
+        # patch adds no new test function; else None. Inputs: source_patch, test_patch (str).
+        # Output: str or None.
         """Diff-level filters (mirrors pr_runtime._structural_quality_filter)."""
         source_files = _files_changed_in_diff(source_patch)
         if (
@@ -516,6 +598,10 @@ class CommitRuntimePipeline:
     # ----- sandbox -----------------------------------------------------------
 
     def _start_validation_sandbox(self):
+        # [FUNCTION DOC] HELPER: Starts a DockerSandbox from the bootstrap image tag using an empty
+        # marker directory (temp dir containing an empty .keep file) as repo_dir, on
+        # input.bootstrap.platform. Output: the sandbox object (caller must cleanup()). Side
+        # effects: creates a temp dir that is never removed; starts a Docker container.
         """Spin up a DockerSandbox from the bootstrap image (shared across commits)."""
         from repo2rlenv.bootstrap.docker import DockerSandbox
 
@@ -541,6 +627,17 @@ class CommitRuntimePipeline:
         validation_status: str,
         issue: tuple[str, str] | None = None,
     ) -> HarborTask:
+        # [FUNCTION DOC] HELPER: Assembles the HarborTask for a validated commit.
+        # Inputs: commit, patch (source diff, used as oracle), test_patch; keyword-only
+        # fail_to_pass, pass_to_pass (lists of test ids), validation_status (str), issue (optional
+        # tuple). Task id is "<owner>__<repo>-<sha12>". Builds a graded eval script (targeted test
+        # commands, F2P/P2P passed in), an environment Dockerfile on the bootstrap image digest (if
+        # pushed) or tag, checked out at the parent SHA; computes LOC changed and difficulty bucket;
+        # builds [metadata.repo2env] (pipeline_version "0.8.3", reference commit URL for
+        # GitHub/GitLab, omitted for local sources, optional synthesis_llm, commit_runtime details
+        # incl. llm_cost_usd, reward_calibration). Aux files: verifier + F2P/P2P JSON (only when F2P
+        # non-empty) and an egress-guard docker-compose blocking the fix source hosts. Output:
+        # HarborTask. Side effects: may call the LLM via _build_instruction.
         owner, name = self.input.repo.owner_name
         # commit_runtime task ID convention: <owner>__<repo>-<sha12>
         # (analogous to pr_runtime's <owner>__<repo>-<pr_number>)

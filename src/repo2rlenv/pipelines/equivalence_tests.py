@@ -1,3 +1,11 @@
+# [MODULE DOC] equivalence_tests pipeline (R2E-style): clones the repo (depth 1), extracts
+# qualifying pure module-level Python functions via _function_extractor.walk_repo, asks an LLM to
+# write a pytest file comparing `<name>` to `reference_<name>` imported from task_module, gates the
+# test (both names used, strength check, dedup fingerprint), verifies it in the bootstrap sandbox in
+# two stages (stub must fail, oracle must pass), and emits a Harbor task whose image bakes a stub
+# task_module.py and whose gold patch fills in `<name>`. Retries with failure feedback per function.
+# Side effects: git clone into temp dir, Docker, LLM calls (cost tracked), files under out_dir
+# (including .debug_skips/ dumps), logging.
 """R2E-style function-level equivalence-test synthesis.
 
 For each module-level function in the target repo:
@@ -114,6 +122,9 @@ Write the equivalence test now."""
 
 @dataclass(slots=True)
 class _VerifyOutcome:
+    # [CLASS DOC] HELPER: Dataclass (slots) recording a two-stage verification result: accepted
+    # (bool, default False), reason (skip reason str), stub_log and oracle_log (tails of Stage A/B
+    # pytest stdout).
     accepted: bool = False
     reason: str = ""
     stub_log: str = ""
@@ -122,10 +133,16 @@ class _VerifyOutcome:
 
 @dataclass(slots=True)
 class _ParsedTest:
+    # [CLASS DOC] HELPER: Dataclass (slots) holding the parsed LLM test file body in field code
+    # (str).
     code: str  # the test file body
 
 
 def _extract_test_section(text: str) -> _ParsedTest | None:
+    # [FUNCTION DOC] HELPER: Parses an LLM response: finds a line consisting of "[Test]" (case-
+    # insensitive), takes the text after it up to the next "[Some Header]" line, strips a
+    # surrounding python/py code fence, and trims. Input: text (str). Output: _ParsedTest, or None
+    # when the marker is absent or the body is empty. Side effects: none.
     """Extract `[Test]` section content from an LLM response. Returns None if missing."""
     m = re.search(r"(?im)^\s*\[\s*test\s*\]\s*$", text)
     if not m:
@@ -152,6 +169,12 @@ _IMPORT_PATTERN = re.compile(
 
 
 def uses_both_names(test_code: str, name: str) -> bool:
+    # [FUNCTION DOC] Returns True iff test_code contains an import of task_module (either "from
+    # task_module import" or "import task_module" at line start) AND both `name` and
+    # `reference_<name>` appear as whole-word identifiers. Guards against tests that never call the
+    # candidate. Inputs: test_code (str); name (function name). Output: bool.
+    # Note: since `name` is a word-boundary match, an occurrence inside the import line alone
+    # satisfies the "name used" condition even if the test body never calls it.
     """True iff the test imports from task_module AND references both names.
 
     Defense against the LLM writing a trivial test (e.g., only uses
@@ -167,6 +190,11 @@ def uses_both_names(test_code: str, name: str) -> bool:
 
 
 def _stub_module(candidate: FunctionCandidate) -> str:
+    # [FUNCTION DOC] HELPER: Builds the starting task_module.py source: the original function
+    # renamed to reference_<name> (recursion-safe rename) with annotations stripped, followed by a
+    # stub `<name>` taking the original argument names (or *args, **kwargs if none) that raises
+    # NotImplementedError.
+    # Input: candidate (FunctionCandidate). Output: str. Side effects: none.
     """Build `task_module.py` with `<name>` STUBBED + `reference_<name>` original.
 
     This is the STARTING state every agent sees: it's baked into the image
@@ -193,6 +221,10 @@ def _stub_module(candidate: FunctionCandidate) -> str:
 
 
 def build_equivalence_dockerfile(bootstrap_image: str, stub_module: str) -> str:
+    # [FUNCTION DOC] Returns the per-task Dockerfile text: FROM the bootstrap image, WORKDIR
+    # /workspace, best-effort git install via apt-get or apk, mark /workspace a git safe.directory,
+    # and write the stub module (base64-embedded) to /workspace/task_module.py. Inputs:
+    # bootstrap_image (image ref str); stub_module (source str). Output: str. Side effects: none.
     """Per-task Dockerfile: FROM bootstrap + bake the stub `task_module.py`.
 
     Every agent starts from the stub (`reference_<name>` + a `<name>` that
@@ -215,6 +247,9 @@ def build_equivalence_dockerfile(bootstrap_image: str, stub_module: str) -> str:
 
 
 def _oracle_module(candidate: FunctionCandidate) -> str:
+    # [FUNCTION DOC] HELPER: Builds the gold task_module.py: reference_<name> (renamed, annotations
+    # stripped) followed by the original `<name>` (annotations stripped), with trailing newline.
+    # Used for Stage B and as the target of the gold diff. Input: candidate. Output: str.
     """Build `task_module.py` with both `<name>` AND `reference_<name>` set to the original.
 
     Used in Stage B of verification AND as the gold-patch payload: the
@@ -232,6 +267,11 @@ def _oracle_module(candidate: FunctionCandidate) -> str:
 
 
 def _rename_function_source(source: str, old_name: str, new_name: str) -> str:
+    # [FUNCTION DOC] HELPER: Renames a function definition (and recursive self-references) from
+    # old_name to new_name using _eval_script.rename_function_ast; if that returns the source
+    # unchanged (parse failure or name not found), falls back to a regex replacing only the first
+    # def/async def header.
+    # Inputs: source, old_name, new_name (str). Output: str. Side effects: none.
     """Rename `def OLD(...)` → `def NEW(...)` in the source text — recursion-safe.
 
     v0.7 used a regex on the `def` line only, so recursive functions still
@@ -251,6 +291,9 @@ def _rename_function_source(source: str, old_name: str, new_name: str) -> str:
 
 
 class EquivalenceTestsPipeline:
+    # [CLASS DOC] Pipeline implementation for PipelineName.EQUIVALENCE_TESTS. Class attributes:
+    # name, requires_bootstrap=True, experimental=True, supported_languages={PYTHON}. Holds input,
+    # EquivalenceTestsOptions, BootstrapResult, optional progress callback, accumulated LLM cost.
     """R2E-style function-level equivalence-test synthesis."""
 
     name: ClassVar[PipelineName] = PipelineName.EQUIVALENCE_TESTS
@@ -264,6 +307,10 @@ class EquivalenceTestsPipeline:
         options: EquivalenceTestsOptions,
         bootstrap: BootstrapResult | None = None,
     ):
+        # [FUNCTION DOC] Stores input/options/bootstrap and resets progress callback and cost.
+        # Inputs: input (GenerationInput); options (EquivalenceTestsOptions); bootstrap
+        # (BootstrapResult or None). Raises: RuntimeError if bootstrap is None; ValueError if
+        # input.llm is None.
         if bootstrap is None:
             raise RuntimeError(
                 "equivalence_tests requires a BootstrapResult (set requires_bootstrap=True "
@@ -278,9 +325,14 @@ class EquivalenceTestsPipeline:
         self._llm_cost_usd = 0.0
 
     def set_progress_callback(self, cb) -> None:
+        # [FUNCTION DOC] Registers the progress callback (keywords name, outcome, reason). Input:
+        # cb. Output: None.
         self._progress_cb = cb
 
     def _emit_progress(self, name: str, outcome: str, reason: str = "") -> None:
+        # [FUNCTION DOC] HELPER: Invokes the progress callback if set, logging and swallowing its
+        # exceptions.
+        # Inputs: name, outcome, reason (default ""). Output: None.
         if self._progress_cb is not None:
             try:
                 self._progress_cb(name=name, outcome=outcome, reason=reason)
@@ -290,6 +342,23 @@ class EquivalenceTestsPipeline:
     # ----- run loop -----------------------------------------------------------
 
     def run(self, out_dir: Path) -> PipelineResult:
+        # [FUNCTION DOC] Executes the pipeline. Resolves token (RuntimeError for private repo
+        # without one); seeds an RNG from options.seed (or unseeded); clones at ref depth 1
+        # (RuntimeError on failure); collects candidates from walk_repo with file/exclude globs and
+        # LOC bounds, shuffles them. Unless skip_validation, starts one sandbox. For each candidate
+        # until options.limit emitted: up to max(1, max_attempts_per_function) attempts of LLM test
+        # generation; each failure sets a skip reason and feedback text for the retry
+        # ("llm_parse_failed", "test_missing_both_names", strength-gate reason, "duplicate_task", or
+        # the verification reason with the last 1200 chars of the log). On acceptance (or
+        # immediately when skip_validation) builds and writes the task and records its fingerprint.
+        # If all attempts fail, increments the last reason, best-effort dumps last_test.py /
+        # stub_log.txt / oracle_log.txt to out_dir/.debug_skips/<function name>/ and reports a skip.
+        # Finally cleans up sandbox and clone.
+        # Input: out_dir (Path). Output: PipelineResult(candidates=candidates examined, emitted,
+        # skipped, out_dir, skip_reasons). Side effects: filesystem, Docker, LLM, logging,
+        # callbacks.
+        # Note: the debug dump directory is keyed by bare function name, so same-named functions
+        # from different files overwrite each other's dumps.
         out_dir.mkdir(parents=True, exist_ok=True)
         token = resolve_repo_token(self.input.repo, self.input.auth)
         if self.input.repo.access == "private" and not token:
@@ -484,6 +553,13 @@ class EquivalenceTestsPipeline:
     def _llm_generate_test(
         self, cand: FunctionCandidate, *, feedback: str | None = None
     ) -> _ParsedTest | None:
+        # [FUNCTION DOC] HELPER: Formats PROMPT_USER_TEMPLATE with the candidate's path, line range,
+        # source and arg names, appends retry feedback if given, and calls the LLM with
+        # PROMPT_SYSTEM formatted with the function name. Inputs: cand (FunctionCandidate); feedback
+        # (str or None, keyword-only).
+        # Output: _ParsedTest from the "[Test]" section, or None if the call raises (logged as
+        # warning) or parsing fails. Side effects: network LLM call; adds cost to
+        # self._llm_cost_usd.
         user = PROMPT_USER_TEMPLATE.format(
             path=cand.relative_path,
             start=cand.lineno,
@@ -515,6 +591,9 @@ class EquivalenceTestsPipeline:
     # ----- sandbox -----------------------------------------------------------
 
     def _start_sandbox(self):
+        # [FUNCTION DOC] HELPER: Starts a DockerSandbox from the bootstrap image tag with an empty
+        # temp marker dir as repo_dir on the configured platform. Output: sandbox. Side effects:
+        # temp dir (not removed), Docker.
         from repo2rlenv.bootstrap.docker import DockerSandbox
 
         marker = Path(tempfile.mkdtemp(prefix="r2e-equiv-tests-"))
@@ -533,6 +612,16 @@ class EquivalenceTestsPipeline:
         test_code: str,
         test_filename: str,
     ) -> _VerifyOutcome:
+        # [FUNCTION DOC] HELPER: Two-stage sandbox verification (keyword-only args: sandbox, cand,
+        # test_code, test_filename). Pre-flight: rejects "stub_module_not_importable" /
+        # "oracle_module_not_importable" via is_module_importable. Stage A: resets and cleans
+        # /workspace, writes the stub module and the test (base64), runs pytest (exit ignored); if
+        # require_test_fails_with_stub and all tests passed, rejects "test_passes_with_stub". Stage
+        # B: writes the oracle module, runs pytest, then removes both files; passes when exit is ok
+        # and all tests passed; if require_test_passes_with_oracle and not passing, rejects
+        # "oracle_does_not_satisfy_test". Logs kept are the last 4000 chars of stdout.
+        # Output: _VerifyOutcome (accepted=True on success). Side effects: commands in the
+        # container, using options.validation_timeout_sec.
         """Two-stage verification.
 
         Stage A: stub `<name>`, keep `reference_<name>` correct → test must FAIL.
@@ -612,6 +701,8 @@ class EquivalenceTestsPipeline:
     # ----- task builder -------------------------------------------------------
 
     def _task_test_filename(self, cand: FunctionCandidate, parsed: _ParsedTest) -> str:
+        # [FUNCTION DOC] HELPER: Deterministic test filename "test_r2e_<first 10 hex of sha256(path
+        # NUL name NUL test code)>.py". Inputs: cand; parsed (_ParsedTest). Output: str.
         h = hashlib.sha256()
         h.update(cand.relative_path.encode())
         h.update(b"\0")
@@ -627,6 +718,15 @@ class EquivalenceTestsPipeline:
         *,
         test_filename: str,
     ) -> HarborTask:
+        # [FUNCTION DOC] HELPER: Builds the HarborTask. Inputs: cand; test_code (str); test_filename
+        # (keyword-only). Task id "<owner>__<repo>-eqv-<8 hex of sha256(path NUL name)>". Gold diff
+        # = unified diff stub -> oracle task_module.py; eval script (binary) copies /tests/<file>
+        # into /workspace and runs pytest on it; Dockerfile bakes the stub on the image digest (if
+        # pushed) or tag; instruction from _build_instruction; reference blob URL omitted when None
+        # (local source). Metadata pipeline_version "0.7.1", reward_kinds ["test_execution"],
+        # function details and LLM cost. difficulty "medium", category "equivalence"; aux file
+        # tests/<test_filename>. Output: HarborTask.
+        # Note: unlike the patch pipelines this task ships no egress-guard compose file.
         owner, name = self.input.repo.owner_name
         h = hashlib.sha256()
         h.update(cand.relative_path.encode())
@@ -710,6 +810,13 @@ class EquivalenceTestsPipeline:
 
 
 def _build_instruction(cand: FunctionCandidate) -> str:
+    # [FUNCTION DOC] HELPER: Builds the leak-free markdown instruction: a signature-only code block
+    # (from signature_only_source, or a fallback "def name(args): ..." header when that returns
+    # None), the docstring as a quote if present, the source path/line range, and grading notes
+    # saying the test compares `<name>` with `reference_<name>` across >=5 inputs. Input: cand.
+    # Output: str.
+    # Note: the instruction explicitly allows reading reference_<name> in task_module.py, so the
+    # reference body is visible to the agent by design.
     """Leak-free instruction — signature + docstring only, never the body.
 
     Pre-v0.8.7 the emitted `instruction.md` embedded the full source of the
@@ -750,6 +857,8 @@ def _build_instruction(cand: FunctionCandidate) -> str:
 
 
 def _equivalence_fingerprint(name: str, test_code: str) -> str:
+    # [FUNCTION DOC] HELPER: Dedup key: first 16 hex chars of sha256 of "<name>\0<test code
+    # lowercased, stripped, whitespace runs collapsed>". Inputs: name, test_code. Output: str.
     """Dedup fingerprint for equivalence-test candidates.
 
     Combines the extracted function name with a hash of the normalized test
