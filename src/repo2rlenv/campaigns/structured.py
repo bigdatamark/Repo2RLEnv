@@ -1,3 +1,6 @@
+# [MODULE DOC] Structured (Pydantic-schema) LLM completion on top of metered_complete, with bounded
+# correction: only a completed response that fails schema or content validation may trigger a new,
+# separately metered repair request. Provider failures are never replayed here.
 """Correct completed, invalid structured responses without replaying provider effects."""
 
 from __future__ import annotations
@@ -27,6 +30,21 @@ def validated_complete[Result: BaseModel](
     max_attempts: int = 3,
     validate: Callable[[Result], None] | None = None,
 ) -> Result:
+    # [FUNCTION DOC] Generic over Result (a BaseModel subclass). Requests JSON matching schema and
+    # returns the parsed Result. Inputs: schema (model class), model (LLMSpec), ledger, receipt
+    # (Path), operation_id, system prompt, payload (dict serialized as the user message),
+    # reservation_usd, max_tokens, resume (passed to metered_complete), max_attempts (1-3, default
+    # 3), validate (optional extra callable raising ValueError/SyntaxError on bad content).
+    # Attempt 0 uses the given receipt and operation_id; attempt n uses receipt
+    # '<stem>-repair-<n>.json' and operation '<id>:repair:<n>', each reserving reservation_usd
+    # again. Every call passes schema.model_json_schema() as response_schema. On
+    # ValueError/SyntaxError (pydantic ValidationError is a ValueError) the next user message is the
+    # original payload under 'input' plus validation_error (truncated to 4000 chars),
+    # previous_response and a fixed correction instruction, and a '<stem>-validation.json' record
+    # with the error and attempt number is saved.
+    # Returns the first valid Result. Raises ValueError if max_attempts is outside 1..3 or all
+    # attempts fail (message includes the last error); propagates metered_complete errors. Side
+    # effects: LLM calls, ledger writes, receipt files.
     """Only schema/content errors from a completed response authorize correction."""
     if not 1 <= max_attempts <= 3:
         raise ValueError("Structured correction supports one to three attempts")

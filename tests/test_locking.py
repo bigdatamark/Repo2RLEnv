@@ -1,3 +1,7 @@
+# [MODULE DOC] Tests for locking.lock_file using real OS locks held by separate Python
+# subprocesses: non-blocking contention raises BlockingIOError, locks release on process
+# exit/death, blocking mode waits, and the lock interoperates with fcntl.flock on POSIX. _OWNER is
+# a child script that locks argv[1], prints 'locked', then waits on stdin.
 """Exercise real OS locks between independent processes, including on Windows."""
 
 from __future__ import annotations
@@ -24,6 +28,8 @@ with open(sys.argv[1], 'a') as handle:
 
 
 def _line(process: subprocess.Popen) -> str:
+    # [FUNCTION DOC] HELPER: Reads one stdout line from the process on a worker thread with a 15s
+    # timeout; kills the process and re-raises on timeout or any error. Output: the line (str).
     with ThreadPoolExecutor(max_workers=1) as reader:
         ready = reader.submit(process.stdout.readline)
         try:
@@ -35,6 +41,9 @@ def _line(process: subprocess.Popen) -> str:
 
 @contextmanager
 def _owner(path: Path, code: str = _OWNER):
+    # [FUNCTION DOC] HELPER: Context manager that spawns a child running code (default _OWNER) on
+    # path, asserts the 'locked' handshake, yields the Popen, and on exit kills it if still running
+    # and reaps it.
     process = subprocess.Popen(
         [sys.executable, "-c", code, str(path)],
         stdin=subprocess.PIPE,
@@ -53,6 +62,8 @@ def _owner(path: Path, code: str = _OWNER):
 
 
 def test_nonblocking_lock_and_release(tmp_path):
+    # [FUNCTION DOC] Asserts lock_file raises BlockingIOError while the child holds the lock,
+    # succeeds after the child exits cleanly, and leaves the lock file empty.
     path = tmp_path / "controller.lock"
     with _owner(path) as owner:
         with path.open("a") as handle, pytest.raises(BlockingIOError):
@@ -65,6 +76,7 @@ def test_nonblocking_lock_and_release(tmp_path):
 
 
 def test_lock_released_after_process_death(tmp_path):
+    # [FUNCTION DOC] Asserts the lock can be taken after the owning child is killed.
     path = tmp_path / "controller.lock"
     with _owner(path) as owner:
         owner.kill()
@@ -74,6 +86,9 @@ def test_lock_released_after_process_death(tmp_path):
 
 
 def test_blocking_lock_waits_for_owner(tmp_path):
+    # [FUNCTION DOC] Runs a contender child using blocking=True: asserts it stays blocked
+    # (TimeoutExpired after 0.5s) while the owner holds the lock, then acquires and prints 'locked'
+    # after the owner exits.
     path = tmp_path / "checkout.lock"
     contender_code = _OWNER.replace("lock_file(handle)", "lock_file(handle, blocking=True)")
     contender_code = contender_code.replace(
@@ -106,6 +121,8 @@ def test_blocking_lock_waits_for_owner(tmp_path):
 
 @pytest.mark.skipif(sys.platform == "win32", reason="Interoperability with earlier POSIX releases")
 def test_interoperates_with_existing_flock(tmp_path):
+    # [FUNCTION DOC] POSIX only: asserts lock_file raises BlockingIOError when another process
+    # holds the file with fcntl.flock LOCK_EX.
     path = tmp_path / "controller.lock"
     code = _OWNER.replace("from repo2rlenv.locking import lock_file", "import fcntl")
     code = code.replace("lock_file(handle)", "fcntl.flock(handle, fcntl.LOCK_EX)")

@@ -1,3 +1,7 @@
+# [MODULE DOC] Tests for API-key and api_base resolution in llm._do_complete and
+# llm.check_provider, for self-hosted/keyless endpoints (vLLM, Ollama) and hosted providers. A stub
+# 'litellm' module is injected into sys.modules and the kwargs passed to its completion are
+# inspected; environment variables are controlled with mock.patch.dict/monkeypatch.
 """API-key resolution for self-hosted / keyless backends (vLLM, Ollama, …).
 
 No live LLM and no real `litellm` import — `_do_complete` imports it lazily, so a
@@ -20,6 +24,8 @@ ENDPOINT = "http://127.0.0.1:8000/v1"
 
 
 def _fake_response(content: str = "PONG") -> SimpleNamespace:
+    # [FUNCTION DOC] HELPER: Returns a SimpleNamespace mimicking a LiteLLM completion response with
+    # one choice whose message content is the given string (default 'PONG') and usage None.
     return SimpleNamespace(
         choices=[SimpleNamespace(message=SimpleNamespace(content=content))],
         usage=None,
@@ -28,6 +34,9 @@ def _fake_response(content: str = "PONG") -> SimpleNamespace:
 
 @pytest.fixture
 def litellm_stub(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
+    # [FUNCTION DOC] Fixture: installs a fake litellm module in sys.modules (completion MagicMock
+    # returning a fake response, completion_cost returning 0.0, get_llm_provider MagicMock) via
+    # monkeypatch; returns the stub.
     stub = SimpleNamespace(
         completion=mock.MagicMock(return_value=_fake_response()),
         completion_cost=lambda **kw: 0.0,
@@ -38,10 +47,14 @@ def litellm_stub(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
 
 
 def _call(spec: LLMSpec) -> dict:
+    # [FUNCTION DOC] HELPER: Calls _do_complete with the spec, no system prompt, user 'ping',
+    # max_tokens 8, temperature 0.0; returns the LLMResponse.
     return _do_complete(spec, system=None, user="ping", max_tokens=8, temperature=0.0)
 
 
 def _kwargs(stub: SimpleNamespace) -> dict:
+    # [FUNCTION DOC] HELPER: Asserts the stub completion was called exactly once and returns that
+    # call's keyword arguments.
     assert stub.completion.call_count == 1
     return stub.completion.call_args.kwargs
 
@@ -51,6 +64,8 @@ def _kwargs(stub: SimpleNamespace) -> dict:
 
 @mock.patch.dict(os.environ, {}, clear=True)
 def test_hosted_vllm_endpoint_leaves_key_to_litellm(litellm_stub):
+    # [FUNCTION DOC] With an empty environment, asserts hosted_vllm + endpoint passes model
+    # 'hosted_vllm/<model>' and api_base but no api_key (LiteLLM resolves it).
     spec = LLMSpec(provider="hosted_vllm", model="Qwen/Qwen3.5-4B", endpoint=ENDPOINT)
     resp = _call(spec)
     kw = _kwargs(litellm_stub)
@@ -62,6 +77,8 @@ def test_hosted_vllm_endpoint_leaves_key_to_litellm(litellm_stub):
 
 @mock.patch.dict(os.environ, {"HOSTED_VLLM_API_KEY": "s3cret"}, clear=True)
 def test_hosted_vllm_env_key_not_shadowed(litellm_stub):
+    # [FUNCTION DOC] Asserts that with HOSTED_VLLM_API_KEY set, no placeholder api_key is passed
+    # for hosted_vllm.
     """A server started with `--api-key` and HOSTED_VLLM_API_KEY set must not get a placeholder."""
     _call(LLMSpec(provider="hosted_vllm", model="m", endpoint=ENDPOINT))
     assert "api_key" not in _kwargs(litellm_stub)
@@ -69,6 +86,8 @@ def test_hosted_vllm_env_key_not_shadowed(litellm_stub):
 
 @mock.patch.dict(os.environ, {}, clear=True)
 def test_openai_compat_endpoint_gets_placeholder(litellm_stub):
+    # [FUNCTION DOC] Asserts openai provider + custom endpoint with no key passes api_base and the
+    # placeholder api key.
     """`openai/<model>` + endpoint — the OpenAI client needs *a* key string."""
     _call(LLMSpec(provider="openai", model="Qwen/Qwen3.5-4B", endpoint=ENDPOINT))
     kw = _kwargs(litellm_stub)
@@ -78,6 +97,8 @@ def test_openai_compat_endpoint_gets_placeholder(litellm_stub):
 
 @mock.patch.dict(os.environ, {"OPENAI_API_KEY": "sk-live"}, clear=True)
 def test_default_key_never_forwarded_to_custom_endpoint(litellm_stub):
+    # [FUNCTION DOC] Asserts OPENAI_API_KEY is not forwarded to a custom endpoint; the placeholder
+    # is used instead.
     _call(LLMSpec(provider="openai", model="m", endpoint=ENDPOINT))
     assert _kwargs(litellm_stub)["api_key"] == _PLACEHOLDER_API_KEY
 
@@ -88,6 +109,9 @@ def test_default_key_never_forwarded_to_custom_endpoint(litellm_stub):
 def test_custom_endpoint_warns_how_to_keep_gateway_auth(
     litellm_stub, monkeypatch, caplog, provider, key_env
 ):
+    # [FUNCTION DOC] Parametrized over openai/anthropic: with the default key env set and a custom
+    # endpoint, asserts the log suggests '--llm-key-env <VAR>', never logs the key value, and sends
+    # the placeholder.
     monkeypatch.setenv(key_env, "private-test-key")
     _call(LLMSpec(provider=provider, model="m", endpoint=ENDPOINT))
     assert f"--llm-key-env {key_env}" in caplog.text
@@ -96,6 +120,8 @@ def test_custom_endpoint_warns_how_to_keep_gateway_auth(
 
 
 def test_explicit_gateway_key_does_not_warn(litellm_stub, monkeypatch, caplog):
+    # [FUNCTION DOC] Asserts no log records are emitted when api_key_env is explicitly set for a
+    # custom endpoint.
     monkeypatch.setenv("OPENAI_API_KEY", "private-test-key")
     _call(LLMSpec(provider="openai", model="m", endpoint=ENDPOINT, api_key_env="OPENAI_API_KEY"))
     assert not caplog.records
@@ -103,6 +129,8 @@ def test_explicit_gateway_key_does_not_warn(litellm_stub, monkeypatch, caplog):
 
 @mock.patch.dict(os.environ, {"OPENAI_API_KEY": "sk-live"}, clear=True)
 def test_explicit_key_env_is_forwarded_to_endpoint(litellm_stub):
+    # [FUNCTION DOC] Asserts an explicit api_key_env's value is forwarded as api_key to the custom
+    # endpoint.
     spec = LLMSpec(provider="openai", model="m", endpoint=ENDPOINT, api_key_env="OPENAI_API_KEY")
     _call(spec)
     assert _kwargs(litellm_stub)["api_key"] == "sk-live"
@@ -110,6 +138,8 @@ def test_explicit_key_env_is_forwarded_to_endpoint(litellm_stub):
 
 @mock.patch.dict(os.environ, {"OPENAI_API_KEY": ""}, clear=True)
 def test_blank_env_var_counts_as_unset(litellm_stub):
+    # [FUNCTION DOC] Asserts an empty OPENAI_API_KEY is treated as unset, so the placeholder is
+    # used rather than an empty string.
     """`.env.example` ships `OPENAI_API_KEY=`; that must not become api_key=''."""
     _call(LLMSpec(provider="openai", model="m", endpoint=ENDPOINT))
     assert _kwargs(litellm_stub)["api_key"] == _PLACEHOLDER_API_KEY
@@ -120,6 +150,8 @@ def test_blank_env_var_counts_as_unset(litellm_stub):
 
 @mock.patch.dict(os.environ, {"OPENAI_API_KEY": "sk-live"}, clear=True)
 def test_named_but_unset_key_env_does_not_fall_through(litellm_stub):
+    # [FUNCTION DOC] Asserts a named but unset api_key_env raises RuntimeError mentioning
+    # '$PROXY_KEY is unset' without falling back to OPENAI_API_KEY and without calling completion.
     spec = LLMSpec(provider="openai", model="m", api_key_env="PROXY_KEY")
     with pytest.raises(RuntimeError, match=r"\$PROXY_KEY is unset"):
         _call(spec)
@@ -128,6 +160,8 @@ def test_named_but_unset_key_env_does_not_fall_through(litellm_stub):
 
 @mock.patch.dict(os.environ, {"OPENAI_API_KEY": ""}, clear=True)
 def test_hosted_provider_without_key_fails_fast_naming_env_var(litellm_stub):
+    # [FUNCTION DOC] Asserts a hosted openai spec with a blank key raises RuntimeError naming
+    # OPENAI_API_KEY before any completion call.
     with pytest.raises(RuntimeError, match="OPENAI_API_KEY"):
         _call(LLMSpec(provider="openai", model="gpt-5.5"))
     litellm_stub.completion.assert_not_called()
@@ -135,6 +169,8 @@ def test_hosted_provider_without_key_fails_fast_naming_env_var(litellm_stub):
 
 @mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-ant"}, clear=True)
 def test_hosted_provider_default_key_forwarded(litellm_stub):
+    # [FUNCTION DOC] Asserts anthropic without an endpoint forwards ANTHROPIC_API_KEY as api_key
+    # and passes no api_base.
     _call(LLMSpec(provider="anthropic", model="claude-sonnet-4-6"))
     kw = _kwargs(litellm_stub)
     assert kw["api_key"] == "sk-ant"
@@ -144,6 +180,8 @@ def test_hosted_provider_default_key_forwarded(litellm_stub):
 @mock.patch.dict(os.environ, {}, clear=True)
 @pytest.mark.parametrize("provider", ["hosted_vllm", "ollama", "bedrock", "vertex_ai"])
 def test_other_providers_are_litellms_to_resolve(litellm_stub, provider):
+    # [FUNCTION DOC] Parametrized over hosted_vllm/ollama/bedrock/vertex_ai without endpoint:
+    # asserts neither api_key nor api_base is passed.
     _call(LLMSpec(provider=provider, model="m"))
     kw = _kwargs(litellm_stub)
     assert "api_key" not in kw
@@ -152,6 +190,8 @@ def test_other_providers_are_litellms_to_resolve(litellm_stub, provider):
 
 @mock.patch.dict(os.environ, {"HF_TOKEN": "hf_x"}, clear=True)
 def test_huggingface_router_default_base_unchanged(litellm_stub):
+    # [FUNCTION DOC] Asserts the huggingface provider forwards HF_TOKEN and uses api_base
+    # https://router.huggingface.co/v1.
     _call(LLMSpec(provider="huggingface", model="org/model:together"))
     kw = _kwargs(litellm_stub)
     assert kw["api_key"] == "hf_x"
@@ -162,6 +202,8 @@ def test_huggingface_router_default_base_unchanged(litellm_stub):
 
 
 def test_check_provider_walks_fallback_chain(litellm_stub):
+    # [FUNCTION DOC] Asserts check_provider calls get_llm_provider for the primary and then its
+    # fallback, in order.
     fb = LLMSpec(provider="openai", model="gpt-5.5")
     spec = LLMSpec(provider="anthropic", model="claude-sonnet-4-6", fallback=fb)
     check_provider(spec)
@@ -170,6 +212,8 @@ def test_check_provider_walks_fallback_chain(litellm_stub):
 
 
 def test_check_provider_names_the_bad_spec(litellm_stub):
+    # [FUNCTION DOC] Asserts a ValueError from get_llm_provider becomes a RuntimeError naming the
+    # bad qualified name and the first line of the original message.
     litellm_stub.get_llm_provider.side_effect = ValueError("LLM Provider NOT provided\nmore")
     with pytest.raises(RuntimeError, match=r"'antropic/claude'.*NOT provided$"):
         check_provider(LLMSpec(provider="antropic", model="claude"))

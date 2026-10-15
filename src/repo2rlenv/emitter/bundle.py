@@ -1,3 +1,11 @@
+# [MODULE DOC] General Harbor task bundles with immutable content identities and atomic emission,
+# used by owned recipes whose reference is a program, setup script or other artifact (the patch-
+# based HarborTask API stays in harbor.py).
+# A bundle = instruction.md + task.toml (Harbor schema 1.3 with [metadata.repo2env]) + asset files
+# under environment/, solution/, tests/. Its identity ('sha256:<hex>') hashes the TOML-normalized
+# configuration (excluding metadata.repo2env.bundle_hash and .evaluation) plus each file's sha256
+# and mode, so it is independent of serialization order and of advisory evaluation labels. The hash
+# is stored as metadata.repo2env.bundle_hash.
 """General Harbor task bundles, with immutable file identities and atomic emission.
 
 The existing patch-based HarborTask API remains in harbor.py. Recipes use this
@@ -24,6 +32,10 @@ _HASH_FIELD = "bundle_hash"
 
 
 def relative_asset_path(value: str) -> PurePosixPath:
+    # [FUNCTION DOC] Validates a task asset path string and returns it as a PurePosixPath. Accepts
+    # only non-empty, relative, forward-slash paths with no backslash, NUL, empty/'.'/'..' segments,
+    # at least two parts, and a first part in {environment, solution, tests}. Raises ValueError
+    # otherwise. Pure.
     """Accept canonical POSIX paths only, independently of the controller OS."""
     path = PurePosixPath(value)
     if (
@@ -41,20 +53,31 @@ def relative_asset_path(value: str) -> PurePosixPath:
 
 @dataclass(frozen=True)
 class TaskFile:
+    # [CLASS DOC] Frozen dataclass for one task file: content (bytes) and executable (bool, default
+    # False).
     content: bytes
     executable: bool = False
 
     @classmethod
     def text(cls, content: str, *, executable: bool = False) -> TaskFile:
+        # [FUNCTION DOC] Classmethod constructor encoding a str as UTF-8. Inputs: content (str),
+        # executable (keyword, default False). Returns TaskFile.
         return cls(content.encode("utf-8"), executable)
 
     @property
     def mode(self) -> int:
+        # [FUNCTION DOC] Property: permission bits to write, 0o755 if executable else 0o644.
         return 0o755 if self.executable else 0o644
 
 
 @dataclass
 class TaskBundle:
+    # [CLASS DOC] Mutable dataclass describing a complete task before emission. Fields: name and org
+    # (filesystem-safe slugs), instruction (markdown text), files (mapping relative asset path ->
+    # TaskFile), metadata (repo2env metadata dict; must include recipe, recipe_version,
+    # reward_kinds), environment / agent / verifier (dicts merged over defaults in task.toml),
+    # artifacts (list of dicts), agent_timeout_sec (default 600), verifier_timeout_sec (default
+    # 120).
     name: str
     org: str
     instruction: str
@@ -68,6 +91,16 @@ class TaskBundle:
     verifier_timeout_sec: int = 120
 
     def configuration(self) -> dict[str, Any]:
+        # [FUNCTION DOC] Validates the bundle and returns the task.toml dict. Checks: name/org match
+        # the slug pattern and contain no '..'; instruction non-blank; both timeouts positive; every
+        # file path valid per relative_asset_path and no path is also a parent of another;
+        # solution/solve.sh and tests/test.sh exist, are non-empty and executable; at least one
+        # environment/ file; metadata has recipe, recipe_version and reward_kinds. Raises ValueError
+        # on any failure.
+        # Returns {schema_version '1.3', task.name 'org/name', metadata.repo2env (copy of metadata
+        # without bundle_hash), environment (defaults cpus 1, memory_mb 2048, build_timeout_sec 600,
+        # network_mode 'no-network', overridden by self.environment), agent (timeout_sec +
+        # overrides), verifier (timeout_sec + overrides), artifacts}. Pure.
         """Build the Harbor 1.3 contract without a patch-only oracle."""
         if any(not _SLUG.fullmatch(value) or ".." in value for value in (self.name, self.org)):
             raise ValueError("Task name and organization must be filesystem-safe slugs")
@@ -111,6 +144,11 @@ class TaskBundle:
 def _identity(configuration: dict, files: dict[str, TaskFile]) -> str:
     # TOML parsing normalizes the stored representation before hashing on either
     # side, so dictionary insertion order and serialization layout cannot matter.
+    # [FUNCTION DOC] HELPER: Computes the bundle identity. Round-trips configuration through
+    # tomli_w/tomllib to normalize it, drops metadata.repo2env.bundle_hash and .evaluation, then
+    # hashes (SHA-256) the compact sorted-key JSON of {configuration, files: name -> {sha256 of
+    # content, mode}} (files sorted). Returns 'sha256:<hex>'. Inputs: configuration dict; files
+    # mapping (should include instruction.md but not task.toml).
     import tomllib
 
     normalized = tomllib.loads(tomli_w.dumps(configuration))
@@ -134,11 +172,21 @@ def _identity(configuration: dict, files: dict[str, TaskFile]) -> str:
 
 
 def bundle_hash(bundle: TaskBundle) -> str:
+    # [FUNCTION DOC] Returns the identity of a TaskBundle: _identity of its validated configuration
+    # and its files plus instruction.md. Raises ValueError via configuration() if the bundle is
+    # invalid.
     files = {"instruction.md": TaskFile.text(bundle.instruction), **bundle.files}
     return _identity(bundle.configuration(), files)
 
 
 def inspect_bundle(path: Path) -> dict[str, Any]:
+    # [FUNCTION DOC] Reads an emitted bundle directory without executing anything. Raises ValueError
+    # if path is a symlink or not a directory, if any entry is a symlink or special file, if any
+    # file mode is not exactly 0o644/0o755, or if a file other than instruction.md/task.toml has an
+    # invalid asset path. Loads task.toml, takes its claimed metadata.repo2env.bundle_hash and
+    # recomputes the identity over all other files.
+    # Returns {bundle_hash (actual), claimed_hash (may be None), integrity_passed (claimed ==
+    # actual)}. Side effects: file reads.
     """Read an emitted bundle without executing any task code or following links."""
     import tomllib
 
@@ -167,6 +215,17 @@ def inspect_bundle(path: Path) -> dict[str, Any]:
 
 
 def write_bundle(bundle: TaskBundle, destination: Path, *, resume: bool = False) -> Path:
+    # [FUNCTION DOC] Atomically emits bundle to destination/<bundle.name>. Builds the configuration,
+    # stores bundle_hash and a default generated evaluation label
+    # (emitter.evaluation.generated_evaluation bound to the hash), and materializes instruction.md,
+    # task.toml and all files.
+    # Concurrency: creates an exclusive lock file destination/.<name>.lock (O_EXCL; FileExistsError
+    # if another writer holds it), removed in all cases. If the target already exists: with
+    # resume=True returns it when inspect_bundle passes integrity and matches the bundle hash, else
+    # ValueError; without resume raises FileExistsError. Otherwise writes files with their modes
+    # into a temp dir '.<name>-*' in destination and renames it to the target (temp dir removed on
+    # failure).
+    # Returns the target Path. Side effects: filesystem writes.
     """Publish a fully materialized task, refusing existing targets or collisions."""
     configuration = bundle.configuration()
     configuration["metadata"]["repo2env"][_HASH_FIELD] = bundle_hash(bundle)

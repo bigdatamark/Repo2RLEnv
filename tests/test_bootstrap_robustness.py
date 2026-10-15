@@ -1,3 +1,7 @@
+# [MODULE DOC] Tests for bootstrap robustness plumbing: the runner's post-commit verify step
+# (_verify_committed_image replays test_cmds in a fresh container), the agent loop's
+# max_llm_spend_usd / max_iterations enforcement, llm._supports_temperature model gating, and
+# the verify fields on BootstrapResult. Docker and LLM calls are fully mocked via unittest.mock.
 """v0.8.1 robustness plumbing: post-commit verify + budget enforcement.
 
 No live Docker / live LLM in these tests — everything is mocked. The point
@@ -20,16 +24,25 @@ from repo2rlenv.bootstrap.runner import _verify_committed_image
 
 
 def _exec_result(exit_code: int, out: str = "", err: str = "") -> ExecResult:
+    # [FUNCTION DOC] HELPER: Builds a fake ExecResult with the given exit_code, stdout (out,
+    # default "") and
+    # stderr (err, default "") and a fixed 0.1s duration. Output: ExecResult. No side effects.
     return ExecResult(exit_code=exit_code, stdout=out, stderr=err, duration_sec=0.1)
 
 
 def test_verify_empty_test_cmds_passes():
+    # [FUNCTION DOC] Empty test_cmds must make _verify_committed_image return ok=True with a
+    # 'skip'
+    # detail, without running anything. Inputs: none. Output: none. Raises: AssertionError on
+    # failure.
     ok, detail = _verify_committed_image("local/foo:abc", [], platform="linux/amd64")
     assert ok
     assert "skip" in detail.lower()
 
 
 def test_verify_passes_on_pytest_exit_zero():
+    # [FUNCTION DOC] With runner._run patched to exit 0, verify returns ok and detail mentions
+    # 'exit=0'. Inputs: none. Output: none. Raises: AssertionError on failure.
     with mock.patch.object(runner_mod, "_run", return_value=_exec_result(0, "5 passed in 0.4s")):
         ok, detail = _verify_committed_image(
             "local/foo:abc", ["python -m pytest -q"], platform="linux/amd64"
@@ -39,6 +52,8 @@ def test_verify_passes_on_pytest_exit_zero():
 
 
 def test_verify_passes_on_pytest_exit_one_tests_failed():
+    # [FUNCTION DOC] Exit code 1 (tests ran, some failed) counts as a healthy env -> ok=True.
+    # Inputs: none. Output: none. Raises: AssertionError on failure.
     """pytest exit 1 = tests ran but some failed. That's an env-fine signal."""
     with mock.patch.object(runner_mod, "_run", return_value=_exec_result(1, "1 failed, 2 passed")):
         ok, _ = _verify_committed_image(
@@ -48,6 +63,8 @@ def test_verify_passes_on_pytest_exit_one_tests_failed():
 
 
 def test_verify_passes_on_pytest_exit_five_no_tests_collected():
+    # [FUNCTION DOC] Exit code 5 (nothing collected) still counts as a healthy env -> ok=True.
+    # Inputs: none. Output: none. Raises: AssertionError on failure.
     """pytest exit 5 = no tests collected. Still means the env runs."""
     with mock.patch.object(runner_mod, "_run", return_value=_exec_result(5, "no tests collected")):
         ok, _ = _verify_committed_image(
@@ -57,6 +74,8 @@ def test_verify_passes_on_pytest_exit_five_no_tests_collected():
 
 
 def test_verify_fails_on_env_level_error():
+    # [FUNCTION DOC] Exit 127 (binary missing) must yield ok=False with 'exit=127' in the
+    # detail. Inputs: none. Output: none. Raises: AssertionError on failure.
     """Exit 2/127 = pytest binary missing, env broken."""
     with mock.patch.object(
         runner_mod, "_run", return_value=_exec_result(127, err="pytest: not found")
@@ -69,10 +88,19 @@ def test_verify_fails_on_env_level_error():
 
 
 def test_verify_joins_multiple_test_cmds_with_and():
+    # [FUNCTION DOC] Multiple test_cmds must be executed as a single 'docker run' whose final
+    # argument is a
+    # shell script joining the commands with '&&' (so exports persist). Captures _run calls
+    # via
+    # a side-effect stub. Inputs: none. Output: none. Raises: AssertionError on failure.
     """Multiple test_cmds must run as ONE shell so env-var exports carry over."""
     captured: list[list[str]] = []
 
     def fake_run(args, *, timeout, **kw):
+        # [FUNCTION DOC] HELPER: Stub for runner._run; records the argv list into the
+        # enclosing 'captured' list
+        # and returns a successful ExecResult. Inputs: args (argv), timeout, extra kwargs
+        # ignored.
         captured.append(list(args))
         return _exec_result(0)
 
@@ -97,9 +125,16 @@ def test_verify_joins_multiple_test_cmds_with_and():
 
 
 def test_agent_loop_short_circuits_when_cost_budget_hit():
+    # [FUNCTION DOC] Patches agent.complete to return a response costing $5.50 and runs
+    # run_agent_loop with
+    # max_spend_usd=1.0; asserts the loop fails with 'cost budget exceeded' within <=2
+    # iterations. Uses a mock sandbox whose exec always succeeds. Inputs: none. Output: none.
+    # Raises: AssertionError on failure.
     """First LLM call returns a high cost; loop must abort with success=False."""
 
     class FakeLLM:
+        # [CLASS DOC] HELPER: Minimal duck-typed stand-in for LLMSpec (provider, model,
+        # qualified_name, api_key_env, endpoint, timeout_sec as class attributes).
         provider = "anthropic"
         model = "claude-sonnet-4-6"
         qualified_name = "anthropic/claude-sonnet-4-6"
@@ -108,6 +143,8 @@ def test_agent_loop_short_circuits_when_cost_budget_hit():
         timeout_sec = 60
 
     class FakeResponse:
+        # [CLASS DOC] HELPER: Duck-typed LLMResponse with a BASH action in content and
+        # cost_usd=5.50 (above the cap); token counts and usage are static.
         content = "Thought: looking\nAction: BASH\nInput: ls"
         cost_usd = 5.50  # above the 1.0 cap
         usage = None
@@ -139,9 +176,15 @@ def test_agent_loop_short_circuits_when_cost_budget_hit():
 
 
 def test_agent_loop_respects_max_iterations_with_no_cost_cap():
+    # [FUNCTION DOC] With max_spend_usd=None and zero-cost responses that never finish, the
+    # loop must stop
+    # after exactly max_iterations=3 with success=False and a 'max_iterations' reason. Inputs:
+    # none. Output: none. Raises: AssertionError on failure.
     """If max_spend_usd is None, loop runs until max_iterations or success."""
 
     class FakeLLM:
+        # [CLASS DOC] HELPER: Minimal duck-typed stand-in for LLMSpec (same attributes as
+        # the cost-cap test).
         provider = "anthropic"
         model = "claude-sonnet-4-6"
         qualified_name = "anthropic/claude-sonnet-4-6"
@@ -150,6 +193,7 @@ def test_agent_loop_respects_max_iterations_with_no_cost_cap():
         timeout_sec = 60
 
     class FakeResponse:
+        # [CLASS DOC] HELPER: Duck-typed LLMResponse with a BASH action and cost_usd=0.0.
         content = "Thought: think\nAction: BASH\nInput: ls"
         cost_usd = 0.0
         usage = None
@@ -183,6 +227,8 @@ def test_agent_loop_respects_max_iterations_with_no_cost_cap():
 
 
 def test_temperature_suppressed_for_opus_4_7():
+    # [FUNCTION DOC] claude-opus-4-7 must not support temperature; claude-sonnet-4-6 must.
+    # Inputs: none. Output: none. Raises: AssertionError on failure.
     from repo2rlenv.llm import _supports_temperature
 
     assert not _supports_temperature("claude-opus-4-7")
@@ -190,6 +236,8 @@ def test_temperature_suppressed_for_opus_4_7():
 
 
 def test_temperature_suppressed_for_gpt_5_family():
+    # [FUNCTION DOC] gpt-5.x model ids (dotted and dashed/dated) reject temperature; gpt-4o
+    # accepts it. Inputs: none. Output: none. Raises: AssertionError on failure.
     from repo2rlenv.llm import _supports_temperature
 
     assert not _supports_temperature("gpt-5.5")
@@ -198,6 +246,8 @@ def test_temperature_suppressed_for_gpt_5_family():
 
 
 def test_temperature_suppressed_for_reasoning_models():
+    # [FUNCTION DOC] OpenAI o-series reasoning models (o1-preview, o3-mini) reject
+    # temperature. Inputs: none. Output: none. Raises: AssertionError on failure.
     from repo2rlenv.llm import _supports_temperature
 
     assert not _supports_temperature("o1-preview")
@@ -205,6 +255,8 @@ def test_temperature_suppressed_for_reasoning_models():
 
 
 def test_qwen_via_hf_router_supports_temperature():
+    # [FUNCTION DOC] A Qwen model id routed via HF (with ':together' suffix) supports
+    # temperature. Inputs: none. Output: none. Raises: AssertionError on failure.
     from repo2rlenv.llm import _supports_temperature
 
     assert _supports_temperature("Qwen/Qwen3-Coder-480B-A35B-Instruct:together")
@@ -216,6 +268,10 @@ def test_qwen_via_hf_router_supports_temperature():
 
 
 def test_bootstrap_result_has_verify_fields():
+    # [FUNCTION DOC] A BootstrapResult built without verify args exposes verify_passed
+    # (default False) and
+    # verify_detail (default ''). Inputs: none. Output: none. Raises: AssertionError on
+    # failure.
     from repo2rlenv.bootstrap.spec import BootstrapResult, LanguageHint
 
     result = BootstrapResult(

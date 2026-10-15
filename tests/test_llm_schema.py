@@ -1,3 +1,7 @@
+# [MODULE DOC] Tests for llm.complete request shaping: structured-output response_schema is sent as
+# a strict json_schema response_format, and current OpenAI reasoning models get
+# max_completion_tokens without temperature/max_tokens. litellm.completion is monkeypatched; no
+# network.
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -10,9 +14,14 @@ from repo2rlenv.spec.input import LLMSpec
 
 
 def test_schema_reaches_provider_without_changing_unstructured_calls(monkeypatch):
+    # [FUNCTION DOC] Asserts a response_schema produces response_format {name
+    # 'repo2rlenv_response', strict True, schema}, the system message is first, and a later call
+    # without schema omits response_format.
     calls = []
 
     def completion(**kwargs):
+        # [FUNCTION DOC] HELPER: Fake litellm.completion recording kwargs and returning a response
+        # with JSON content.
         calls.append(kwargs)
         return SimpleNamespace(
             choices=[SimpleNamespace(message=SimpleNamespace(content='{"issue":"value"}'))],
@@ -42,9 +51,13 @@ def test_schema_reaches_provider_without_changing_unstructured_calls(monkeypatch
 
 @pytest.mark.parametrize("model", ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"])
 def test_current_openai_models_use_completion_limit(monkeypatch, model):
+    # [FUNCTION DOC] Parametrized over newer OpenAI model ids: asserts max_tokens is sent as
+    # max_completion_tokens, temperature and max_tokens are omitted, and num_retries is 0.
     calls = []
 
     def completion(**kwargs):
+        # [FUNCTION DOC] HELPER: Fake litellm.completion recording kwargs and returning '{}'
+        # content.
         calls.append(kwargs)
         return SimpleNamespace(
             choices=[SimpleNamespace(message=SimpleNamespace(content="{}"))], usage=None

@@ -1,3 +1,8 @@
+# [MODULE DOC] Versioned, advisory evaluation labels stored under [metadata.repo2env.evaluation] by
+# every Harbor emitter. The label describes validation evidence for a task revision; it is excluded
+# from bundle identity and never on its own authorizes training acceptance. Defines Literal aliases
+# EvaluationStatus (unverified|verified|needs_repair|blocked), EvaluationStage
+# (generation..complete|unknown) and Provenance (unknown|assisted|unattended).
 """Versioned, advisory evaluation labels shared by every Harbor emitter.
 
 This namespace describes evidence; it is not part of the executable bundle
@@ -28,6 +33,11 @@ Provenance = Literal["unknown", "assisted", "unattended"]
 
 
 class EvidenceReference(BaseModel):
+    # [CLASS DOC] Frozen Pydantic model (extra forbidden) pointing to one piece of evidence. Fields:
+    # kind (quality_result|baseline|oracle|probe|rollout|diagnosis), path (non-empty), sha256 (64
+    # lowercase hex), subject_bundle_hash ('sha256:' + 64 hex), harbor_task_checksum (optional;
+    # Harbor's physical directory checksum, kept distinct from the annotation-independent bundle
+    # identity).
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     kind: Literal["quality_result", "baseline", "oracle", "probe", "rollout", "diagnosis"]
@@ -40,6 +50,12 @@ class EvidenceReference(BaseModel):
 
 
 class EvaluationLabel(BaseModel):
+    # [CLASS DOC] Frozen Pydantic model (extra forbidden), schema_version '1'. Fields with defaults:
+    # status 'unverified', stage 'generation', reason_codes ['validation_not_run'], detail text,
+    # checked_at (optional tz-aware datetime; no default timestamp so exports stay byte-stable),
+    # provenance 'unknown', subject_bundle_hash (optional sha256: pattern), profile (optional),
+    # evidence (list of EvidenceReference), source_task_path (optional), source_task_toml_sha256
+    # (optional 64-hex).
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     schema_version: Literal["1"] = "1"
@@ -59,6 +75,11 @@ class EvaluationLabel(BaseModel):
 
     @model_validator(mode="after")
     def meaningful_claim(self):
+        # [FUNCTION DOC] Model validator (after): requires reason_codes non-empty, each snake_case
+        # matching [a-z][a-z0-9_]{0,79}, and unique; checked_at, if set, must be timezone-aware; a
+        # 'verified' status additionally requires subject_bundle_hash, checked_at, profile and
+        # evidence covering all of quality_result, baseline, oracle, probe and rollout. Raises
+        # ValueError otherwise; returns self.
         import re
 
         if not self.reason_codes or any(
@@ -81,6 +102,8 @@ class EvaluationLabel(BaseModel):
         return self
 
     def toml_metadata(self) -> dict:
+        # [FUNCTION DOC] Returns the label as a JSON-mode dict with None fields omitted (TOML has no
+        # null), suitable for task.toml metadata.
         """TOML has no null type; absent evidence remains explicitly absent."""
         return self.model_dump(mode="json", exclude_none=True)
 
@@ -88,10 +111,15 @@ class EvaluationLabel(BaseModel):
 def generated_evaluation(
     *, provenance: Provenance = "unknown", subject_bundle_hash: str | None = None
 ) -> dict:
+    # [FUNCTION DOC] Returns the TOML metadata dict of a default (unverified, generation stage)
+    # EvaluationLabel with the given provenance (keyword, default 'unknown') and subject_bundle_hash
+    # (keyword, optional). Pure.
     return EvaluationLabel(
         provenance=provenance, subject_bundle_hash=subject_bundle_hash
     ).toml_metadata()
 
 
 def evaluation_time() -> datetime:
+    # [FUNCTION DOC] Returns the current time as a timezone-aware UTC datetime (for
+    # EvaluationLabel.checked_at).
     return datetime.now(UTC)

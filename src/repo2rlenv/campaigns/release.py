@@ -1,3 +1,12 @@
+# [MODULE DOC] Immutable Harbor release staging and receipt-backed Hugging Face Hub publication.
+# Flow: a ReleasePlan (JSON) names explicit task bundle directories with their expected bundle
+# hashes -> stage_release verifies identities and builds a staging directory (tasks/, evidence/,
+# data/tasks.jsonl, manifest.json, bundle-files.json, tasks.tar.gz, README.md dataset card,
+# LICENSES.md, release-files.json) atomically via a temp dir + rename -> verify_release re-checks
+# bytes/modes -> publish_release uploads (one commit or bounded batches) while recording a receipt
+# state machine (prepared -> upload_dispatched -> [batch_upload] -> uploaded -> completed), then
+# pins a Harbor registry.json and optionally adds the dataset to a collection. Only selected bundles
+# are traversed; uncertain uploads are never replayed automatically.
 """Immutable Harbor release staging and receipt-backed Hugging Face publication.
 
 Only explicitly selected task bundles enter the release. Generation directories,
@@ -23,6 +32,11 @@ from repo2rlenv.execution.lifecycle import now, save_record
 
 
 class ReleaseTask(BaseModel):
+    # [CLASS DOC] Pydantic model (extra forbidden) for one selected task. Fields: path (task bundle
+    # directory), task_id (optional override, slug pattern, no '..'), bundle_hash (expected
+    # 'sha256:...' identity), evidence (free-form dict copied into manifest/index),
+    # evidence_documents (mapping of JSON basename -> JSON document published under
+    # evidence/<task>/), diagnostics (list of strings).
     model_config = ConfigDict(extra="forbid")
     path: Path
     task_id: str | None = Field(default=None, pattern=r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$")
@@ -34,6 +48,9 @@ class ReleaseTask(BaseModel):
     @field_validator("evidence_documents")
     @classmethod
     def valid_evidence_documents(cls, value):
+        # [FUNCTION DOC] Field validator (classmethod): requires each evidence document name to be a
+        # portable JSON basename (alphanumeric start, [A-Za-z0-9_.-], ends .json, <=125 chars) and
+        # unique case-insensitively. Returns the value unchanged; raises ValueError otherwise.
         names = set()
         for name in value:
             if (
@@ -47,12 +64,19 @@ class ReleaseTask(BaseModel):
     @field_validator("task_id")
     @classmethod
     def valid_task_id(cls, value):
+        # [FUNCTION DOC] Field validator (classmethod): rejects task IDs containing '..' with
+        # ValueError; returns the value (or None) unchanged.
         if value is not None and ".." in value:
             raise ValueError("Task IDs cannot contain '..'")
         return value
 
 
 class ReleasePlan(BaseModel):
+    # [CLASS DOC] Pydantic model (extra forbidden) describing a release. Fields: repo_id (HF dataset
+    # 'owner/name'), recipe (recipe name tasks must match, '_' and '-' treated equal), title,
+    # description, methodology (card text), code_revision, tasks (non-empty list of ReleaseTask),
+    # normalize_evaluation_labels (default False: add an 'unverified' evaluation label to tasks
+    # lacking one), economics (dict), citations (list of links), limitations (list of strings).
     model_config = ConfigDict(extra="forbid")
     repo_id: str
     recipe: str
@@ -69,6 +93,9 @@ class ReleasePlan(BaseModel):
     @field_validator("repo_id")
     @classmethod
     def valid_repo(cls, value):
+        # [FUNCTION DOC] Field validator (classmethod): validates repo_id with huggingface_hub
+        # validate_repo_id and requires exactly one '/'. Returns the value; raises ValueError (or HF
+        # validation error) otherwise.
         from huggingface_hub.utils import validate_repo_id
 
         validate_repo_id(value)
@@ -78,6 +105,9 @@ class ReleasePlan(BaseModel):
 
 
 def _files(root: Path) -> dict:
+    # [FUNCTION DOC] HELPER: Walks root recursively (sorted) and returns a dict mapping each regular
+    # file's POSIX relative path to {sha256, mode (permission bits & 0o777), bytes}. Directories are
+    # skipped. Raises ValueError on any symlink.
     records = {}
     for path in sorted(root.rglob("*")):
         if path.is_symlink():
@@ -93,6 +123,26 @@ def _files(root: Path) -> dict:
 
 
 def stage_release(plan: ReleasePlan, destination: Path) -> dict:
+    # [FUNCTION DOC] Builds an immutable staging directory for plan at destination. Raises
+    # FileExistsError if destination exists, ValueError if destination lies inside a selected task
+    # or task names (task_id or directory name) collide.
+    # Works in a temp dir '.release-*' beside destination. Per task: inspect_bundle must pass
+    # integrity and equal the planned bundle_hash (else ValueError 'Task content changed'); loads it
+    # with Harbor's Task model and, if task_id is given, requires it to equal the last segment of
+    # the Harbor task name; copies it to tasks/<name> either verbatim (copytree) or, when
+    # normalize_evaluation_labels is set and the source has no evaluation metadata, via
+    # quality.labels.write_labeled_copy with an unverified label (reason
+    # independent_validation_incomplete); re-inspects the copy and requires identical identity;
+    # requires metadata.repo2env.recipe to match plan.recipe; derives quality_status from the
+    # evaluation label (which must target this bundle hash or none) or from metadata quality_status;
+    # writes evidence documents under evidence/<name>/ with their sha256.
+    # Then writes manifest.json (schema 1, repo, recipe, created_at, code_revision, rows, economics,
+    # citations, limitations, quality_counts), bundle-files.json (file inventory of tasks/),
+    # data/tasks.jsonl (one index row per task with instruction text), tasks.tar.gz (gzip tar of
+    # tasks/), README.md (via _card), LICENSES.md, and release-files.json (inventory of everything),
+    # then renames the temp dir to destination.
+    # Returns the manifest dict. On any error the temp dir is removed. Side effects: filesystem
+    # writes; imports harbor.
     """Check exact identities, copy artifacts and create a mode-preserving archive."""
     if destination.exists():
         raise FileExistsError("Release staging already exists; verify it instead of overwriting")
@@ -236,6 +286,13 @@ def stage_release(plan: ReleasePlan, destination: Path) -> dict:
 
 
 def _card(plan: ReleasePlan, manifest: dict) -> str:
+    # [FUNCTION DOC] HELPER: Renders the Hugging Face dataset card (README.md) for a staged release:
+    # YAML front matter (license other / mixed-source-licenses, tags incl. recipe, viewer disabled)
+    # followed by Markdown sections (Harbor Visualiser badge/link, title, description, task layout,
+    # example links to the first task, generation methodology and code revision, quality counts and
+    # limitations, download/run commands, economics, credits). Inputs: plan, manifest (needs
+    # task_count, tasks[0].path, quality_counts). Returns the string. Raises IndexError if manifest
+    # has no tasks.
     import yaml
 
     front = yaml.safe_dump(
@@ -346,6 +403,10 @@ release or a claim of exact reproduction of its published results.
 
 
 def verify_release(directory: Path) -> dict:
+    # [FUNCTION DOC] Recomputes the file inventory of a staged release directory (excluding release-
+    # files.json itself) and compares it to release-files.json. Returns the parsed release-
+    # files.json dict (version, repo_id, files). Raises ValueError if anything changed (bytes, mode,
+    # added/removed files) and file/JSON errors if it is missing.
     expected = json.loads((directory / "release-files.json").read_text())
     actual = _files(directory)
     actual.pop("release-files.json", None)
@@ -362,6 +423,19 @@ def publish_release(
     collection_slug: str | None = None,
     batch_size: int | None = None,
 ) -> dict:
+    # [FUNCTION DOC] Publishes a verified staged release to the HF Hub with a durable receipt.
+    # Inputs: directory; api (HfApi-like client); receipt (Path of JSON receipt); collection_slug
+    # (optional HF collection to add the dataset to); batch_size (optional 1..500; selects bounded
+    # multi-commit upload into an empty repo).
+    # Verifies the release; release identity = sha256 of release-files.json. If the receipt exists:
+    # must have the same identity (else ValueError); returns it if state 'completed', otherwise
+    # raises ValueError (needs manual reconciliation). Else writes receipt 'prepared', creates the
+    # public dataset repo (exist_ok), writes 'upload_dispatched', then either
+    # _upload_empty_repository (batch mode) or a single upload_folder commit, records 'uploaded'
+    # with commit_sha, and finishes via _finish_publish.
+    # Returns the final receipt record. Raises ValueError for bad batch_size or receipt mismatch;
+    # propagates Hub errors (leaving the receipt in its last state). Side effects: network, receipt
+    # writes.
     """Publish a verified snapshot; retry uncertain effects only after reconciliation."""
     if batch_size is not None and not 1 <= batch_size <= 500:
         raise ValueError("Publication batches must contain one to 500 files")
@@ -408,6 +482,13 @@ def publish_release(
 
 
 def _finish_publish(directory: Path, *, api, receipt: Path, record: dict) -> dict:
+    # [FUNCTION DOC] HELPER: Completes a publish after the artifact commit. Lists remote files at
+    # record['commit_sha'] and raises RuntimeError if any file of release-files.json (or that file)
+    # is missing; builds a Harbor registry.json pinned to the commit (hub._build_registry_json,
+    # dataset name = repo name, description '<recipe> Harbor tasks', task IDs from the manifest) and
+    # uploads it in a new commit; optionally adds the dataset to the collection; updates record to
+    # state 'completed' with finished_at, task_count and url, saves the receipt and returns the
+    # record. Side effects: network, receipt write.
     from repo2rlenv.hub import _build_registry_json
 
     manifest = json.loads((directory / "manifest.json").read_text())
@@ -456,6 +537,12 @@ def _finish_publish(directory: Path, *, api, receipt: Path, record: dict) -> dic
 
 
 def recover_empty_upload(directory: Path, *, api, receipt: Path, batch_size: int = 250) -> dict:
+    # [FUNCTION DOC] Explicit recovery for a publish whose single large upload timed out or was
+    # rejected. Inputs: directory, api, receipt (must exist), batch_size (1..500, default 250).
+    # Verifies the release and requires the receipt to match its identity and repo and to be in
+    # state 'upload_dispatched'; then delegates to _upload_empty_repository (which itself refuses a
+    # non-empty repo). Returns the completed receipt record. Raises ValueError on bad batch size,
+    # mismatched receipt or wrong state. Side effects: network, receipt writes.
     """Recover a rejected/timed-out upload only after confirming no artifact commit.
 
     Large atomic commits can time out at the Hub gateway. This explicit recovery
@@ -479,6 +566,16 @@ def recover_empty_upload(directory: Path, *, api, receipt: Path, batch_size: int
 def _upload_empty_repository(
     directory: Path, *, api, receipt: Path, record: dict, files: dict, batch_size: int
 ) -> dict:
+    # [FUNCTION DOC] HELPER: Uploads the staged release into a repository that must contain nothing
+    # but .gitattributes, using sequential bounded commits each guarded by parent_commit. Reads the
+    # current head sha, raises ValueError if other remote files exist, records state 'batch_upload'
+    # with reconciled_empty_commit and an empty batches list. Upload order: all release files except
+    # README.md (sorted), then README.md, then release-files.json last as the completion marker. For
+    # each chunk of batch_size paths records a 'dispatched' batch, creates a commit of
+    # CommitOperationAdd entries, then marks it 'completed' with its commit sha (a failed chunk
+    # stays 'dispatched' and is not retried). Finally records 'uploaded' with the last commit and
+    # calls _finish_publish. Returns the final record. Side effects: network, receipt writes,
+    # mutates record.
     from huggingface_hub import CommitOperationAdd
 
     repo_id = record["repo_id"]

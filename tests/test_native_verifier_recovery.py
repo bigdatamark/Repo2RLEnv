@@ -1,3 +1,8 @@
+# [MODULE DOC] Tests for resuming an interrupted native-Modal trial whose verifier allocation was
+# budget-denied (quality.loop.native_recovery and NativeModalTrials): CLI backend routing, evidence
+# sealing that blocks resume on any change, one-shot verifier continuation preserving solver
+# results, and retention of failures/cancellations. Uses Harbor's real models with monkeypatched
+# trial/agent hooks; never starts sandboxes. Skipped unless harbor and modal are importable.
 """Exercise recovery against Harbor's real controller; never start target sandboxes."""
 
 import asyncio
@@ -28,6 +33,8 @@ from repo2rlenv.quality.loop.native_recovery import (
 
 @pytest.fixture
 def gpu_task(tmp_path):
+    # [FUNCTION DOC] Fixture: writes a GPU (L4, no-network) task bundle with a separate verifier
+    # environment under tmp_path/tasks; returns the task directory.
     resources = {"gpus": 1, "gpu_types": ["L4"], "network_mode": "no-network"}
     return write_bundle(
         TaskBundle(
@@ -51,6 +58,10 @@ def gpu_task(tmp_path):
 
 @pytest.fixture
 def interrupted(tmp_path, gpu_task):
+    # [FUNCTION DOC] Fixture: fabricates an interrupted trial for gpu_task: submission artifact and
+    # manifest, trajectory, a Harbor TrialResult with agent cost and a BudgetExceeded exception, a
+    # completed trial.json receipt, learner/verifier allocation records, and seals the verifier
+    # inputs. Returns a namespace with task, output, root, budget and ledger.
     from harbor.models.trial.config import TrialConfig
     from harbor.models.trial.result import TrialResult
 
@@ -133,6 +144,8 @@ def interrupted(tmp_path, gpu_task):
 
 
 def test_cli_routes_gpu_tasks_without_cpu_wheel(gpu_task):
+    # [FUNCTION DOC] Asserts execution_backend picks 'native-modal' for GPU tasks on modal, rejects
+    # other providers, and rejects a worker receipt for GPU tasks.
     assert (
         execution_backend(gpu_task, provider="modal", wheel=None, worker_receipt=None)
         == "native-modal"
@@ -147,6 +160,8 @@ def test_cli_routes_gpu_tasks_without_cpu_wheel(gpu_task):
 
 @pytest.mark.parametrize("provider", ["modal", "daytona"])
 def test_cpu_route_requires_worker_runtime(gpu_task, provider):
+    # [FUNCTION DOC] Parametrized over modal/daytona: after stripping GPUs from task.toml, asserts
+    # execution_backend requires a runtime wheel and then returns the provider name.
     import tomllib
 
     import tomli_w
@@ -172,9 +187,13 @@ def test_cpu_route_requires_worker_runtime(gpu_task, provider):
     ["submission", "trace", "mode", "symlink", "allocation", "result", "task", "manifest"],
 )
 def test_changed_evidence_blocks_resume_before_dispatch(interrupted, monkeypatch, mutation):
+    # [FUNCTION DOC] Parametrized over mutations of the sealed evidence: asserts resume_verifier
+    # raises ValueError, never constructs a Harbor trial, creates no resume dir and records no
+    # ledger operations.
     from harbor.trial.trial import Trial
 
     def no_dispatch(*args):
+        # [FUNCTION DOC] HELPER: Fake Trial.create that fails the test if reached.
         pytest.fail("Invalid evidence must be rejected before Harbor constructs a trial")
 
     monkeypatch.setattr(Trial, "create", no_dispatch)
@@ -208,6 +227,10 @@ def test_changed_evidence_blocks_resume_before_dispatch(interrupted, monkeypatch
 
 
 def test_verifier_continuation_preserves_solver_and_runs_once(interrupted, monkeypatch):
+    # [FUNCTION DOC] Asserts NativeModalTrials.run resumes only the verifier once (second run
+    # returns the cached result), keeps the original agent fields, saves the original result and
+    # receipts with matching digests in resumption.json, leaves sealed inputs unchanged and adds no
+    # ledger operations.
     from harbor.agents.terminus_2.terminus_2 import Terminus2
     from harbor.models.verifier.result import VerifierResult
     from harbor.trial.single_step import SingleStepTrial
@@ -217,9 +240,13 @@ def test_verifier_continuation_preserves_solver_and_runs_once(interrupted, monke
     calls = []
 
     async def forbid(*args, **kwargs):
+        # [FUNCTION DOC] HELPER: Async stub failing the test if an agent, full run or environment
+        # start is attempted.
         pytest.fail("Recovery must not start a learner, collect new source or call its model")
 
     async def verify(trial):
+        # [FUNCTION DOC] HELPER: Fake verifier asserting the original submission is present and
+        # setting reward 0.0.
         calls.append("verifier")
         assert (
             trial.paths.artifacts_dir / "workspace/src/example.py"
@@ -257,6 +284,8 @@ def test_verifier_continuation_preserves_solver_and_runs_once(interrupted, monke
 
 
 def test_unsealed_old_trial_is_retained_without_reexecution(interrupted):
+    # [FUNCTION DOC] Asserts that without a verifier-inputs seal the original BudgetExceeded result
+    # is returned and no resume is attempted.
     run = interrupted
     (run.output / "verifier-inputs.json").unlink()
     runner = NativeModalTrials(run.output.parents[1], run.budget, LoopOptions())
@@ -266,6 +295,8 @@ def test_unsealed_old_trial_is_retained_without_reexecution(interrupted):
 
 
 def test_cancelled_continuation_keeps_cleanup_evidence_and_does_not_retry(interrupted, monkeypatch):
+    # [FUNCTION DOC] Asserts a cancelled continuation records 'cleanup_uncertain', a later run
+    # raises ValueError ('incomplete') without redispatch, and ACCOUNTING is reset.
     from harbor.trial.trial import Trial
 
     from repo2rlenv.execution.harbor_modal import ACCOUNTING
@@ -273,9 +304,12 @@ def test_cancelled_continuation_keeps_cleanup_evidence_and_does_not_retry(interr
     calls = []
 
     async def stop():
+        # [FUNCTION DOC] HELPER: No-op async stop.
         pass
 
     async def cancel(_):
+        # [FUNCTION DOC] HELPER: Fake Trial.create recording 'dispatch', registering an uncertain
+        # environment and raising CancelledError.
         calls.append("dispatch")
         ACCOUNTING.get().environments.append(
             SimpleNamespace(record={"state": "creation_uncertain"}, stop=stop)
@@ -298,12 +332,17 @@ def test_cancelled_continuation_keeps_cleanup_evidence_and_does_not_retry(interr
     "error", [BudgetExceeded("Denied again"), ConnectionError("Lost response")]
 )
 def test_continuation_failure_is_retained_not_repeated(interrupted, monkeypatch, error):
+    # [FUNCTION DOC] Parametrized over BudgetExceeded/ConnectionError: asserts the continuation
+    # failure is recorded with that exception type, rerunning returns the same result without
+    # another attempt, and the original import still reports BudgetExceeded.
     from harbor.agents.terminus_2.terminus_2 import Terminus2
     from harbor.trial.single_step import SingleStepTrial
 
     calls = []
 
     async def fail(trial):
+        # [FUNCTION DOC] HELPER: Fake verifier recording an attempt and raising the parametrized
+        # error.
         calls.append("attempt")
         raise error
 

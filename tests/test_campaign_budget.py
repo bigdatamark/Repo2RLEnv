@@ -1,3 +1,7 @@
+# [MODULE DOC] Tests for campaigns.budget.BudgetLedger (SQLite-backed spending ledger) and the
+# quality.loop.client.RunBudget scoped wrapper: reservations, uncertain operations surviving
+# restart, settlement, overruns, concurrency safety, scope membership, limit increases and
+# amount validation. All ledgers live in tmp_path.
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
@@ -8,6 +12,12 @@ from repo2rlenv.campaigns.budget import BudgetExceeded, BudgetLedger, OperationA
 
 
 def test_uncertain_operations_stay_reserved_across_restart(tmp_path):
+    # [FUNCTION DOC] An operation marked uncertain stays reserved after reopening the ledger:
+    # re-reserving
+    # the same id raises OperationAlreadyRecorded, exceeding the remainder raises
+    # BudgetExceeded,
+    # and settling at a lower actual frees the difference. Inputs: tmp_path. Raises
+    # AssertionError on failure.
     ledger = BudgetLedger(tmp_path / "budget.db", limit_usd="1")
     ledger.reserve("request", "0.75", "model request")
     ledger.mark_uncertain("request", "connection lost after dispatch")
@@ -22,10 +32,16 @@ def test_uncertain_operations_stay_reserved_across_restart(tmp_path):
 
 
 def test_concurrent_reservations_cannot_overspend(tmp_path):
+    # [FUNCTION DOC] Four threads each try to reserve $0.60 against a $1 limit using separate
+    # ledger
+    # connections; exactly one must succeed. Inputs: tmp_path. Raises AssertionError on
+    # failure.
     path = tmp_path / "budget.db"
     BudgetLedger(path, limit_usd="1")
 
     def reserve(i):
+        # [FUNCTION DOC] HELPER: Opens a ledger on the shared path and reserves $0.60
+        # under id str(i); returns True on success, False on BudgetExceeded.
         try:
             BudgetLedger(path).reserve(str(i), "0.60", "worker")
             return True
@@ -39,6 +55,11 @@ def test_concurrent_reservations_cannot_overspend(tmp_path):
 
 
 def test_parallel_children_share_atomic_batch_cap(tmp_path):
+    # [FUNCTION DOC] Four threads build nested RunBudgets (batch cap $1, child cap $1) and
+    # reserve $0.60
+    # simultaneously (synchronized with a Barrier); only one may succeed because the batch cap
+    # is
+    # enforced atomically. Inputs: tmp_path. Raises AssertionError on failure.
     from threading import Barrier
 
     from repo2rlenv.quality.loop.client import RunBudget
@@ -48,6 +69,9 @@ def test_parallel_children_share_atomic_batch_cap(tmp_path):
     start = Barrier(4)
 
     def reserve(index):
+        # [FUNCTION DOC] HELPER: Builds batch and child RunBudgets for the given index,
+        # waits on the barrier, reserves $0.60; returns True on success, False on
+        # BudgetExceeded.
         batch = RunBudget(BudgetLedger(path), "batch50-", "1")
         child = RunBudget(batch, f"batch50-child{index}", "1")
         start.wait()
@@ -64,6 +88,10 @@ def test_parallel_children_share_atomic_batch_cap(tmp_path):
 
 
 def test_scoped_budget_preserves_uncertainty_and_actual_overruns(tmp_path):
+    # [FUNCTION DOC] Nested scopes keep uncertain reservations held, reflect an actual overrun
+    # (settled 1.20 on
+    # a 1.00 child cap) so further child reservations fail, and the overrun counts against the
+    # parent batch cap for siblings. Checks accounted/reserved totals. Inputs: tmp_path.
     from repo2rlenv.quality.loop.client import RunBudget
 
     ledger = BudgetLedger(tmp_path / "budget.db", limit_usd="100")
@@ -85,6 +113,8 @@ def test_scoped_budget_preserves_uncertainty_and_actual_overruns(tmp_path):
 
 
 def test_scope_membership_is_checked_before_any_reservation(tmp_path):
+    # [FUNCTION DOC] Reserving an id that does not match the given scope prefix raises
+    # ValueError and records nothing. Inputs: tmp_path.
     ledger = BudgetLedger(tmp_path / "budget.db", limit_usd="100")
     with pytest.raises(ValueError, match="each budget scope"):
         ledger.reserve("other-task", "1", "model", scopes=(("batch-", "5"),))
@@ -92,6 +122,10 @@ def test_scope_membership_is_checked_before_any_reservation(tmp_path):
 
 
 def test_actual_overrun_is_not_hidden(tmp_path):
+    # [FUNCTION DOC] Settling above the reservation drives remaining negative and blocks new
+    # reservations;
+    # re-settling with identical values is idempotent while a different value raises
+    # OperationAlreadyRecorded. Inputs: tmp_path.
     ledger = BudgetLedger(tmp_path / "budget.db", limit_usd="1")
     ledger.reserve("request", "0.50", "provider")
     ledger.settle("request", "1.20", evidence="provider invoice")
@@ -104,12 +138,19 @@ def test_actual_overrun_is_not_hidden(tmp_path):
 
 
 def test_opening_ledger_cannot_reset_limit(tmp_path):
+    # [FUNCTION DOC] Reopening an existing ledger with a different limit_usd raises ValueError
+    # ('implicit budget reset'). Inputs: tmp_path.
     ledger = BudgetLedger(tmp_path / "budget.db", limit_usd="1")
     with pytest.raises(ValueError, match="implicit budget reset"):
         BudgetLedger(ledger.path, limit_usd="100")
 
 
 def test_authorized_increase_retains_costs_holds_and_is_idempotent(tmp_path):
+    # [FUNCTION DOC] increase_limit keeps operations untouched, is idempotent for identical
+    # evidence, and
+    # rejects a stale expected_limit, a different increase with reused evidence, or a
+    # decrease.
+    # Inputs: tmp_path. Raises AssertionError on failure.
     ledger = BudgetLedger(tmp_path / "budget.db", limit_usd="1")
     ledger.reserve("paid", "0.25", "completed model call")
     ledger.settle("paid", "0.20", evidence="usage")
@@ -130,5 +171,7 @@ def test_authorized_increase_retains_costs_holds_and_is_idempotent(tmp_path):
 
 @pytest.mark.parametrize("amount", ["NaN", "Infinity", "-1"])
 def test_invalid_amounts_rejected(amount, tmp_path):
+    # [FUNCTION DOC] Parametrized: NaN, Infinity and negative limits raise ValueError ('finite
+    # and nonnegative'). Inputs: amount (str), tmp_path.
     with pytest.raises(ValueError, match="finite and nonnegative"):
         BudgetLedger(tmp_path / "budget.db", limit_usd=amount)

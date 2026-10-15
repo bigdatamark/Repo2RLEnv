@@ -1,3 +1,8 @@
+# [MODULE DOC] Tests for codemidas retention: incomplete or provider-blocked audits must label a
+# task
+# 'blocked' rather than 'needs_repair', real defects label 'needs_repair', the bundle stays
+# byte-identical, and a blocked adversarial probe cannot confirm an exploit.
+# KNOWN ISSUE: this module lacks 'from __future__ import annotations' (CLAUDE.md invariant 7).
 """Incomplete audits must not become evidence of a defective task."""
 
 import json
@@ -24,6 +29,12 @@ from repo2rlenv.quality.labels import read_evaluation
 def test_retention_distinguishes_defects_from_incomplete_evidence(
     tmp_path, monkeypatch, outcome, exploit, provider_blocked, expected, reason
 ):
+    # [FUNCTION DOC] Writes a bundle and an audit receipt for the parametrized outcome, calls
+    # retain, and checks
+    # the evaluation label status/reason code, unchanged bundle hash and task.toml, and that
+    # the
+    # receipt is the last evidence path. control_evidence is stubbed. Inputs: tmp_path,
+    # monkeypatch, outcome, exploit, provider_blocked, expected, reason.
     task = write_bundle(
         TaskBundle(
             name="example",
@@ -75,6 +86,9 @@ def test_retention_distinguishes_defects_from_incomplete_evidence(
 
 
 def test_blocked_probe_cannot_establish_a_confirmed_exploit():
+    # [FUNCTION DOC] validate_review raises ValueError when exploit_confirmed is claimed but
+    # the exploit attempt was ProviderPolicyBlocked. Inputs: none. Output: none. Raises:
+    # AssertionError on failure.
     review = AuditReview(
         sound=False,
         solver_sound=True,

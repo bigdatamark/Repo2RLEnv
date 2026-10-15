@@ -1,3 +1,8 @@
+# [MODULE DOC] Tests that cargo/libtest test identities parse identically in the canonical
+# log_parsers.cargo_parser.parse_cargo_test and the standalone copy embedded in
+# pipelines/_pr_runtime_verifier.py: test modes are stripped, doctest line numbers ignored,
+# worst status wins across an item's doctests, noise lines ignored, and long lines do not
+# cause regex backtracking. Also runs the standalone verifier script end-to-end in a subprocess.
 """Cargo test identities must survive generation-time and standalone parsing."""
 
 from __future__ import annotations
@@ -18,6 +23,10 @@ from repo2rlenv.pipelines import _pr_runtime_verifier as verifier
     params=[parse_cargo_test, verifier.parse_cargo_test], ids=["canonical", "standalone"]
 )
 def parser(request):
+    # [FUNCTION DOC] Fixture parametrized over both parser implementations (ids 'canonical',
+    # 'standalone').
+    # Inputs: request (pytest param request). Output: the parser callable (str -> dict
+    # name->status).
     return request.param
 
 
@@ -92,6 +101,8 @@ error: doctest failed, to rerun pass `--doc`
 
 
 def test_real_cargo_log_keeps_every_libtest_result(parser):
+    # [FUNCTION DOC] A real multi-binary cargo log maps every unit/integration/doctest result
+    # to the expected PASSED/FAILED/SKIPPED dict. Inputs: parser fixture.
     assert parser(_REAL_LOG) == {
         "tests::ignored_plain": "SKIPPED",
         "tests::ignored_should_panic": "SKIPPED",
@@ -112,12 +123,16 @@ def test_real_cargo_log_keeps_every_libtest_result(parser):
 @pytest.mark.parametrize("mode", ["should panic", "compile fail", "compile"])
 @pytest.mark.parametrize(("word", "status"), [("ok", "PASSED"), ("FAILED", "FAILED")])
 def test_test_mode_is_not_part_of_the_identity(parser, mode, word, status):
+    # [FUNCTION DOC] Parametrized: ' - should panic' / ' - compile fail' / ' - compile'
+    # suffixes are dropped from names for ok/FAILED. Inputs: parser, mode, word, status.
     assert parser(f"test tests::divide_by_zero - {mode} ... {word}\n") == {
         "tests::divide_by_zero": status
     }
 
 
 def test_doctest_identity_ignores_line_numbers(parser):
+    # [FUNCTION DOC] Two doctest lines differing only in '(line N)' produce the same identity
+    # 'src/lib.rs - math::div'. Inputs: parser.
     before = "test src/lib.rs - math::div (line 10) - compile fail ... ok\n"
     after = "test src/lib.rs - math::div (line 17) - compile fail ... ok\n"
     assert parser(before) == parser(after) == {"src/lib.rs - math::div": "PASSED"}
@@ -132,6 +147,8 @@ def test_doctest_identity_ignores_line_numbers(parser):
     ],
 )
 def test_worst_status_among_an_items_doctests_wins_in_any_order(parser, words, status):
+    # [FUNCTION DOC] For every permutation of doctest results for one item, FAILED beats
+    # PASSED beats SKIPPED. Inputs: parser, words, status.
     for order in itertools.permutations(words):
         log = "".join(
             f"test src/lib.rs - add (line {10 + 4 * i}) ... {word}\n"
@@ -141,6 +158,8 @@ def test_worst_status_among_an_items_doctests_wins_in_any_order(parser, words, s
 
 
 def test_padded_names_and_ignore_reasons(parser):
+    # [FUNCTION DOC] Whitespace-padded names and 'ignored, <reason>' lines parse correctly.
+    # Inputs: parser.
     log = (
         "test tests::short          ... ok\n"
         "test tests::panics         - should panic ... ok\n"
@@ -154,6 +173,7 @@ def test_padded_names_and_ignore_reasons(parser):
 
 
 def test_repeated_unit_test_keeps_last_write(parser):
+    # [FUNCTION DOC] When a test name appears twice, the last status wins. Inputs: parser.
     log = "test tests::flaky ... FAILED\ntest tests::flaky ... ok\n"
     assert parser(log) == {"tests::flaky": "PASSED"}
 
@@ -170,10 +190,16 @@ def test_repeated_unit_test_keeps_last_write(parser):
     ],
 )
 def test_summary_failure_blocks_and_unrelated_lines(parser, log):
+    # [FUNCTION DOC] Parametrized non-result lines (summaries, failure lists, stdout headers,
+    # unfinished/unknown statuses) yield an empty dict. Inputs: parser, log.
     assert parser(log) == {}
 
 
 def test_long_lines_do_not_stall_parsing():
+    # [FUNCTION DOC] Runs both parsers in a child Python process (10s timeout) on pathological
+    # ~200k-char lines
+    # to guard against catastrophic regex backtracking; the child must exit 0. Side effects:
+    # spawns a subprocess. Raises AssertionError or subprocess.TimeoutExpired on failure.
     # Isolate the timeout so a backtracking regression cannot hang the suite.
     result = subprocess.run(
         [
@@ -245,6 +271,11 @@ _AGENT_LOG = _GOLD_LOG.replace("(line 3)", "(line 9)")
 
 
 def test_shifted_doctest_keeps_a_correct_patch_at_full_reward(tmp_path: Path):
+    # [FUNCTION DOC] Derives F2P/P2P from pre/gold logs, then copies the verifier module to
+    # tmp_path and runs
+    # it isolated (python -I) against an agent log where the doctest moved lines; the written
+    # rewards/reward-details.json must report reward 1.0, resolved, no regressions.
+    # Inputs: tmp_path. Side effects: writes files and spawns a subprocess (30s timeout).
     pre, gold = parse_cargo_test(_PRE_LOG), parse_cargo_test(_GOLD_LOG)
     f2p = [
         name for name, status in pre.items() if status == "FAILED" and gold.get(name) == "PASSED"

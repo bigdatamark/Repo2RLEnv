@@ -1,3 +1,7 @@
+# [MODULE DOC] CLI adapters for the 'campaign' (budget ledger init/status/settle) and 'workers'
+# (remote worker start/probe/stop) subcommands. add_campaign_parsers registers both on the top-level
+# argparse subparsers; handlers render via repo2rlenv.ui.console (JSON or key/value panel). The
+# ledger lives at <campaign dir>/budget.sqlite3.
 """Explicit campaign accounting and remote worker lifecycle commands."""
 
 from __future__ import annotations
@@ -15,6 +19,14 @@ from repo2rlenv.ui import console
 
 
 def cmd_campaign(args: argparse.Namespace) -> int:
+    # [FUNCTION DOC] Handler for 'campaign init|status|settle PATH'. Opens BudgetLedger at
+    # PATH/budget.sqlite3 (passing --budget-usd as the limit only for init, which creates it). For
+    # settle: resolves --evidence, hashes its bytes with SHA-256 and settles --operation at --cost-
+    # usd with evidence '<abs path>#sha256=<hex>'. Then prints ledger.status() as JSON (--json) or a
+    # 'Campaign budget' panel of limit/accounted/reserved/remaining, warning about uncertain
+    # operations.
+    # Returns 0. Raises whatever BudgetLedger raises (ValueError, OperationAlreadyRecorded) and file
+    # errors. Side effects: sqlite, file read, console output.
     ledger = BudgetLedger(
         args.path / "budget.sqlite3",
         limit_usd=args.budget_usd if args.campaign_action == "init" else None,
@@ -43,6 +55,15 @@ def cmd_campaign(args: argparse.Namespace) -> int:
 
 
 def cmd_workers(args: argparse.Namespace) -> int:
+    # [FUNCTION DOC] Handler for 'workers start|probe|stop'. Loads .env (python-dotenv) first.
+    # start: opens the existing ledger at --campaign/budget.sqlite3, builds a WorkerSpec from
+    # provider/name/cpus/memory_mb/timeout_sec and calls provision_worker (which reserves --reserve-
+    # usd and writes a receipt under --campaign/workers); output is the receipt path merged with its
+    # JSON. stop: reads the receipt and calls stop_worker with the ledger path recorded in it.
+    # probe: requires receipt state 'running' (else ValueError), reconnects via connect_worker and
+    # runs probe_worker writing to --out.
+    # Prints JSON (--json) or a 'Remote worker' panel of the scalar fields. Returns 0. Side effects:
+    # env vars, network/cloud provider calls, files, ledger writes.
     from dotenv import load_dotenv
 
     load_dotenv()
@@ -79,6 +100,12 @@ def cmd_workers(args: argparse.Namespace) -> int:
 
 
 def add_campaign_parsers(subparsers) -> None:
+    # [FUNCTION DOC] Registers the 'campaign' parser with actions init/status/settle (positional
+    # path, --json; init requires --budget-usd; settle requires --operation, --cost-usd, --evidence)
+    # dispatching to cmd_campaign, and the 'workers' parser with start (--campaign, --provider
+    # modal|daytona, --name, --reserve-usd required; --cpus 2, --memory-mb 4096, --timeout-sec
+    # 3600), probe (receipt, --out) and stop (receipt), all with --json, dispatching to cmd_workers.
+    # Input: an argparse subparsers action. Returns None; mutates the parser.
     campaign = subparsers.add_parser(
         "campaign", help="Initialize, inspect and reconcile a generation budget"
     )

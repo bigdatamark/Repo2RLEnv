@@ -1,3 +1,8 @@
+# [MODULE DOC] Tests for native Harbor-on-Modal budget accounting (execution.harbor_modal and
+# quality.loop.native): Harbor version gating, release of model/sandbox holds only with proof of no
+# dispatch or completion, sandbox price estimation, single-dispatch on lost create responses, budget
+# denials, and cancellation cleanup. Skipped unless harbor and modal are importable; Modal SDK calls
+# are monkeypatched.
 """Native lifecycle accounting must retain uncertain provider outcomes."""
 
 import asyncio
@@ -24,12 +29,16 @@ from repo2rlenv.quality.loop.native import (
 
 
 def test_untested_harbor_version_is_rejected_before_initialization(monkeypatch):
+    # [FUNCTION DOC] Asserts MeteredModalEnvironment() raises RuntimeError ('tested Harbor') when
+    # the reported Harbor version is untested.
     monkeypatch.setattr("repo2rlenv.execution.harbor_modal.version", lambda _: "999.0.0")
     with pytest.raises(RuntimeError, match="tested Harbor"):
         MeteredModalEnvironment()
 
 
 def test_model_hold_is_releasable_only_with_proven_pre_dispatch_denial(tmp_path):
+    # [FUNCTION DOC] Asserts model_was_not_dispatched is True only when an allocation claim is
+    # 'reservation_failed' and the result has no agent_execution or agent_result.
     allocations = tmp_path / "allocations"
     allocations.mkdir()
     result = tmp_path / "result.json"
@@ -53,6 +62,9 @@ def test_model_hold_is_releasable_only_with_proven_pre_dispatch_denial(tmp_path)
 
 
 def test_sandbox_pricing_and_cleanup_requirement():
+    # [FUNCTION DOC] Asserts compute_estimate yields the expected per-second rate and accounted USD
+    # for a terminated 100s sandbox, and raises ValueError ('confirmed cleanup') when termination is
+    # uncertain.
     record = {
         "state": "terminated",
         "started_at": "2026-09-13T00:00:00+00:00",
@@ -67,6 +79,8 @@ def test_sandbox_pricing_and_cleanup_requirement():
 
 
 def test_completed_model_usage_survives_a_denied_verifier(tmp_path):
+    # [FUNCTION DOC] Asserts model_cost_after_verifier_denial returns the agent cost only for a
+    # finished agent with a valid finite cost and a denied verifier allocation; otherwise None.
     allocations = tmp_path / "allocations"
     allocations.mkdir()
     claim = allocations / "verifier.json"
@@ -94,6 +108,8 @@ def test_completed_model_usage_survives_a_denied_verifier(tmp_path):
 
 
 def test_completed_agent_releases_unused_hold_before_verifier(tmp_path):
+    # [FUNCTION DOC] Asserts settle_completed_agent settles the solver hold to the actual cost,
+    # freeing budget for the verifier, and writes a receipt with verifier_pending True.
     ledger = BudgetLedger(tmp_path / "budget.sqlite3", limit_usd="5.00")
     ledger.reserve("trial:solver", "2.00", "solver")
     data = {
@@ -110,6 +126,8 @@ def test_completed_agent_releases_unused_hold_before_verifier(tmp_path):
 
 
 def test_unfinished_or_unmetered_agent_keeps_its_hold(tmp_path):
+    # [FUNCTION DOC] Asserts settle_completed_agent returns False, keeps the 2.00 reservation and
+    # writes no receipt for timeouts, missing execution or invalid costs.
     ledger = BudgetLedger(tmp_path / "budget.sqlite3", limit_usd="5.00")
     ledger.reserve("trial:solver", "2.00", "solver")
     complete = {
@@ -130,6 +148,9 @@ def test_unfinished_or_unmetered_agent_keeps_its_hold(tmp_path):
 
 @pytest.mark.asyncio
 async def test_lost_create_response_is_single_dispatch_and_retains_budget(monkeypatch, tmp_path):
+    # [FUNCTION DOC] Asserts a ConnectionError from Sandbox.create leaves the reservation
+    # 'uncertain', a retry raises ValueError ('already claimed'), and exactly one create was sent
+    # with block_network and no secrets/volumes.
     import modal
 
     ledger = BudgetLedger(tmp_path / "budget.sqlite3", limit_usd="10")
@@ -144,6 +165,8 @@ async def test_lost_create_response_is_single_dispatch_and_retains_budget(monkey
     calls = []
 
     async def create(*args, **kwargs):
+        # [FUNCTION DOC] HELPER: Fake async Sandbox.create recording kwargs and raising
+        # ConnectionError.
         calls.append(kwargs)
         raise ConnectionError("Response lost")
 
@@ -162,6 +185,9 @@ async def test_lost_create_response_is_single_dispatch_and_retains_budget(monkey
 async def test_denied_allocation_stays_budget_blocked_without_provider_dispatch(
     monkeypatch, tmp_path
 ):
+    # [FUNCTION DOC] Asserts a budget denial raises BudgetExceeded without calling the provider,
+    # writes a 'reservation_failed' receipt, NativeStages.failure re-raises the same error, and an
+    # unknown 'creation_uncertain' allocation makes it raise RuntimeError for reconciliation.
     import modal
 
     from repo2rlenv.tasksmith.native_stages import NativeStages
@@ -175,6 +201,7 @@ async def test_denied_allocation_stays_budget_blocked_without_provider_dispatch(
     env.override_gpus = None
 
     async def create(*args, **kwargs):
+        # [FUNCTION DOC] HELPER: Fake Sandbox.create that fails the test if reached.
         pytest.fail("A denied reservation must never reach the provider")
 
     monkeypatch.setattr(modal.Sandbox, "create", SimpleNamespace(aio=create))
@@ -194,6 +221,8 @@ async def test_denied_allocation_stays_budget_blocked_without_provider_dispatch(
 
 @pytest.mark.asyncio
 async def test_cleanup_uncertainty_does_not_swallow_controller_cancellation(monkeypatch, tmp_path):
+    # [FUNCTION DOC] Asserts CancelledError during Trial.create propagates, the trial receipt
+    # records 'cleanup_uncertain', and the ACCOUNTING context var is reset to None.
     from harbor.trial.trial import Trial
 
     from repo2rlenv.execution.harbor_modal import ACCOUNTING
@@ -206,9 +235,12 @@ async def test_cleanup_uncertainty_does_not_swallow_controller_cancellation(monk
     monkeypatch.setattr(native, "task_identity", lambda _: "sha256:fixture")
 
     async def stop():
+        # [FUNCTION DOC] HELPER: No-op async stop for the fake environment.
         pass
 
     async def create(_):
+        # [FUNCTION DOC] HELPER: Fake Trial.create that registers an uncertain environment in
+        # ACCOUNTING then raises CancelledError.
         ACCOUNTING.get().environments.append(
             SimpleNamespace(record={"state": "creation_uncertain"}, stop=stop)
         )

@@ -1,3 +1,6 @@
+# [MODULE DOC] Test for the cli_gym (env_repair) recipe exporter: an environment inversion is
+# applied
+# only at image build time and the original repository tests are retained in the task.
 from __future__ import annotations
 
 import json
@@ -10,6 +13,13 @@ from repo2rlenv.spec.recipe_options import EnvironmentRepairOptions
 
 
 def test_inversion_is_build_only_and_original_tests_are_retained(tmp_path):
+    # [FUNCTION DOC] Exports a task from a small source tree with an Inversion; asserts bundle
+    # integrity, the
+    # Dockerfile copies only source/ and contains the destruction step, the setting never
+    # leaks
+    # into source files, contract.json lists the required test, repository tests are copied
+    # and
+    # the verifier runs as root. Inputs: tmp_path. Side effects: writes files under tmp_path.
     base = tmp_path / "source"
     (base / "tests").mkdir(parents=True)
     (base / "module.py").write_text("value = 3\n")

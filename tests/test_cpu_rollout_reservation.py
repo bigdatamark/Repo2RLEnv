@@ -1,3 +1,7 @@
+# [MODULE DOC] Tests for execution.harbor.run_trial budget reservation for CPU trials: a denied
+# reservation writes a no-dispatch receipt, waiting for sibling settlement dispatches exactly
+# once and resumes without replay, and a wait deadline records the final denial. Skipped
+# when harbor is not installed; workers, job launch and evidence unpacking are mocked.
 from __future__ import annotations
 
 import json
@@ -18,6 +22,11 @@ from repo2rlenv.spec.input import LLMSpec
 
 @pytest.fixture
 def trial(tmp_path, monkeypatch):
+    # [FUNCTION DOC] Fixture: writes a minimal task bundle, creates a $100 ledger with a
+    # shared $5 batch scope
+    # (already holding a $4 sibling reservation) and nested child scopes, a mock worker, and
+    # stubs resolve_llm_api_key and launch_job. Inputs: tmp_path, monkeypatch. Output:
+    # SimpleNamespace(task, output, ledger, budget, worker, launch, model).
     task = write_bundle(
         TaskBundle(
             name="example",
@@ -55,6 +64,10 @@ def trial(tmp_path, monkeypatch):
 
 
 def run(trial, **kwargs):
+    # [FUNCTION DOC] HELPER: Calls harbor.run_trial for the fixture with trial id 'batch-
+    # child-quality-solver',
+    # agent terminus-2 and a $3 reservation, forwarding kwargs (e.g. resume,
+    # reservation_wait_sec). Output: the trial result. Raises whatever run_trial raises.
     return harbor.run_trial(
         trial.worker,
         trial.task,
@@ -69,6 +82,9 @@ def run(trial, **kwargs):
 
 
 def test_denied_cpu_trial_has_definite_no_dispatch_receipt(trial):
+    # [FUNCTION DOC] Without waiting, the reservation fails with BudgetExceeded; trial.json
+    # records reservation_failed, no dispatch, the denial scope and no credential; resume
+    # raises FileExistsError('Reconcile'). Inputs: trial.
     with pytest.raises(BudgetExceeded) as caught:
         run(trial)
     receipt = json.loads((trial.output / "trial.json").read_text())
@@ -88,7 +104,12 @@ def test_denied_cpu_trial_has_definite_no_dispatch_receipt(trial):
 
 
 def test_cpu_trial_dispatches_once_after_settlement_and_resumes_without_replay(trial, monkeypatch):
+    # [FUNCTION DOC] A patched sleep settles the sibling while waiting; the trial dispatches
+    # once, reports reward 1 and correct accounting; resume returns the result without
+    # relaunching. Inputs: trial, monkeypatch.
     def settle(_):
+        # [FUNCTION DOC] HELPER: Replacement time.sleep asserting the waiting receipt and
+        # no dispatch, then settling the sibling reservation at $1.
         receipt = json.loads((trial.output / "trial.json").read_text())
         assert receipt["state"] == "reservation_waiting"
         assert receipt["trial_dispatched"] is False
@@ -102,6 +123,8 @@ def test_cpu_trial_dispatches_once_after_settlement_and_resumes_without_replay(t
     )
 
     def unpack(archive, output, *, root_name):
+        # [FUNCTION DOC] HELPER: Replacement unpack_evidence creating a job dir with one
+        # result.json (reward 1, cost 0.5). Output: job path.
         job = output / root_name
         directory = job / "one-trial"
         directory.mkdir(parents=True)
@@ -129,6 +152,9 @@ def test_cpu_trial_dispatches_once_after_settlement_and_resumes_without_replay(t
 
 
 def test_cpu_wait_deadline_retains_exact_final_denial_without_effect(trial, monkeypatch):
+    # [FUNCTION DOC] With a fake clock, waiting 2s polls twice then fails; the receipt records
+    # elapsed 2, polls 2, reason reservation_pressure, and nothing was dispatched. Inputs:
+    # trial, monkeypatch.
     clock = [0.0]
     monkeypatch.setattr(client.time, "monotonic", lambda: clock[0])
     monkeypatch.setattr(

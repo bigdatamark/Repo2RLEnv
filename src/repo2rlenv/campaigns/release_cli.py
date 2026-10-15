@@ -1,3 +1,6 @@
+# [MODULE DOC] CLI adapter for the 'release' subcommand (stage | verify | publish) over
+# campaigns.release: builds immutable Harbor dataset releases from an explicit plan and publishes
+# them to the HF Hub.
 """Prepare and publish explicit, immutable selections of Harbor tasks."""
 
 from __future__ import annotations
@@ -15,6 +18,14 @@ from repo2rlenv.ui import console
 
 
 def cmd_release(args):
+    # [FUNCTION DOC] Handler for 'release'. stage: parses --plan JSON into ReleasePlan, runs
+    # stage_release into --out, reports repo_id, task count and directory. verify: verify_release on
+    # the directory, reports repo_id, file count, verified=True. publish: resolves an HF token
+    # (resolve_hf_token with default AuthSpec; ValueError if none), then with --recover-empty calls
+    # recover_empty_upload (default batch size 250), else publish_release with --receipt,
+    # --collection and --batch-size; reports the receipt record.
+    # Prints JSON (--json) or a 'Harbor dataset release' panel. Returns 0. Propagates errors from
+    # the release functions. Side effects: filesystem, network, console output.
     if args.release_action == "stage":
         plan = ReleasePlan.model_validate_json(args.plan.read_text())
         result = stage_release(plan, args.out)
@@ -55,6 +66,10 @@ def cmd_release(args):
 
 
 def add_release_parser(subparsers):
+    # [FUNCTION DOC] Registers the 'release' parser with actions stage (plan path, --out required),
+    # verify (directory) and publish (directory, --receipt required, --collection, and mutually
+    # exclusive --recover-empty / --batch-size int), each with --json and func=cmd_release. Input:
+    # argparse subparsers action. Returns None; mutates the parser.
     parser = subparsers.add_parser(
         "release", help="Stage, verify and publish immutable Harbor datasets"
     )

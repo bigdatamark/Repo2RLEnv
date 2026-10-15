@@ -1,3 +1,9 @@
+# [MODULE DOC] Tests for the codemidas owned recipe and its supporting machinery: source helpers
+# (remove_bodies, implementation_pair, validate_assertions, reconstruction identity), the
+# worker's prepare/evaluate, the OpenAI Responses author agent (usage_cost pricing, budget
+# metering, refusals, malformed/incomplete tool calls, reasoning replay), the Harbor
+# ResponsesAgent terminal handler, audit helpers (curriculum, evidence_index, validate_review),
+# public build-context sanitizing, trial cost completeness, and Stack dataset rows.
 from __future__ import annotations
 
 import asyncio
@@ -20,6 +26,9 @@ from repo2rlenv.tasksmith.author.openai_agent import model_name, run_openai_agen
 
 
 def feature():
+    # [FUNCTION DOC] HELPER: Builds a valid Feature fixture for symbol lib/core.py:transform
+    # with a long
+    # instruction, three requirements R1-R3 and a rationale. Output: Feature.
     return Feature(
         title="Implement public list transformation",
         instruction="Public behavior. " * 20,
@@ -32,6 +41,9 @@ def feature():
 
 
 def test_remove_only_selected_methods_and_preserve_decorators():
+    # [FUNCTION DOC] remove_bodies strips only A.f's body, keeps decorators and other
+    # functions, and raises ValueError for unknown names. Inputs: none. Output: none. Raises:
+    # AssertionError on failure.
     code = "class A:\n    @staticmethod\n    def f(x):\n        return x + 1\n\ndef g():\n    return 99\n"
     starter = remove_bodies(code, ["A.f"])
     assert "@staticmethod" in starter and "return 99" in starter
@@ -41,6 +53,9 @@ def test_remove_only_selected_methods_and_preserve_decorators():
 
 
 def test_all_verifier_requirements_are_visible_to_the_learner():
+    # [FUNCTION DOC] task_instruction() starts with the instruction, includes every
+    # requirement behavior and excludes the rationale. Inputs: none. Output: none. Raises:
+    # AssertionError on failure.
     task = feature()
     task.requirements[0].behavior = "Reject project names containing two consecutive underscores."
     instruction = task.task_instruction()
@@ -50,6 +65,10 @@ def test_all_verifier_requirements_are_visible_to_the_learner():
 
 
 def test_excluded_candidates_do_not_consume_module_quota(tmp_path, monkeypatch):
+    # [FUNCTION DOC] worker.prepare with max_per_module=1 picks a different candidate from the
+    # same module once
+    # the first is excluded. bootstrap_snapshot and _run are stubbed. Inputs: tmp_path,
+    # monkeypatch.
     from repo2rlenv.pipelines.recipes.codemidas import worker
     from repo2rlenv.spec.input import RepoSpec
     from repo2rlenv.spec.recipe_options import CodeMidasOptions
@@ -84,6 +103,11 @@ def test_excluded_candidates_do_not_consume_module_quota(tmp_path, monkeypatch):
 
 
 def test_verifier_timeout_is_retained_repair_feedback_not_baseline_success(tmp_path, monkeypatch):
+    # [FUNCTION DOC] A TimeoutExpired from test_image during worker.evaluate yields contrast
+    # None,
+    # error_type 'test_timeout', phase 'reference', decoded timeout output, and the same
+    # result
+    # written to evaluation.json. Inputs: tmp_path, monkeypatch.
     import subprocess
 
     from repo2rlenv.pipelines.recipes.codemidas import worker
@@ -107,6 +131,8 @@ def test_verifier_timeout_is_retained_repair_feedback_not_baseline_success(tmp_p
     )
 
     def timeout(*args, **kwargs):
+        # [FUNCTION DOC] HELPER: test_image stub raising subprocess.TimeoutExpired with
+        # output b'started test'.
         raise subprocess.TimeoutExpired("docker start", 90, output=b"started test")
 
     monkeypatch.setattr(worker, "test_image", timeout)
@@ -129,6 +155,8 @@ def test_verifier_timeout_is_retained_repair_feedback_not_baseline_success(tmp_p
 
 
 def test_implementation_pair_refuses_traversal_and_restores_original(tmp_path):
+    # [FUNCTION DOC] implementation_pair returns a NotImplementedError defective copy and the
+    # original as reference, and raises ValueError for a '../' symbol path. Inputs: tmp_path.
     (tmp_path / "lib").mkdir()
     original = b"def transform(x):\n    return sorted(set(x))\n"
     (tmp_path / "lib/core.py").write_bytes(original)
@@ -142,6 +170,9 @@ def test_implementation_pair_refuses_traversal_and_restores_original(tmp_path):
 
 
 def test_assertion_map_rejects_uncovered_or_invented_requirements():
+    # [FUNCTION DOC] validate_assertions accepts a covering map, rejects undeclared
+    # requirement ids and invalid Python test code. Inputs: none. Output: none. Raises:
+    # AssertionError on failure.
     verifier = Verifier(
         test_code="\n".join(
             f"def test_{i}():\n    assert True  # " + "context " * 10 for i in range(3)
@@ -165,6 +196,9 @@ def test_assertion_map_rejects_uncovered_or_invented_requirements():
 
 
 def test_prices_include_cache_and_refuse_unapproved_models():
+    # [FUNCTION DOC] usage_cost prices cached tokens (expected 0.0031); model_name rejects
+    # non-OpenAI models; usage_cost rejects an over-limit context. Inputs: none. Output: none.
+    # Raises: AssertionError on failure.
     assert usage_cost(
         "gpt-6-sol",
         {
@@ -180,6 +214,9 @@ def test_prices_include_cache_and_refuse_unapproved_models():
 
 
 def test_responses_effect_is_metered_before_tool_execution(tmp_path):
+    # [FUNCTION DOC] The ledger operation is 'reserved' during the provider call and 'settled'
+    # before the tool handler runs; one turn, $0.00002 accounted. Uses run_openai_agent with a
+    # fake async client.responses.create and a BudgetLedger-backed AuthorBudget in tmp_path.
     ledger = BudgetLedger(tmp_path / "budget.sqlite3", limit_usd="1")
     budget = AuthorBudget(RunBudget(ledger, "cm-test", "1"), tmp_path / "costs", "design")
     data = {
@@ -196,11 +233,15 @@ def test_responses_effect_is_metered_before_tool_execution(tmp_path):
     }
 
     async def create(**kwargs):
+        # [FUNCTION DOC] HELPER: Fake async responses.create asserting reserved status,
+        # model and store=False; returns a function_call response.
         assert ledger.status()["operations"][0]["status"] == "reserved"
         assert kwargs["model"] == "gpt-6-luna" and kwargs["store"] is False
         return SimpleNamespace(model_dump=lambda **_: data)
 
     async def submit_artifact(answer):
+        # [FUNCTION DOC] HELPER: Async tool handler asserting settled status and answer
+        # 42; returns 'Artifact committed.'.
         assert ledger.status()["operations"][0]["status"] == "settled"
         assert answer == 42
         return "Artifact committed."
@@ -223,10 +264,14 @@ def test_responses_effect_is_metered_before_tool_execution(tmp_path):
 
 
 def test_unknown_provider_outcome_retains_reservation(tmp_path):
+    # [FUNCTION DOC] A TimeoutError from the provider propagates and leaves the operation
+    # 'uncertain'. Uses run_openai_agent with a fake async client.responses.create and a
+    # BudgetLedger-backed AuthorBudget in tmp_path.
     ledger = BudgetLedger(tmp_path / "budget.sqlite3", limit_usd="1")
     budget = AuthorBudget(RunBudget(ledger, "cm-test", "1"), tmp_path / "costs", "design")
 
     async def create(**kwargs):
+        # [FUNCTION DOC] HELPER: Fake async create that raises TimeoutError.
         raise TimeoutError("Unknown outcome")
 
     with pytest.raises(TimeoutError):
@@ -247,6 +292,9 @@ def test_unknown_provider_outcome_retains_reservation(tmp_path):
 
 
 def test_provider_refusal_is_metered_and_never_treated_as_recoverable_output(tmp_path):
+    # [FUNCTION DOC] A refusal response raises ProviderRefusalError (not ProviderOutputError)
+    # after one call, with usage settled. Uses run_openai_agent with a fake async
+    # client.responses.create and a BudgetLedger-backed AuthorBudget in tmp_path.
     from repo2rlenv.tasksmith.author.bridge import ProviderOutputError
     from repo2rlenv.tasksmith.author.openai_agent import ProviderRefusalError
 
@@ -255,6 +303,8 @@ def test_provider_refusal_is_metered_and_never_treated_as_recoverable_output(tmp
     calls = []
 
     async def create(**kwargs):
+        # [FUNCTION DOC] HELPER: Fake async create recording kwargs and returning a
+        # refusal message.
         calls.append(kwargs)
         return SimpleNamespace(
             model_dump=lambda **_: {
@@ -285,11 +335,16 @@ def test_provider_refusal_is_metered_and_never_treated_as_recoverable_output(tmp
 
 
 def test_malformed_tool_arguments_get_feedback_without_executing_handler(tmp_path):
+    # [FUNCTION DOC] Invalid tool args get 'Invalid tool arguments' feedback without running
+    # the handler; the second, valid call executes. Uses run_openai_agent with a fake async
+    # client.responses.create and a BudgetLedger-backed AuthorBudget in tmp_path.
     ledger = BudgetLedger(tmp_path / "budget.sqlite3", limit_usd="1")
     budget = AuthorBudget(RunBudget(ledger, "cm-test", "1"), tmp_path / "costs", "design")
     calls = []
 
     async def create(**kwargs):
+        # [FUNCTION DOC] HELPER: Fake async create: turn 0 returns bad shell args, later
+        # turns assert feedback and return valid args.
         turn = len(calls)
         calls.append(kwargs)
         if turn:
@@ -311,6 +366,8 @@ def test_malformed_tool_arguments_get_feedback_without_executing_handler(tmp_pat
     executed = []
 
     async def shell(command):
+        # [FUNCTION DOC] HELPER: Async shell handler recording the command; returns
+        # 'Artifact committed.'.
         executed.append(command)
         return "Artifact committed."
 
@@ -333,16 +390,24 @@ def test_malformed_tool_arguments_get_feedback_without_executing_handler(tmp_pat
 
 
 def test_solver_rejects_invalid_terminal_arguments_without_aborting_attempt(tmp_path, monkeypatch):
+    # [FUNCTION DOC] ResponsesAgent's terminal handler returns JSON errors for invalid
+    # timeouts/commands without
+    # executing, clamps a 240s timeout to 120s, and finish rejects None before writing
+    # conclusion.txt. Skipped without harbor. Inputs: tmp_path, monkeypatch.
     pytest.importorskip("harbor")
     from repo2rlenv.execution import responses_agent
 
     executions = []
 
     async def execute(**kwargs):
+        # [FUNCTION DOC] HELPER: Fake environment exec recording kwargs and returning rc 0
+        # / stdout 'ok'.
         executions.append(kwargs)
         return SimpleNamespace(return_code=0, stdout="ok", stderr="")
 
     async def run(**kwargs):
+        # [FUNCTION DOC] HELPER: Replacement run_openai_agent that drives the terminal and
+        # finish handlers through invalid and valid inputs.
         terminal = kwargs["handlers"]["terminal"]
         for timeout in (None, "60 seconds", 1.5, True):
             assert "error" in json.loads(await terminal("pwd", timeout))
@@ -363,6 +428,8 @@ def test_solver_rejects_invalid_terminal_arguments_without_aborting_attempt(tmp_
 
 
 def test_cache_writes_are_billed_at_their_distinct_rate():
+    # [FUNCTION DOC] usage_cost bills cache-write tokens separately (expected 0.000102).
+    # Inputs: none. Output: none. Raises: AssertionError on failure.
     assert usage_cost(
         "gpt-6-luna",
         {
@@ -374,11 +441,16 @@ def test_cache_writes_are_billed_at_their_distinct_rate():
 
 
 def test_stateless_reasoning_replay_drops_null_sdk_fields(tmp_path):
+    # [FUNCTION DOC] Replayed reasoning items omit null status/content but keep
+    # encrypted_content; two calls occur. Uses run_openai_agent with a fake async
+    # client.responses.create and a BudgetLedger-backed AuthorBudget in tmp_path.
     ledger = BudgetLedger(tmp_path / "budget.sqlite3", limit_usd="1")
     budget = AuthorBudget(RunBudget(ledger, "cm", "1"), tmp_path / "costs", "design")
     calls = 0
 
     async def create(**kwargs):
+        # [FUNCTION DOC] HELPER: Fake async create counting calls, checking replayed
+        # reasoning on call 2, returning reasoning plus a 'next' call.
         nonlocal calls
         calls += 1
         if calls == 2:
@@ -403,6 +475,8 @@ def test_stateless_reasoning_replay_drops_null_sdk_fields(tmp_path):
         return SimpleNamespace(model_dump=lambda **_: data)
 
     async def next_tool():
+        # [FUNCTION DOC] HELPER: Async tool returning 'Read completed' first, then
+        # 'Artifact committed.'.
         return "Read completed" if calls == 1 else "Artifact committed."
 
     asyncio.run(
@@ -422,6 +496,8 @@ def test_stateless_reasoning_replay_drops_null_sdk_fields(tmp_path):
 
 
 def test_curriculum_is_not_the_soundness_gate():
+    # [FUNCTION DOC] curriculum maps reward lists to all_pass / all_fail / mixed / incomplete
+    # (None present). Inputs: none. Output: none. Raises: AssertionError on failure.
     from repo2rlenv.pipelines.recipes.codemidas.audit import curriculum
 
     assert curriculum([1, 1, 1, 1]) == "all_pass"
@@ -431,6 +507,8 @@ def test_curriculum_is_not_the_soundness_gate():
 
 
 def test_audit_indexes_all_changed_files_under_nested_workspace(tmp_path):
+    # [FUNCTION DOC] evidence_index lists changed submitted files and the original; unchanged
+    # files drop out leaving only the manifest. Inputs: tmp_path.
     from repo2rlenv.pipelines.recipes.codemidas.audit import evidence_index
 
     task = tmp_path / "task"
@@ -451,6 +529,8 @@ def test_audit_indexes_all_changed_files_under_nested_workspace(tmp_path):
 
 
 def test_audit_points_to_changed_lines_without_replacing_submitted_evidence(tmp_path):
+    # [FUNCTION DOC] evidence_index records a 'replace' changed range with starter/submitted
+    # line spans and the resolved path, without modifying the file. Inputs: tmp_path.
     from repo2rlenv.pipelines.recipes.codemidas.audit import evidence_index
 
     task, runs = tmp_path / "task", tmp_path / "audit"
@@ -478,11 +558,16 @@ def test_audit_points_to_changed_lines_without_replacing_submitted_evidence(tmp_
 
 
 def test_incomplete_response_is_billed_but_never_executes_partial_tools(tmp_path):
+    # [FUNCTION DOC] An 'incomplete' response is billed but its tool call is not executed or
+    # replayed; the next completed call runs. Uses run_openai_agent with a fake async
+    # client.responses.create and a BudgetLedger-backed AuthorBudget in tmp_path.
     ledger = BudgetLedger(tmp_path / "budget.sqlite3", limit_usd="1")
     budget = AuthorBudget(RunBudget(ledger, "cm", "1"), tmp_path / "costs", "design")
     calls, effects = [], []
 
     async def create(**request):
+        # [FUNCTION DOC] HELPER: Fake async create returning incomplete on the first call,
+        # completed afterwards, each with a finish call.
         calls.append(request)
         data = {
             "status": "incomplete" if len(calls) == 1 else "completed",
@@ -500,6 +585,8 @@ def test_incomplete_response_is_billed_but_never_executes_partial_tools(tmp_path
         return SimpleNamespace(model_dump=lambda **_: data)
 
     async def finish(value):
+        # [FUNCTION DOC] HELPER: Async finish handler recording value; returns 'Artifact
+        # committed.'.
         effects.append(value)
         return "Artifact committed."
 
@@ -523,6 +610,9 @@ def test_incomplete_response_is_billed_but_never_executes_partial_tools(tmp_path
 
 
 def test_public_build_retains_only_empty_test_package_scaffolding(tmp_path):
+    # [FUNCTION DOC] public_build_context drops test directories (recreating empty __init__.py
+    # via 'touch' in the Dockerfile), keeps LICENSE, and leaks no test content. Inputs:
+    # tmp_path.
     from repo2rlenv.pipelines.recipes.codemidas.sanitize import public_build_context, public_profile
     from repo2rlenv.spec.recipe_options import CodeMidasOptions
 
@@ -542,6 +632,8 @@ def test_public_build_retains_only_empty_test_package_scaffolding(tmp_path):
 
 
 def test_failed_response_trial_settles_only_fully_accounted_usage(tmp_path):
+    # [FUNCTION DOC] responses_cost_is_complete is true only when no budget operation is
+    # uncertain. Inputs: tmp_path.
     from repo2rlenv.execution.harbor import TrialEvidence, responses_cost_is_complete
 
     result = tmp_path / "result.json"
@@ -559,6 +651,8 @@ def test_failed_response_trial_settles_only_fully_accounted_usage(tmp_path):
 
 
 def test_audit_judgments_require_real_citations_and_agree_with_rewards(tmp_path):
+    # [FUNCTION DOC] validate_review rejects judgments contradicting rewards, citations beyond
+    # file line bounds, and citations not in the index. Inputs: tmp_path.
     from repo2rlenv.pipelines.recipes.codemidas.audit import AuditReview, validate_review
 
     trace = tmp_path / "trace.jsonl"
@@ -595,6 +689,8 @@ def test_audit_judgments_require_real_citations_and_agree_with_rewards(tmp_path)
 
 
 def test_stack_row_preserves_redacted_content_without_faking_blob_identity(tmp_path):
+    # [FUNCTION DOC] provenance keeps the original content_id, materialize writes the redacted
+    # content, validate_manifest rejects path traversal. Inputs: tmp_path.
     from repo2rlenv.pipelines.recipes.codemidas.stack import (
         DATASET,
         materialize,
@@ -631,6 +727,8 @@ def test_stack_row_preserves_redacted_content_without_faking_blob_identity(tmp_p
 
 
 def test_reconstruction_dedup_uses_missing_code_not_anchor_or_instruction(tmp_path):
+    # [FUNCTION DOC] reconstruction_identity depends on repo, revision and defective file
+    # bytes; existing_reconstructions finds it from a task dir. Inputs: tmp_path.
     from repo2rlenv.pipelines.recipes.codemidas.source import (
         existing_reconstructions,
         reconstruction_identity,

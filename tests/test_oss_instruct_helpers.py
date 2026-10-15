@@ -1,3 +1,7 @@
+# [MODULE DOC] Tests for code_instruct helpers in pipelines._oss_instruct: exclude-glob matching,
+# source file listing, seed snippet sampling, substantive-code detection, benchmark-phrase
+# decontamination, LLM response parsing into problem/test/solution, and task_module import
+# detection. Runnable directly via pytest.main.
 """OSS-Instruct helpers — sampler, parser, decontamination."""
 
 from __future__ import annotations
@@ -24,10 +28,12 @@ from repo2rlenv.pipelines._oss_instruct import (
 
 
 def test_is_excluded_match():
+    # [FUNCTION DOC] Asserts a path matching an exclude glob is excluded.
     assert is_excluded("tests/test_foo.py", ["tests/**"])
 
 
 def test_is_excluded_no_match():
+    # [FUNCTION DOC] Asserts a non-matching path is not excluded.
     assert not is_excluded("src/foo.py", ["tests/**", "docs/**"])
 
 
@@ -37,6 +43,8 @@ def test_is_excluded_no_match():
 
 
 def test_list_source_files_glob_and_exclude(tmp_path: Path):
+    # [FUNCTION DOC] Asserts list_source_files returns only files matching file_glob minus
+    # exclude_glob.
     (tmp_path / "src").mkdir()
     (tmp_path / "tests").mkdir()
     (tmp_path / "src" / "a.py").write_text("x = 1\n")
@@ -55,10 +63,12 @@ def test_list_source_files_glob_and_exclude(tmp_path: Path):
 
 
 def test_sample_seed_returns_none_for_empty():
+    # [FUNCTION DOC] Asserts sample_seed returns None for an empty file list.
     assert sample_seed([], Path("/tmp"), rng=random.Random(0), min_loc=5, max_loc=10) is None
 
 
 def test_sample_seed_returns_none_for_short_file(tmp_path: Path):
+    # [FUNCTION DOC] Asserts a file shorter than min_loc yields None.
     f = tmp_path / "short.py"
     f.write_text("x = 1\n")
     seed = sample_seed([f], tmp_path, rng=random.Random(0), min_loc=10, max_loc=20)
@@ -67,6 +77,8 @@ def test_sample_seed_returns_none_for_short_file(tmp_path: Path):
 
 @pytest.mark.parametrize("rel", ["real.py", "pkg/sub/real.py"])
 def test_sample_seed_returns_substantive_window(tmp_path: Path, rel: str):
+    # [FUNCTION DOC] Parametrized over nested paths: asserts a seed with POSIX relative_path, valid
+    # line range and real code text is returned.
     f = tmp_path / rel
     f.parent.mkdir(parents=True, exist_ok=True)
     f.write_text(
@@ -99,12 +111,15 @@ def test_sample_seed_returns_substantive_window(tmp_path: Path, rel: str):
 
 
 def test_sample_seed_skips_boring_blocks():
+    # [FUNCTION DOC] Asserts _looks_substantive rejects a chunk of only imports, blanks and
+    # comments.
     """A snippet that's 100% imports + blank lines should be rejected."""
     chunk = ["import os", "import sys", "", "# comment", "from typing import Any"]
     assert not _looks_substantive(chunk)
 
 
 def test_substantive_block_passes():
+    # [FUNCTION DOC] Asserts _looks_substantive accepts a small function body.
     chunk = ["def foo():", "    x = 1", "    y = 2", "    return x + y"]
     assert _looks_substantive(chunk)
 
@@ -115,21 +130,25 @@ def test_substantive_block_passes():
 
 
 def test_benchmark_overlap_detects_humaneval_phrase():
+    # [FUNCTION DOC] Asserts a HumanEval-style phrase is detected.
     text = "Write a Python function called has_close_elements that takes ..."
     assert has_benchmark_overlap(text)
 
 
 def test_benchmark_overlap_case_insensitive():
+    # [FUNCTION DOC] Asserts detection ignores case.
     text = "Write A python Function To do something interesting"
     assert has_benchmark_overlap(text)
 
 
 def test_benchmark_overlap_negative():
+    # [FUNCTION DOC] Asserts unrelated text is not flagged.
     text = "Implement a queue with a custom eviction strategy"
     assert not has_benchmark_overlap(text)
 
 
 def test_benchmark_phrases_nonempty():
+    # [FUNCTION DOC] Asserts the default phrase list has at least 5 entries.
     assert len(DEFAULT_BENCHMARK_PHRASES) >= 5
 
 
@@ -159,6 +178,7 @@ def add(x, y):
 
 
 def test_parse_task_response_happy_path():
+    # [FUNCTION DOC] Asserts all three sections are extracted with code fences stripped.
     parsed = parse_task_response(_GOOD_RESPONSE)
     assert parsed is not None
     assert "Implement add" in parsed.problem
@@ -170,11 +190,13 @@ def test_parse_task_response_happy_path():
 
 
 def test_parse_task_response_returns_none_when_section_missing():
+    # [FUNCTION DOC] Asserts a missing [Solution] section yields None.
     no_solution = "[Problem Description]\nfoo\n\n[Test]\nbar\n"
     assert parse_task_response(no_solution) is None
 
 
 def test_parse_task_response_handles_case_insensitive_headers():
+    # [FUNCTION DOC] Asserts section headers match case-insensitively.
     text = (
         "[problem description]\nimpl add\n\n"
         "[TEST]\nfrom task_module import add\ndef test_x():\n    assert add(1, 1) == 2\n\n"
@@ -185,6 +207,7 @@ def test_parse_task_response_handles_case_insensitive_headers():
 
 
 def test_parse_task_response_handles_unfenced_code():
+    # [FUNCTION DOC] Asserts unfenced code sections are accepted and stripped.
     text = (
         "[Problem Description]\nDo a thing.\n\n"
         "[Test]\nfrom task_module import x\n\n"
@@ -201,18 +224,22 @@ def test_parse_task_response_handles_unfenced_code():
 
 
 def test_references_task_module_via_from_import():
+    # [FUNCTION DOC] Asserts 'from task_module import' is detected.
     assert references_task_module("from task_module import foo\n")
 
 
 def test_references_task_module_via_plain_import():
+    # [FUNCTION DOC] Asserts 'import task_module' is detected.
     assert references_task_module("import task_module\n")
 
 
 def test_references_task_module_negative():
+    # [FUNCTION DOC] Asserts other imports are not detected.
     assert not references_task_module("from typing import Any\n")
 
 
 def test_references_task_module_with_leading_whitespace():
+    # [FUNCTION DOC] Asserts indented imports are detected.
     """Indented import (e.g. inside a function) — we still accept it."""
     assert references_task_module("    from task_module import foo\n")
 

@@ -1,3 +1,7 @@
+# [MODULE DOC] Tests for the push/pull CLI commands and cli._parse_dataset_uri, which classifies
+# dataset
+# URIs into HF / Harbor / GitHub backends with optional @revision. Hub, Harbor and GitHub
+# backends in repo2rlenv.hub and whoami are mocked.
 """push/pull CLI commands + the multi-source URI parser.
 
 Mock the Hub/Harbor/git layers; we just verify the CLI wires arguments
@@ -52,6 +56,8 @@ from repo2rlenv.hub import PullResult, PushResult
     ],
 )
 def test_parse_dataset_uri_known_forms(uri, backend, repo_id, rev):
+    # [FUNCTION DOC] Parametrized valid URIs map to the expected (backend, repo_id, revision).
+    # Inputs: uri, backend, repo_id, rev.
     b, rid, r = _parse_dataset_uri(uri, flag="<dataset>")
     assert b == backend
     assert rid == repo_id
@@ -59,6 +65,8 @@ def test_parse_dataset_uri_known_forms(uri, backend, repo_id, rev):
 
 
 def test_parse_dataset_uri_bare_name_resolves_via_whoami():
+    # [FUNCTION DOC] A bare name resolves to '<whoami>/name' on HF using a mocked token and
+    # whoami. Inputs: none. Output: none. Raises: AssertionError on failure.
     """Bare `name` → HF (`<whoami>/name`). Mocks the whoami call."""
     with (
         mock.patch("repo2rlenv.cli.resolve_hf_token", create=True),
@@ -72,6 +80,8 @@ def test_parse_dataset_uri_bare_name_resolves_via_whoami():
 
 
 def test_parse_dataset_uri_bare_name_with_rev_resolves_via_whoami():
+    # [FUNCTION DOC] A bare name with @rev resolves owner via whoami and keeps the revision.
+    # Inputs: none. Output: none. Raises: AssertionError on failure.
     with (
         mock.patch("huggingface_hub.whoami", return_value={"name": "AdithyaSK"}),
         mock.patch("repo2rlenv.auth.resolve_hf_token", return_value="tok_xxx"),
@@ -83,6 +93,8 @@ def test_parse_dataset_uri_bare_name_with_rev_resolves_via_whoami():
 
 
 def test_parse_dataset_uri_bare_name_no_token_errors_clearly():
+    # [FUNCTION DOC] A bare name without an HF token raises SystemExit('cannot auto-resolve
+    # owner'). Inputs: none. Output: none. Raises: AssertionError on failure.
     with mock.patch("repo2rlenv.auth.resolve_hf_token", return_value=None):
         with pytest.raises(SystemExit, match="cannot auto-resolve owner"):
             _parse_dataset_uri("orphan-name", flag="<dataset>")
@@ -103,6 +115,7 @@ def test_parse_dataset_uri_bare_name_no_token_errors_clearly():
     ],
 )
 def test_parse_dataset_uri_rejects_malformed(uri):
+    # [FUNCTION DOC] Parametrized malformed URIs raise SystemExit. Inputs: uri.
     with pytest.raises(SystemExit):
         _parse_dataset_uri(uri, flag="<dataset>")
 
@@ -113,14 +126,19 @@ def test_parse_dataset_uri_rejects_malformed(uri):
 
 
 def _ns(**kwargs):
+    # [FUNCTION DOC] HELPER: Returns argparse.Namespace(**kwargs).
     return argparse.Namespace(**kwargs)
 
 
 def _push_args(local_dir, dataset, private=False, message=None):
+    # [FUNCTION DOC] HELPER: Namespace for cmd_push with local_dir (stringified), dataset,
+    # private (default False), message (default None).
     return _ns(local_dir=str(local_dir), dataset=dataset, private=private, message=message)
 
 
 def test_cmd_push_calls_push_to_hub_for_hf_uri(tmp_path: Path):
+    # [FUNCTION DOC] An hf:// URI calls hub.push_to_hub with the parsed repo_id and returns 0.
+    # Inputs: tmp_path.
     dataset_dir = tmp_path / "ds"
     (dataset_dir / "task-1").mkdir(parents=True)
     (dataset_dir / "task-1" / "task.toml").write_text('[task]\nname="x"\n')
@@ -138,6 +156,7 @@ def test_cmd_push_calls_push_to_hub_for_hf_uri(tmp_path: Path):
 
 
 def test_cmd_push_rejects_harbor_uri(tmp_path: Path):
+    # [FUNCTION DOC] Pushing to harbor:// returns 2. Inputs: tmp_path.
     dataset_dir = tmp_path / "ds"
     (dataset_dir / "task-1").mkdir(parents=True)
     (dataset_dir / "task-1" / "task.toml").write_text("[task]\n")
@@ -146,6 +165,7 @@ def test_cmd_push_rejects_harbor_uri(tmp_path: Path):
 
 
 def test_cmd_push_rejects_github_uri(tmp_path: Path):
+    # [FUNCTION DOC] Pushing to gh:// returns 2. Inputs: tmp_path.
     dataset_dir = tmp_path / "ds"
     (dataset_dir / "task-1").mkdir(parents=True)
     (dataset_dir / "task-1" / "task.toml").write_text("[task]\n")
@@ -154,11 +174,14 @@ def test_cmd_push_rejects_github_uri(tmp_path: Path):
 
 
 def test_cmd_push_rejects_missing_local_dir(tmp_path: Path):
+    # [FUNCTION DOC] A nonexistent local dir returns 2. Inputs: tmp_path.
     rc = cmd_push(_push_args(tmp_path / "missing", "AdithyaSK/x"))
     assert rc == 2
 
 
 def test_cmd_push_propagates_private_and_message(tmp_path: Path):
+    # [FUNCTION DOC] private and message flow to push_to_hub as private and commit_message.
+    # Inputs: tmp_path.
     dataset_dir = tmp_path / "ds"
     (dataset_dir / "task-1").mkdir(parents=True)
     (dataset_dir / "task-1" / "task.toml").write_text("[task]\n")
@@ -177,6 +200,8 @@ def test_cmd_push_propagates_private_and_message(tmp_path: Path):
 
 
 def _pull_args(dataset, local_dir=None, task=None, force=False, registry_url=None):
+    # [FUNCTION DOC] HELPER: Namespace for cmd_pull with dataset, local_dir (str or None),
+    # task, force, registry_url.
     return _ns(
         dataset=dataset,
         local_dir=str(local_dir) if local_dir is not None else None,
@@ -187,6 +212,8 @@ def _pull_args(dataset, local_dir=None, task=None, force=False, registry_url=Non
 
 
 def test_cmd_pull_hf_route(tmp_path: Path):
+    # [FUNCTION DOC] HF URI calls pull_from_hub with repo_id and revision None; returns 0.
+    # Inputs: tmp_path.
     target = tmp_path / "out"
     fake = PullResult(
         repo_id="AdithyaSK/click-r2e",
@@ -203,6 +230,7 @@ def test_cmd_pull_hf_route(tmp_path: Path):
 
 
 def test_cmd_pull_hf_route_with_revision(tmp_path: Path):
+    # [FUNCTION DOC] 'o/n@v2' passes revision='v2'. Inputs: tmp_path.
     target = tmp_path / "out"
     fake = PullResult(repo_id="o/n", local_dir=target, task_count=1, snapshot_path=target)
     with mock.patch("repo2rlenv.hub.pull_from_hub", return_value=fake) as m:
@@ -211,6 +239,8 @@ def test_cmd_pull_hf_route_with_revision(tmp_path: Path):
 
 
 def test_cmd_pull_harbor_route(tmp_path: Path):
+    # [FUNCTION DOC] harbor://name@tag calls pull_from_harbor with name and tag. Inputs:
+    # tmp_path.
     target = tmp_path / "out"
     fake = PullResult(
         repo_id="swe-bench@lite", local_dir=target, task_count=10, snapshot_path=target
@@ -224,6 +254,7 @@ def test_cmd_pull_harbor_route(tmp_path: Path):
 
 
 def test_cmd_pull_harbor_route_with_custom_registry(tmp_path: Path):
+    # [FUNCTION DOC] registry_url is forwarded to pull_from_harbor. Inputs: tmp_path.
     target = tmp_path / "out"
     fake = PullResult(repo_id="x", local_dir=target, task_count=1, snapshot_path=target)
     with mock.patch("repo2rlenv.hub.pull_from_harbor", return_value=fake) as m:
@@ -232,6 +263,8 @@ def test_cmd_pull_harbor_route_with_custom_registry(tmp_path: Path):
 
 
 def test_cmd_pull_github_route(tmp_path: Path):
+    # [FUNCTION DOC] gh:// URI calls pull_from_github with owner_repo and ref None. Inputs:
+    # tmp_path.
     target = tmp_path / "out"
     fake = PullResult(
         repo_id="gh://AdithyaSK/r2e-tasks",
@@ -248,6 +281,7 @@ def test_cmd_pull_github_route(tmp_path: Path):
 
 
 def test_cmd_pull_github_route_with_ref(tmp_path: Path):
+    # [FUNCTION DOC] gh://owner/repo@main passes ref='main'. Inputs: tmp_path.
     target = tmp_path / "out"
     fake = PullResult(repo_id="x", local_dir=target, task_count=1, snapshot_path=target)
     with mock.patch("repo2rlenv.hub.pull_from_github", return_value=fake) as m:
@@ -256,6 +290,8 @@ def test_cmd_pull_github_route_with_ref(tmp_path: Path):
 
 
 def test_cmd_pull_github_full_url(tmp_path: Path):
+    # [FUNCTION DOC] A full https://github.com URL routes to pull_from_github. Inputs:
+    # tmp_path.
     """`https://github.com/owner/repo` is also accepted and routes to GitHub backend."""
     target = tmp_path / "out"
     fake = PullResult(repo_id="x", local_dir=target, task_count=1, snapshot_path=target)
@@ -265,6 +301,8 @@ def test_cmd_pull_github_full_url(tmp_path: Path):
 
 
 def test_cmd_pull_returns_nonzero_on_backend_failure(tmp_path: Path):
+    # [FUNCTION DOC] A RuntimeError from pull_from_hub makes cmd_pull return 1. Inputs:
+    # tmp_path.
     """HF backend raising should surface as exit code 1 with friendly error."""
     with mock.patch("repo2rlenv.hub.pull_from_hub", side_effect=RuntimeError("repo not found")):
         rc = cmd_pull(_pull_args("owner/missing", local_dir=tmp_path / "out"))
@@ -272,6 +310,8 @@ def test_cmd_pull_returns_nonzero_on_backend_failure(tmp_path: Path):
 
 
 def test_cmd_pull_default_target_dir_when_none(tmp_path: Path, monkeypatch):
+    # [FUNCTION DOC] With local_dir None the target contains 'datasets' and 'owner__ds'.
+    # Inputs: tmp_path, monkeypatch (chdir).
     """When `local_dir` arg is None, default to ./datasets/<owner>__<name>."""
     fake = PullResult(
         repo_id="owner/ds",

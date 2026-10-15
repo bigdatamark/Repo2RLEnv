@@ -1,3 +1,11 @@
+# [MODULE DOC] Top-level 'repo2rlenv' command-line interface (argparse + Rich UI via
+# repo2rlenv.ui.console). Entry point main() installs logging and wraps _dispatch in a shared error
+# boundary that renders errors (human or JSON) via ui.errors.report_error.
+# Native subcommands defined here: generate, validate, push, pull, bootstrap. Additional subcommands
+# are registered from other modules: pipelines discovery (pipelines.recipes.cli), codemidas,
+# campaign/workers (campaigns.cli), release (campaigns.release_cli), quality (quality.loop.cli),
+# tasks (task_labels) and tasksmith. Most heavy imports happen lazily inside the handlers. A module-
+# level logger 'repo2rlenv' is defined. Handlers return int exit codes.
 """Repo2RLEnv CLI — argparse-based, Rich-driven UI.
 
 Subcommands:
@@ -25,6 +33,8 @@ logger = logging.getLogger("repo2rlenv")
 
 
 def _load_dotenv_if_present() -> None:
+    # [FUNCTION DOC] HELPER: Loads a .env file into os.environ via python-dotenv if that package is
+    # installed; silently does nothing on ImportError. Side effect: environment variables.
     """Load .env so OPENAI_API_KEY / ANTHROPIC_API_KEY / HF_TOKEN are available."""
     try:
         from dotenv import load_dotenv
@@ -35,6 +45,10 @@ def _load_dotenv_if_present() -> None:
 
 
 def _parse_pipeline_opts(items: list[str] | None) -> dict[str, Any]:
+    # [FUNCTION DOC] HELPER: Parses repeated 'key=value' strings into a dict with coercion:
+    # 'true'/'false' (any case) -> bool, else json.loads if valid (numbers, lists, objects, quoted
+    # strings, null), else the raw string. Splits at the first '='. Returns {} for None/empty.
+    # Raises SystemExit with a message if an item lacks '='.
     """Parse repeated --pipeline-opt key=value into a dict (with type coercion)."""
     out: dict[str, Any] = {}
     if not items:
@@ -56,6 +70,8 @@ def _parse_pipeline_opts(items: list[str] | None) -> dict[str, Any]:
 
 
 def _split_provider_model(value: str, flag: str) -> tuple[str, str]:
+    # [FUNCTION DOC] HELPER: Splits 'provider/model' at the first '/' into (provider, model). flag
+    # names the CLI option for the error. Raises SystemExit if there is no '/'.
     if "/" not in value:
         raise SystemExit(f"{flag} expects provider/model, got {value!r}")
     provider, model = value.split("/", 1)
@@ -63,6 +79,11 @@ def _split_provider_model(value: str, flag: str) -> tuple[str, str]:
 
 
 def _llm_overrides(args: argparse.Namespace) -> dict[str, Any]:
+    # [FUNCTION DOC] HELPER: Builds the 'llm' config override dict from --llm (provider, model),
+    # --llm-fallback (fallback {provider, model}), --llm-endpoint (endpoint) and --llm-key-env
+    # (api_key_env); optional attributes are read with getattr so parsers lacking them work. Returns
+    # {} when nothing is given so a config file's llm block is untouched. Raises SystemExit if any
+    # of the extras is given without --llm and without --config.
     """The `llm` config block from --llm / --llm-fallback / --llm-endpoint / --llm-key-env.
 
     Empty when none are given, so a config file's `llm:` block is left alone.
@@ -87,6 +108,11 @@ def _llm_overrides(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def _drop_config_llm_extras(gen_input, args: argparse.Namespace, config_path: Path):
+    # [FUNCTION DOC] HELPER: When --llm overrides a config file whose llm block names a different
+    # provider/model, the recursive merge would keep that block's endpoint/api_key_env; this returns
+    # a copy of gen_input whose llm endpoint and api_key_env are only those re-supplied on the CLI
+    # (or None). Returns gen_input unchanged if it has no llm or the model is the same as in the
+    # config. Side effect: re-reads the config file.
     """`--llm` over a config whose `llm:` block names a different model.
 
     `merge` is recursive, so the block's `endpoint` / `api_key_env` would stay
@@ -113,6 +139,9 @@ def _drop_config_llm_extras(gen_input, args: argparse.Namespace, config_path: Pa
 
 
 def _add_llm_args(parser: argparse.ArgumentParser, *, required: bool, fallback: bool) -> None:
+    # [FUNCTION DOC] HELPER: Adds --llm (required per argument), optionally --llm-fallback (when
+    # fallback=True), --llm-endpoint (URL) and --llm-key-env (VAR) to parser. Returns None; mutates
+    # the parser.
     parser.add_argument(
         "--llm",
         required=required,
@@ -143,6 +172,28 @@ def _add_llm_args(parser: argparse.ArgumentParser, *, required: bool, fallback: 
 
 
 def cmd_generate(args: argparse.Namespace) -> int:
+    # [FUNCTION DOC] Handler for 'generate'. Builds overrides from --repo/--ref/--access,
+    # --pipeline, --pipeline-opt, --recipe, --resume (execution.resume), LLM flags and
+    # --out/--org/--dataset-name/--visibility (dataset_name defaults to the out dir name, org to
+    # 'default'), loads GenerationInput (config file + overrides) and fixes stale llm extras.
+    # Owned recipe (pipeline.recipe != 'native'): --max-spend-usd is rejected with ValueError
+    # (campaign ledger required); delegates to pipelines.recipes.cli.run_recipe and returns its
+    # code. Native path: --json is rejected with ValueError; --max-spend-usd defaults to 5.0.
+    # Returns 2 if the pipeline is not registered, requires a recipe (native_supported False), lacks
+    # capabilities the source kind provides (lists compatible pipelines), fails the GitHub primary-
+    # language compatibility check (only for GitHub sources and pipelines declaring
+    # supported_languages; skipped with --force-language), or requires bootstrap without --llm.
+    # Warns for experimental pipelines.
+    # For requires_bootstrap pipelines: checks the LLM provider (2 on failure), copies BootstrapSpec
+    # applying --language (SystemExit on unknown), --base-image, --max-spend-usd (0 -> no cap) and
+    # --bootstrap-opt fields (SystemExit for unknown field or invalid value), then runs
+    # ensure_bootstrap inside the bootstrap live view (returns 1 on BootstrapError).
+    # Instantiates the pipeline with the bootstrap result and runs it into the output dir inside the
+    # generation view (progress callback if supported) or plain logs + result panel. A deprecated
+    # hf:// --out writes to ./.r2e_cache/<owner__name> and then pushes to the Hub when any task was
+    # emitted.
+    # Returns 0 if at least one task was emitted, else 1. Side effects: network, Docker, LLM spend,
+    # filesystem, console output.
     from repo2rlenv.config import load_generation_input
     from repo2rlenv.pipelines import PIPELINES
     from repo2rlenv.spec.options import parse_options
@@ -433,6 +484,15 @@ def cmd_generate(args: argparse.Namespace) -> int:
 
 
 def cmd_validate(args: argparse.Namespace) -> int:
+    # [FUNCTION DOC] Handler for 'validate PATH'. Finds every task.toml under PATH (returns 1 if
+    # none). For each: parse TOML (error on failure), require top-level 'version' and 'task' keys
+    # and task.name, warn if [metadata.repo2env] is absent; with --deep (implied by --oracle) runs
+    # validation.validate_task and prints each finding as error or warning, counting a task as
+    # failed if any error. Prints a success line per valid repo2env task and a summary. Returns 0 if
+    # no task failed else 1. Side effects: file reads, console output.
+    # KNOWN ISSUE: requires a top-level 'version' key, but emitter/bundle.py
+    # TaskBundle.configuration writes 'schema_version' instead, so bundles emitted by owned recipes
+    # appear to fail this check ('missing top-level [version]').
     import tomllib
 
     from rich.markup import escape
@@ -499,6 +559,8 @@ def cmd_validate(args: argparse.Namespace) -> int:
 
 
 class _Backend:
+    # [CLASS DOC] HELPER: Namespace of string constants identifying a dataset URI backend: HF
+    # ('hf'), HARBOR ('harbor'), GITHUB ('github'). Not an Enum.
     """Which source/destination a URI points at."""
 
     HF = "hf"
@@ -507,6 +569,8 @@ class _Backend:
 
 
 def _split_revision(s: str) -> tuple[str, str | None]:
+    # [FUNCTION DOC] HELPER: Splits 'name@rev' at the last '@' into (name, rev); an empty rev
+    # becomes None; returns (s, None) when there is no '@'.
     """Split `name@rev` into (name, rev). Returns (name, None) if no `@`."""
     if "@" in s:
         name, _, rev = s.rpartition("@")
@@ -515,6 +579,9 @@ def _split_revision(s: str) -> tuple[str, str | None]:
 
 
 def _resolve_hf_owner(name: str) -> str:
+    # [FUNCTION DOC] HELPER: Resolves a bare dataset name to '<hf user>/<name>' using the resolved
+    # HF token and huggingface_hub.whoami. Raises SystemExit if no token is found, whoami fails, or
+    # it returns no name. Side effect: network call.
     """Auto-resolve `name` (no slash) to `<whoami>/name` via HfApi.
 
     Bare-name resolution. Errors clearly if no HF token / whoami fails.
@@ -541,6 +608,13 @@ def _resolve_hf_owner(name: str) -> str:
 
 
 def _parse_dataset_uri(uri: str, *, flag: str) -> tuple[str, str, str | None]:
+    # [FUNCTION DOC] HELPER: Classifies a dataset URI into (backend, normalized_id, revision).
+    # Accepts GitHub URLs (https://github.com/, http://github.com/, git@github.com:; '.git'
+    # stripped; first two path segments used, so /tree/ref is ignored unless given via @ref) and
+    # gh://owner/repo[@ref] -> GITHUB; harbor://name or harbor://org/name [@tag] -> HARBOR;
+    # hf://-prefixed or plain 'owner/name[@rev]' -> HF, and a bare 'name' -> HF with owner resolved
+    # via _resolve_hf_owner (network). flag names the argument in errors. Raises SystemExit for
+    # empty or malformed URIs.
     """Classify a dataset URI into `(backend, normalized_id, revision)`.
 
     Forms accepted:
@@ -612,6 +686,13 @@ def _parse_dataset_uri(uri: str, *, flag: str) -> tuple[str, str, str | None]:
 
 
 def cmd_push(args: argparse.Namespace) -> int:
+    # [FUNCTION DOC] Handler for 'push LOCAL_DIR DATASET'. With --check-auth delegates to
+    # _run_check_auth. Otherwise returns 2 if LOCAL_DIR is not a directory or the URI targets Harbor
+    # or GitHub (prints the delegated command to use instead); warns that an @revision is ignored.
+    # Calls hub.push_to_hub with private, commit message and image-distribution flags (--image-
+    # registry, --inline-dockerfile, --require-registry, --skip-image-push, --image-visibility),
+    # streaming messages to console.info, and prints a result panel. Returns 0 on success, 1 if
+    # push_to_hub raises (error printed). Side effects: network, possibly Docker image pushes.
     """Push a local dataset directory to HF Hub.
 
     Only HF is supported as a push target. Harbor publishing happens via
@@ -680,6 +761,14 @@ def cmd_push(args: argparse.Namespace) -> int:
 
 
 def _run_check_auth(args: argparse.Namespace) -> int:
+    # [FUNCTION DOC] HELPER: Implements 'push --check-auth'. Resolves the HF token, discovers
+    # container registries logged in via ~/.docker/config.json (filtered to known kinds), builds a
+    # probe namespace per registry using the dataset owner (or 'test'), and probes levels 1-2 with
+    # --fast else 1-4 (reachable, authenticated, can read, can write). With --json prints a JSON
+    # report; otherwise prints per-registry status, fix hints and the suggested default registry
+    # (prefers a pushable GHCR). Returns 0. Side effects: network, stdout.
+    # KNOWN ISSUE: the --json branch writes with print(), violating the project invariant that all
+    # CLI output goes through repo2rlenv.ui.console.
     """Run the §5.3 probe protocol against every discovered registry."""
     import json as _json
 
@@ -769,6 +858,12 @@ def _run_check_auth(args: argparse.Namespace) -> int:
 
 
 def cmd_pull(args: argparse.Namespace) -> int:
+    # [FUNCTION DOC] Handler for 'pull DATASET [LOCAL_DIR]'. Parses the URI; default destination
+    # ./datasets/<owner>__<name>. HF: hub.pull_from_hub (supports --task single task, --force,
+    # revision). HARBOR: hub.pull_from_harbor (tag, --registry-url, --force; shells out to harbor).
+    # GITHUB: hub.pull_from_github (ref, --force; git clone). Prints a result panel and a validate
+    # hint; returns 0, or 1 if the pull raises (error printed). Raises SystemExit for an unknown
+    # backend. Side effects: network, filesystem, subprocesses.
     """Pull a Repo2RLEnv dataset from HF Hub / Harbor registry / GitHub.
 
     URI dispatch:
@@ -870,6 +965,15 @@ def cmd_pull(args: argparse.Namespace) -> int:
 
 
 def cmd_bootstrap(args: argparse.Namespace) -> int:
+    # [FUNCTION DOC] Handler for 'bootstrap'. Requires --llm (SystemExit otherwise), builds LLMSpec
+    # from the LLM flags and checks the provider (SystemExit on RuntimeError). Builds RepoSpec and
+    # BootstrapSpec from --max-iterations, --max-seconds, --cache-dir, --image-registry, --platform,
+    # --base-image and --max-spend-usd (0 or falsy -> no cap); --language sets languages_hint
+    # (SystemExit if unknown). Runs ensure_bootstrap (honouring --force) inside the bootstrap live
+    # view or plain mode; on BootstrapError reports the reason (with an auto-detection hint when
+    # neither --language nor --base-image was given) and returns 1. Prints a result panel in plain
+    # mode. Returns 0 on success. Side effects: Docker, LLM spend, cache files, optional registry
+    # push.
     """Build a working Docker image for (repo, ref) via an LLM agent loop."""
     from repo2rlenv.bootstrap import LanguageHint, ensure_bootstrap
     from repo2rlenv.bootstrap.language import base_image_for
@@ -980,15 +1084,28 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
 
 
 class CLIUsageError(ValueError):
+    # [CLASS DOC] Exception (ValueError subclass) for invalid command syntax, so it is rendered by
+    # the same error boundary as input validation errors.
     """Invalid command syntax, rendered by the same boundary as input errors."""
 
 
 class _ArgumentParser(argparse.ArgumentParser):
+    # [CLASS DOC] HELPER: argparse.ArgumentParser subclass whose error() raises CLIUsageError
+    # instead of printing usage and exiting.
     def error(self, message: str) -> None:
+        # [FUNCTION DOC] Raises CLIUsageError with the argparse message plus a hint to run '<prog>
+        # --help'. Never returns.
         raise CLIUsageError(f"{message}; use '{self.prog} --help' for usage")
 
 
 def _dispatch(argv: list[str]) -> int:
+    # [FUNCTION DOC] HELPER: Ensures UTF-8 stdout, loads .env, builds the full parser tree (global
+    # --version, -v/--verbose, --no-ui; registers discovery, codemidas, campaign/workers, release,
+    # quality, tasks and tasksmith subcommands from their modules, then defines generate, validate,
+    # push, pull and bootstrap with all their options; bootstrap --cache-dir defaults to
+    # $R2E_CACHE_DIR or ./workspace/bootstrap), parses argv and calls the selected handler
+    # (args.func). Returns its exit code. Raises CLIUsageError for syntax errors and whatever the
+    # handler raises. Side effects: env vars, stdout encoding.
     ensure_utf8_output()
     _load_dotenv_if_present()
 
@@ -1247,6 +1364,11 @@ def _dispatch(argv: list[str]) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # [FUNCTION DOC] CLI entry point. Inputs: argv (defaults to sys.argv[1:]). Installs logging at
+    # DEBUG when -v/--verbose is present else INFO, then runs _dispatch. SystemExit with a None/int
+    # code (help, version) is re-raised; SystemExit with a string message is converted to
+    # CLIUsageError and reported via report_error; any other Exception is reported via report_error
+    # (JSON when '--json' appears in argv, traceback detail when verbose). Returns the exit code.
     """CLI error boundary; Python APIs continue to raise their original errors."""
     from repo2rlenv.ui.errors import report_error
 

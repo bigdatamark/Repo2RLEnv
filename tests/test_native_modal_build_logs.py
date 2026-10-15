@@ -1,3 +1,8 @@
+# [MODULE DOC] Tests for image-build failure diagnostics in MeteredModalEnvironment._create_sandbox:
+# on ImageBuildError the allocation is settled first (state build_failed, reservation released),
+# then failed-image logs are fetched with the same Modal client, redacted, bounded, persisted with
+# sha256 receipts, and appended to the original error, which is always re-raised. Skipped unless
+# harbor and modal are importable.
 """Failed image diagnostics must preserve settlement and the original SDK error."""
 
 import asyncio
@@ -20,6 +25,10 @@ from repo2rlenv.quality.loop.client import RunBudget
 
 @pytest.fixture
 def failed_build(monkeypatch, tmp_path):
+    # [FUNCTION DOC] Fixture: builds a MeteredModalEnvironment (bypassing __init__) with a 10 USD
+    # ledger, patches Sandbox.create to raise an ImageBuildError and Client.from_env to assert
+    # settlement happened first. Returns a namespace with env, ledger, error, calls, client and
+    # install_logs(entries) which patches Image.from_id to serve the given async log generator.
     ledger = BudgetLedger(tmp_path / "budget.sqlite3", limit_usd="10")
     accounting = NativeAccounting(RunBudget(ledger, "build-test", "10"), tmp_path / "receipts")
     env = object.__new__(MeteredModalEnvironment)
@@ -34,10 +43,13 @@ def failed_build(monkeypatch, tmp_path):
     client = object()
 
     async def create(*args, **kwargs):
+        # [FUNCTION DOC] HELPER: Fake Sandbox.create recording 'create' and raising the build error.
         calls.append("create")
         raise error
 
     async def from_env():
+        # [FUNCTION DOC] HELPER: Fake Client.from_env asserting no reservation remains and the
+        # receipt says build_failed, then recording 'client' and returning the shared client.
         assert ledger.status()["reserved_usd"] == "0.000000"
         assert json.loads(env.receipt.read_text())["state"] == "build_failed"
         calls.append("client")
@@ -47,7 +59,12 @@ def failed_build(monkeypatch, tmp_path):
     monkeypatch.setattr(modal.Client, "from_env", SimpleNamespace(aio=from_env))
 
     def install_logs(entries):
+        # [FUNCTION DOC] HELPER: Patches modal.Image.from_id with a fake that serves the given log-
+        # entry generator.
         def from_id(image_id, *, client):
+            # [FUNCTION DOC] HELPER: Fake Image.from_id asserting the failed image id and the same
+            # client, recording 'logs', and returning an object whose logs.fetch.aio is the entries
+            # generator.
             assert image_id == error.image_id
             assert client is fixture.client
             calls.append("logs")
@@ -62,10 +79,14 @@ def failed_build(monkeypatch, tmp_path):
 
 
 def entry(message, source="stderr"):
+    # [FUNCTION DOC] HELPER: Builds a fake log entry with message and source (default 'stderr').
     return SimpleNamespace(message=message, source=source)
 
 
 def fetch_receipt(env):
+    # [FUNCTION DOC] HELPER: Verifies the allocation's build_logs path/sha256, the fetch receipt's
+    # logs_receipt hash and each stream file hash; returns the parsed fetch.json dict. Raises
+    # AssertionError on mismatch.
     allocation = json.loads(env.receipt.read_text())
     path = env.receipt.with_suffix(".image-build") / "fetch.json"
     assert allocation["build_logs"] == {
@@ -86,12 +107,18 @@ def fetch_receipt(env):
 async def test_causal_logs_use_failed_image_and_same_client_after_settlement(
     failed_build, monkeypatch
 ):
+    # [FUNCTION DOC] Asserts the original error is re-raised enriched with the causal line, length-
+    # bounded, secrets/credentials redacted everywhere, call order create/client/logs, receipt
+    # complete, allocation marked no_sandbox_dispatched, budget settled, and a retry raises 'already
+    # claimed'.
     case = failed_build
     secret = "secret-token-for-build-diagnostics"
     monkeypatch.setenv("BUILD_TEST_TOKEN", secret)
     case.error.args = ("Image build failed: " + secret,)
 
     async def logs(*, layers):
+        # [FUNCTION DOC] HELPER: Async log generator emitting split secrets, credentials, the causal
+        # error and a large repeated block.
         assert layers is None
         yield entry("Preparing packages\n" + secret[:12], "stdout")
         yield entry(secret[12:] + "\nhttps://user:password@example.invalid/pkg\n", "stdout")
@@ -129,6 +156,9 @@ async def test_causal_logs_use_failed_image_and_same_client_after_settlement(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("bound", ["bytes", "entries"])
 async def test_log_limits_close_stream_and_mark_incomplete(failed_build, monkeypatch, bound):
+    # [FUNCTION DOC] Parametrized over byte and entry limits: asserts the stream is closed when a
+    # bound is hit, the receipt is 'truncated', and the cut entry (with its secret) is not
+    # persisted.
     case = failed_build
     closed = []
     secret = "sensitive-credential-cut-at-log-limit"
@@ -137,6 +167,8 @@ async def test_log_limits_close_stream_and_mark_incomplete(failed_build, monkeyp
     monkeypatch.setattr(harbor_modal, "_IMAGE_LOG_MAX_ENTRIES", 10 if bound == "bytes" else 2)
 
     async def logs(*, layers):
+        # [FUNCTION DOC] HELPER: Generator yielding two entries, failing if a third is requested,
+        # and recording closure.
         try:
             yield entry("ERROR: package unavailable\n")
             yield entry("prefix " + secret + "x" * 200)
@@ -159,11 +191,16 @@ async def test_log_limits_close_stream_and_mark_incomplete(failed_build, monkeyp
 async def test_log_fetch_failure_preserves_original_error_and_settlement(
     failed_build, monkeypatch, failure
 ):
+    # [FUNCTION DOC] Parametrized over timeout/stream error/client error: asserts the original error
+    # is re-raised without private detail, receipt status timeout or failed, stream closure as
+    # expected, and budget still settled.
     case = failed_build
     closed = []
     monkeypatch.setattr(harbor_modal, "_IMAGE_LOG_TIMEOUT_SEC", 0.01)
 
     async def logs(*, layers):
+        # [FUNCTION DOC] HELPER: Generator yielding a causal line then hanging (timeout case) or
+        # raising ConnectionError; records closure.
         try:
             yield entry("ERROR: retained causal line\n")
             if failure == "timeout":
@@ -173,6 +210,7 @@ async def test_log_fetch_failure_preserves_original_error_and_settlement(
             closed.append(True)
 
     async def denied_client():
+        # [FUNCTION DOC] HELPER: Fake Client.from_env raising RuntimeError.
         raise RuntimeError("private-error-detail-must-not-leak")
 
     case.install_logs(logs)
@@ -193,12 +231,16 @@ async def test_log_fetch_failure_preserves_original_error_and_settlement(
 
 @pytest.mark.asyncio
 async def test_log_persistence_failure_does_not_reopen_settled_build(failed_build, monkeypatch):
+    # [FUNCTION DOC] Asserts an OSError from save_build_logs adds 'diagnostics unavailable
+    # (OSError)' without the private message and leaves the build settled.
     case = failed_build
 
     async def logs(*, layers):
+        # [FUNCTION DOC] HELPER: Generator yielding one error entry.
         yield entry("ERROR: package unavailable\n")
 
     def disk_full(*args):
+        # [FUNCTION DOC] HELPER: Fake save_build_logs raising OSError.
         raise OSError("private-disk-error")
 
     case.install_logs(logs)
@@ -214,9 +256,12 @@ async def test_log_persistence_failure_does_not_reopen_settled_build(failed_buil
 
 @pytest.mark.asyncio
 async def test_settlement_failure_is_not_hidden_by_diagnostics(failed_build, monkeypatch):
+    # [FUNCTION DOC] Asserts a settle() OSError propagates, no logs are fetched, state is
+    # build_failed and the 3.00 reservation remains.
     case = failed_build
 
     def settlement_failed(*args, **kwargs):
+        # [FUNCTION DOC] HELPER: Fake budget.settle raising OSError.
         raise OSError("ledger write failed")
 
     monkeypatch.setattr(case.env.accounting.budget, "settle", settlement_failed)
@@ -229,10 +274,14 @@ async def test_settlement_failure_is_not_hidden_by_diagnostics(failed_build, mon
 
 @pytest.mark.asyncio
 async def test_cancellation_during_log_fetch_propagates_after_settlement(failed_build):
+    # [FUNCTION DOC] Asserts CancelledError raised mid-fetch propagates, closes the stream, and
+    # leaves the build settled.
     case = failed_build
     closed = []
 
     async def logs(*, layers):
+        # [FUNCTION DOC] HELPER: Generator yielding one entry then raising CancelledError; records
+        # closure.
         try:
             yield entry("ERROR: package unavailable\n")
             raise asyncio.CancelledError

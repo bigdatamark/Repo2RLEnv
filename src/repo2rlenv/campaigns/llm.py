@@ -1,3 +1,6 @@
+# [MODULE DOC] Budget-metered wrapper around repo2rlenv.llm.complete for campaign work. Each call
+# reserves spend in the BudgetLedger, persists a request file and a JSON receipt before and after
+# dispatch, and never silently retries a request whose outcome is uncertain.
 """Meter the existing LLM client without silently retrying uncertain requests."""
 
 from __future__ import annotations
@@ -27,6 +30,25 @@ def metered_complete(
     response_schema: dict | None = None,
     resume: bool = False,
 ) -> LLMResponse:
+    # [FUNCTION DOC] Performs one metered LLM completion. Inputs: spec (LLMSpec; must have no
+    # fallback), ledger (BudgetLedger), operation_id (ledger ID), reservation_usd (amount to
+    # reserve), receipt (Path of the JSON receipt), system/user prompts, max_tokens, response_schema
+    # (optional JSON schema), resume (default False).
+    # Request identity: SHA-256 of the sorted-key JSON of system/user/max_tokens/response_schema.
+    # If the receipt exists: unless resume is set and status is 'completed' raises FileExistsError
+    # (reconcile manually); validates operation_id, model qualified name, request hash and absolute
+    # ledger path match (else ValueError); rebuilds the LLMResponse; requires the operation to exist
+    # in the ledger (else ValueError); settles it with the stored cost if not settled and the
+    # response has a positive cost and usage; returns the stored response without calling the
+    # provider.
+    # Otherwise: reserves the amount (may raise BudgetExceeded/OperationAlreadyRecorded), writes
+    # <receipt stem>.request.json and a 'dispatched' receipt, calls complete, rewrites the receipt
+    # as 'completed' with cost_basis 'litellm_estimate' and the serialized response, then settles
+    # with the reported cost (evidence = receipt path) or, if cost is zero or usage missing, marks
+    # the operation uncertain. Any exception (including KeyboardInterrupt) after reservation marks
+    # the operation uncertain and re-raises.
+    # Returns the LLMResponse. Raises ValueError if spec.fallback is set. Side effects: network LLM
+    # call, receipt files, ledger writes.
     if spec.fallback is not None:
         raise ValueError("Campaign fallbacks need their own reservation and receipt")
     request = {
