@@ -1,3 +1,10 @@
+# [MODULE DOC] Docs build tool that renders the public metrics pages docs/pipelines/economics.md and
+# docs/pipelines/releases.md from the sanitized JSON summaries in docs/data/ (pipelines.json plus
+# frontiersmith-campaign.json, falling back to frontiersmith-pilot.json). Each table builder cross-
+# checks counts and cost sums and raises ValueError on any inconsistency, so bad summary data never
+# produces a page. Run as a script; --check compares instead of writing. Uses Decimal for money.
+# KNOWN ISSUE: uses print() for its one status line; acceptable for a docs script outside the
+# library.
 """Render public cost and dataset tables from a portable, sanitized summary."""
 
 from __future__ import annotations
@@ -11,11 +18,25 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def unit(row: dict, key: str) -> str:
+    # [FUNCTION DOC] Formats a per-task dollar amount: row[key] divided by row['sample_exports'], as
+    # "$X.XX" (via Decimal of the string form). Inputs: row (summary dict), key (cost field name).
+    # Output: str; an em dash when the value is missing/None. Raises KeyError if sample_exports is
+    # absent, ZeroDivision-type error if it is 0 (callers validate n > 0 first). Side effects: none.
     value = row.get(key)
     return "—" if value is None else f"${Decimal(str(value)) / row['sample_exports']:.2f}"
 
 
 def native_tables(history: dict) -> tuple[list[str], list[str]]:
+    # [FUNCTION DOC] Builds the "Native pipelines" release table and the "Native pipeline
+    # measurements" cost table from history['pipelines'] (one row per historical native pipeline
+    # dataset). Validates: unique pipeline names; tasks > 0 and repo_distribution sums to tasks;
+    # every row source is in history['sources']; attempted_candidates (if set) >= tasks. Yield is
+    # tasks/attempted with a percentage, or an em dash; synthesis cost per task is
+    # recorded_synthesis_usd/tasks to 3 decimals, prefixed with ">= " for equivalence_tests (lower
+    # bound). Evidence links to the manifest URL or a local-evidence anchor. Appends fixed
+    # explanatory paragraphs to both lists. Inputs: history dict with keys pipelines, sources,
+    # reviewed_on. Output: (release_lines, economics_lines) lists of Markdown lines. Raises:
+    # ValueError on any validation failure.
     """Keep historical inventory and partial costs outside modern quality totals."""
     rows = history["pipelines"]
     if len({row["pipeline"] for row in rows}) != len(rows):
@@ -80,6 +101,14 @@ def native_tables(history: dict) -> tuple[list[str], list[str]]:
 
 
 def codemidas_tables(row: dict) -> tuple[list[str], list[str]]:
+    # [FUNCTION DOC] Builds the CodeMidas "local collections awaiting publication" release section
+    # and the "CodeMidas generation and evaluation" cost table from one campaign summary row.
+    # Validates that review_passed+review_defects+review_unresolved == generated_tasks;
+    # repositories, quality_counts and curricula each sum to curated_tasks (n); 0 < n <=
+    # review_passed <= generated_tasks <= attempted_candidates; and accounted_usd == api_usd +
+    # compute_estimate_usd. Cost table reports construction/review yields and accounted cost per
+    # export, reviewed and curated task. Output: (release_lines, cost_lines). Raises: ValueError on
+    # mismatch.
     """Keep the local, reviewed cohort out of published and generation-only totals."""
     n = row["curated_tasks"]
     if (
@@ -129,6 +158,16 @@ def codemidas_tables(row: dict) -> tuple[list[str], list[str]]:
 
 
 def frontiersmith_tables(row: dict) -> tuple[list[str], list[str]]:
+    # [FUNCTION DOC] Builds FrontierSmith release text and cost section from a campaign or pilot
+    # summary. Validates 0 < selected <= initial_exports <= candidate_attempts, len(tasks) ==
+    # selected with unique task names, total_usd == model_usd + estimated_compute_usd,
+    # full_quality_verified == 0 and every task quality_status == 'unverified'; counts completed
+    # rollouts. If measurement_kind == 'pilot_and_expansion' it additionally requires
+    # all_workers_terminated and renders the 100-task collection variant: whole/per-task cost table
+    # (including reserved unknown charges), per-campaign phase rows, and per-stage model costs with
+    # human-readable stage names. Otherwise renders the development-pilot variant. Output:
+    # (release_lines, cost_lines). Raises: ValueError on any inconsistency; KeyError on missing
+    # fields.
     """Report local construction evidence without inflating published/verified totals."""
     n = row["selected_tasks"]
     model = Decimal(row["model_usd"])
@@ -228,6 +267,14 @@ def frontiersmith_tables(row: dict) -> tuple[list[str], list[str]]:
 
 
 def render(data: dict, frontiersmith: dict | None = None) -> dict[str, str]:
+    # [FUNCTION DOC] Assembles both public pages. Inputs: data (docs/data/pipelines.json contents)
+    # and optional frontiersmith summary. Validates unique recipe names, per-row quality_counts
+    # summing to published_tasks, generation_usd == model_usd + compute_usd where present,
+    # sample_exports > 0 and attempted_candidates >= sample_exports. Builds the recipe yield/cost
+    # table, the published dataset table with pinned manifest links, shared-compute and Tasksmith
+    # evaluation paragraphs, and merges native, CodeMidas and FrontierSmith sections. Output: dict
+    # {"economics.md": text, "releases.md": text}. Raises: ValueError/KeyError on bad data. Side
+    # effects: none.
     rows = data["pipelines"]
     by_name = {row["recipe"]: row for row in rows}
     if len(by_name) != len(rows):
@@ -360,6 +407,11 @@ def render(data: dict, frontiersmith: dict | None = None) -> dict[str, str]:
 
 
 def main() -> None:
+    # [FUNCTION DOC] CLI entry point. Parses --check, loads docs/data/pipelines.json and the
+    # FrontierSmith campaign JSON (pilot file if the campaign file is absent), renders pages and
+    # either writes them into docs/pipelines/ or, with --check, raises ValueError naming the first
+    # differing file. Prints a one-line status to stdout. Side effects: reads/writes files under the
+    # repo root.
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true")
     args = parser.parse_args()

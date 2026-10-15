@@ -1,3 +1,11 @@
+# [PACKAGE DOC] Bootstrap package: produces a reusable Docker image in which a repository builds and
+# its tests run. An LLM ReAct agent (agent.py) issues shell commands in a long-lived container
+# (docker.py), guided by prompts.py/presets.py; runner.py orchestrates clone, cache lookup
+# (cache.py), agent loop, smoke gate, commit, fresh-container verify and optional registry push. Re-
+# exports ensure_bootstrap, BootstrapResult and LanguageHint. Importing this package imports runner
+# (and thus auth, llm, docker helpers) eagerly.
+# KNOWN ISSUE: the docstring points to docs/BOOTSTRAP.md, but the file lives at
+# docs/reference/BOOTSTRAP.md.
 """Bootstrap phase — make a repo build cleanly inside a Docker container.
 
 An LLM agent iterates: run a shell command in a container, observe stdout,

@@ -1,3 +1,10 @@
+# [MODULE DOC] Remote worker for CLI-Gym, executed on the provider worker via run_generator as
+# "python -m ... config.json output_dir". "prepare" mode bootstraps the repo snapshot, proves the
+# healthy suite passes, records protected file hashes, installs an isolated verifier venv and
+# samples candidates. "evaluate" mode applies an inversion in a fresh container, checks protected
+# files, commits the damaged image and runs the suite with and without the recovery script to
+# produce contrast evidence. All containers run with no network and resource limits and are
+# force-removed afterwards.
 """Remote healthy baseline, environment inversion, restoration and test evidence."""
 
 from __future__ import annotations
@@ -22,12 +29,19 @@ _CONTROL = "/opt/repo2rlenv-verifier/bin/python"
 
 
 def run(argv, *, timeout=60, check=True):
+    # [FUNCTION DOC] HELPER: Runs a subprocess with captured UTF-8 text output. Inputs: argv (list),
+    # keyword timeout (seconds, default 60), check (default True; raise CalledProcessError on
+    # non-zero). Output: CompletedProcess. Raises TimeoutExpired / CalledProcessError.
     return subprocess.run(
         argv, capture_output=True, text=True, encoding="utf-8", timeout=timeout, check=check
     )
 
 
 def create(image: str) -> str:
+    # [FUNCTION DOC] HELPER: Creates and starts a sandbox container from image with repo2rlenv
+    # labels, a random name "cli-inversion-<hex>", no network, 1 CPU, 2g memory, 256 pids, all
+    # capabilities dropped, no-new-privileges, workdir /workspace, running "sleep infinity". Input:
+    # image (str). Output: container name. Raises CalledProcessError on docker failure.
     name = "cli-inversion-" + uuid.uuid4().hex
     run(
         [
@@ -60,6 +74,17 @@ def create(image: str) -> str:
 
 
 def prepare(repo: RepoSpec, options: EnvironmentRepairOptions, destination: Path) -> dict:
+    # [FUNCTION DOC] Prepare mode. Inputs: repo (RepoSpec), options (EnvironmentRepairOptions),
+    # destination (Path, must not exist). Bootstraps a snapshot (bootstrap_snapshot) and runs the
+    # healthy test image; raises ValueError if tests fail or nothing passed. Hashes every regular
+    # non-symlink file under options.source_paths and test_paths (skipping __pycache__). In a
+    # temporary container it creates the /opt/repo2rlenv-verifier venv, captures "pip list" JSON and
+    # commits the container to a new image (container always removed). Then builds
+    # options.max_candidates candidates with a seeded RNG: each has repo url, ref, index, seed, a
+    # 20-char sha256 id of that identity, a direction cycled from options.directions, up to 50
+    # sampled passing tests and the committed image id. Writes environment.json (protected hashes,
+    # required_tests = all passing tests, packages, first 800 file paths) and generation.json.
+    # Output: dict {candidates, rejected: [], attempted}.
     destination.mkdir(parents=True, exist_ok=False)
     boot, base = bootstrap_snapshot(repo, options, destination)
     healthy = test_image(boot.image_digest, options, destination / "healthy")
@@ -126,6 +151,13 @@ def prepare(repo: RepoSpec, options: EnvironmentRepairOptions, destination: Path
 
 
 def suite(image: str, options, output: Path, recovery: Path | None = None) -> dict:
+    # [FUNCTION DOC] Runs the repository test suite in a fresh container of image. Inputs: image,
+    # options (test_timeout_sec), output (Path, must not exist), recovery (optional Path to a
+    # recovery script). If recovery is given it is copied in and run with bash; on non-zero exit
+    # returns {returncode, stage: "recovery", passed: [], log tail} (writes recovery.log). Then runs
+    # pytest on tests with a junit XML, writes tests.log, copies results.xml out and parses passed
+    # ids (parse errors ignored). Writes result.json and returns {returncode, passed (sorted ids),
+    # log (last 18000 chars)}. Container is always removed. Timeouts raise TimeoutExpired.
     output.mkdir(parents=True, exist_ok=False)
     container = create(image)
     try:
@@ -183,6 +215,17 @@ def suite(image: str, options, output: Path, recovery: Path | None = None) -> di
 
 
 def evaluate(config, options, destination: Path) -> dict:
+    # [FUNCTION DOC] Evaluate mode. Inputs: config (dict with inversion, generation dir path,
+    # candidate.image_digest), options, destination (Path, must not exist). Writes destruction.sh
+    # and recovery.sh, starts a container from the candidate image and runs the destruction script.
+    # If it fails: result contrast False, stage "inversion". Otherwise runs a hashing script with
+    # the isolated verifier python to list protected files that are missing or changed; if any (or
+    # the check fails) contrast False, stage "protected_files". Else removes the script, commits the
+    # damaged image, runs suite() for baseline (no recovery) and reference (with recovery). contrast
+    # is True when required tests are nonempty, not all pass at baseline, reference exits 0 and all
+    # required pass in reference; also records baseline, reference, image_digest and
+    # missing_baseline_tests. Saves evaluation.json and returns the result dict. The original
+    # container is always removed (committed images are not).
     destination.mkdir(parents=True, exist_ok=False)
     inversion = Inversion.model_validate(config["inversion"])
     generation = Path(config["generation"])
@@ -249,6 +292,9 @@ def evaluate(config, options, destination: Path) -> dict:
 
 
 def main() -> None:
+    # [FUNCTION DOC] CLI entrypoint: parses positional config (JSON path) and output (Path),
+    # validates options as EnvironmentRepairOptions, and runs evaluate when config["mode"] ==
+    # "evaluate", otherwise prepare with the config's RepoSpec. Output: None.
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("config", type=Path)
     parser.add_argument("output", type=Path)

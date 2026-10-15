@@ -1,3 +1,8 @@
+# [MODULE DOC] Prompt templates for the bootstrap agent. SYSTEM_TEMPLATE describes the container,
+# the one-action-per-turn Thought/Action/Input protocol, the tool set, the SAVE_SETUP stop condition
+# (declare success once tests can be collected; failing tests are fine; test_cmds must be self-
+# contained for a fresh shell) and constraints, with placeholders for platform, language, base image
+# and language preset hints. INITIAL_USER_PROMPT seeds the conversation with repo and ref.
 """Prompts for the bootstrap agent. Original — not derived from RepoLaunch."""
 
 from __future__ import annotations
@@ -111,6 +116,8 @@ is huge, redirect to /dev/null or grep for the part you need.
 
 
 def system_prompt(*, language: LanguageHint, base_image: str, platform: str) -> str:
+    # [FUNCTION DOC] Formats SYSTEM_TEMPLATE with language.value, base_image, platform and the
+    # preset_hints_block for the language. Keyword-only inputs. Output: system prompt str.
     return SYSTEM_TEMPLATE.format(
         language=language.value,
         base_image=base_image,
@@ -129,4 +136,6 @@ Begin. Explore the repo structure first, then plan your installation steps.
 
 
 def initial_user_prompt(*, repo: str, ref: str) -> str:
+    # [FUNCTION DOC] Formats INITIAL_USER_PROMPT with repo, ref and short_ref (first 12 chars of
+    # ref). Keyword-only inputs. Output: str.
     return INITIAL_USER_PROMPT.format(repo=repo, ref=ref, short_ref=ref[:12])

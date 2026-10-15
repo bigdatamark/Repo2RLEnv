@@ -1,3 +1,8 @@
+# [MODULE DOC] Controller-side orchestration of remote bootstrap readiness runs. The CPU matrix runs
+# bootstrap_matrix on one provisioned remote worker and snapshots its Docker cache; the GPU path
+# builds a CUDA image on Modal and validates it in a network-blocked L4 sandbox. Target code never
+# executes on the controller. Compute cost is reconciled into the shared budget ledger with a
+# conservative estimate after confirmed termination.
 """Controller for remote bootstrap readiness; target code never executes here."""
 
 from __future__ import annotations
@@ -29,6 +34,12 @@ from repo2rlenv.tasksmith.bootstrap_matrix import RepositoryBootstrap, dockerfil
 
 
 def reconcile_worker(receipt: Path, budget: RunBudget, *, gpu_rate: str = "0") -> dict:
+    # [FUNCTION DOC] Settles a worker's ledger reservation with a conservative compute estimate.
+    # Reads the JSON receipt (requires state "terminated" or "build_failed", else ValueError),
+    # computes seconds between started_at and stopped_at, a per-second rate from spec cpus and
+    # memory_mb plus gpu_rate (str USD/s, default "0"), and estimate = seconds * rate * 2 + 1.00
+    # rounded up to 1e-6. Writes <receipt>.cost.json evidence and settles record["operation_id"] in
+    # budget with it. Returns the evidence dict.
     record = json.loads(receipt.read_text())
     if record["state"] not in {"terminated", "build_failed"}:
         raise ValueError("Compute reconciliation requires confirmed termination")
@@ -68,6 +79,20 @@ def reconcile_worker(receipt: Path, budget: RunBudget, *, gpu_rate: str = "0") -
 def run_cpu_matrix(
     config: Path, output: Path, campaign: Path, wheel: Path, *, on_event=print
 ) -> dict:
+    # [FUNCTION DOC] Runs the CPU readiness matrix remotely and returns the report dict. Inputs:
+    # config (JSON list of RepositoryBootstrap), output dir, campaign dir (budget.sqlite3), wheel
+    # (runtime wheel), on_event (progress callback, default print). Validates the wheel and unique
+    # repositories, computes an identity (repos, recipes, runtime, smoke script hash). If
+    # configuration.json exists: identity must match (ValueError) and a completed previous report
+    # whose worker receipts are all terminated is returned; any other existing state raises
+    # ValueError. Otherwise saves the identity, provisions a 4-CPU/16 GB worker reserving $12 under
+    # a shared $30 RunBudget, prepares Docker, installs the runtime, uploads the config and runs
+    # bootstrap_matrix as a remote job (12600s), raising RuntimeError if it does not complete.
+    # Downloads build-logs.tar.gz and readiness.tar.gz, unpacks evidence, loads the remote report,
+    # snapshots the worker filesystem (7-day TTL) and marks the report completed with snapshot
+    # id/TTL/timestamp. Always stops the worker, reconciles compute and saves report.json with
+    # budget totals.
+    # KNOWN ISSUE: on_event defaults to print(), contrary to the project's console-only output rule.
     runtime_identity = check_runtime_wheel(wheel)
     specs = [RepositoryBootstrap.model_validate(item) for item in json.loads(config.read_text())]
     if len({spec.name for spec in specs}) != len(specs):
@@ -185,6 +210,20 @@ def run_cpu_matrix(
 def run_gpu_repository(
     spec: RepositoryBootstrap, output: Path, campaign: Path, *, on_event=print
 ) -> dict:
+    # [FUNCTION DOC] Builds one repository's CUDA image on Modal and runs the GPU smoke in an L4
+    # sandbox; returns the report dict (status ready/failed/incomplete). Inputs: spec
+    # (RepositoryBootstrap), output dir, campaign dir, on_event (default print). If operation.json
+    # exists, returns the saved report when source, smoke hash and recipe match and the state is
+    # terminated/build_failed, else raises ValueError (never redispatches). Otherwise writes the
+    # clone-mode GPU Dockerfile, reserves $6 in the shared ledger, records an operation receipt,
+    # builds the image and creates a network-blocked sandbox (2 CPUs, 8 GB, L4, 1800s), uploads and
+    # runs bootstrap_smoke.py, saves smoke stdout/stderr and pip-freeze.txt, and marks ready with
+    # image id, parsed smoke JSON and Dockerfile hash. ImageBuildError marks build_failed and
+    # reconciles cost; other exceptions mark the report failed (not re-raised). Finally terminates
+    # the sandbox (on failure marks termination_uncertain in the ledger and re-raises) and
+    # reconciles with a GPU rate, or marks creation_uncertain if no sandbox was created and the
+    # build did not fail; saves report.json with budget totals.
+    # KNOWN ISSUE: on_event defaults to print(), contrary to the project's console-only output rule.
     """Build on the provider, then reserve a native L4 sandbox for real CUDA checks."""
     import modal
 

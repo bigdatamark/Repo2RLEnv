@@ -1,3 +1,7 @@
+# [MODULE DOC] Writes a standalone CLI-Gym environment-repair Harbor task bundle. The environment
+# image installs the repo, then runs the inversion (destruction) script; the solution is the
+# recovery script; the verifier restores the original test suite and requires the healthy test ids
+# to pass without source changes.
 """Standalone environment-repair tasks, preserving the original healthy test suite."""
 
 from __future__ import annotations
@@ -25,6 +29,24 @@ def export_task(
     protected: dict,
     resume: bool,
 ) -> Path:
+    # [FUNCTION DOC] Builds and writes the task bundle. Keyword inputs: base (Path to the healthy
+    # repo snapshot), destination (bundle dir), name, instruction (task text), inversion (Inversion
+    # model with destruction_shell / recovery_shell), options (EnvironmentRepairOptions: base_image,
+    # dependencies, install_command, test_timeout_sec), org, lineage (extra metadata dict),
+    # required_tests (test ids that must pass), protected (relative path -> sha256 of source files
+    # that must not change), resume (passed to write_bundle). Behavior: copies every regular non-
+    # symlink file of base (skipping .git, __pycache__, .pytest_cache parts) to environment/source/,
+    # and additionally files under tests/ to tests/repository-tests/. Generates a Dockerfile (base
+    # image, tmux install, pip install of dependencies, copy source, install command, remove .git
+    # and pip cache, create an isolated verifier venv at /opt/repo2rlenv-verifier, run the
+    # destruction script as a bash -c JSON-form RUN), solution/solve.sh = recovery script,
+    # tests/grade.py (this package's grader), tests/test_results.py (copied from
+    # repo2rlenv.quality), tests/test.sh (runs grade.py with the verifier venv python -I), and
+    # tests/contract.json (protected_source, required_tests, timeout_sec). Metadata records recipe
+    # cli_gym, pipeline env_repair, upstream commit from the catalog, quality_status exported,
+    # reward kind test_execution plus lineage. Agent and verifier run with no network; verifier as
+    # root with timeout test_timeout_sec + 30. Output: Path returned by write_bundle. Side effects:
+    # reads base, writes destination.
     assets = {}
     for path in sorted(base.rglob("*")):
         if not path.is_file() or path.is_symlink():

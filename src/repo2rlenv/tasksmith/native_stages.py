@@ -1,3 +1,7 @@
+# [MODULE DOC] Native (GPU) Tasksmith stages: readiness bootstrap and task construction executed on
+# Modal through Harbor's metered Modal environment. Locally this module only copies source files,
+# writes Dockerfiles and materialises evidence/task artifacts; all builds and test runs happen
+# remotely with network disabled and L4 GPUs.
 """Native GPU bootstrap and construction; local work only materializes artifacts."""
 
 from __future__ import annotations
@@ -31,6 +35,17 @@ from repo2rlenv.tasksmith.readiness import validate_readiness_paths
 async def check_context(
     context: Path, profile: Profile, output: Path, budget, gpus: int, *, tests: bool = True
 ):
+    # [FUNCTION DOC] Async. Builds a Docker context on Modal (MeteredModalEnvironment: 4 CPUs, 16
+    # GB, `gpus` L4 GPUs, no network, 900s start timeout) under NativeAccounting that records
+    # allocations in output/allocations against `budget`, verifies torch sees exactly `gpus` CUDA
+    # devices and can compute on them (device.stdout/.stderr), saves pip-freeze.txt, then (when
+    # tests=True, default) runs pytest on the profile's selectors (or test paths) with a JUnit
+    # report, saving stdout.txt / stderr.txt / results.xml / results.json. Inputs: context dir,
+    # profile, output dir (must not exist), budget (RunBudget with .prefix), gpus. Returns the
+    # parsed JUnit result (returncode, statuses, passed) or, with tests=False, {"device": parsed
+    # JSON, "image_id"}. Raises ValueError if the device check fails or no JUnit report can be
+    # downloaded; FileExistsError if output exists. Always stops the environment and resets the
+    # accounting context variable.
     """Build on Modal, assert real device allocation and run the pinned test selection."""
     from harbor.models.task.config import EnvironmentConfig, NetworkPolicy
     from harbor.models.trial.paths import TrialPaths
@@ -115,6 +130,10 @@ async def check_context(
 
 
 def build_context(base: Path, profile: Profile, destination: Path, *, public: bool = False) -> Path:
+    # [FUNCTION DOC] Copies every regular file of base into destination/source (skipping private
+    # assets per the profile when public=True) and writes destination/Dockerfile from
+    # repository_build(profile.options). Returns destination. Raises ValueError on any symlink in
+    # base, FileExistsError if destination already exists. Never builds locally.
     """Copy source data and an explicit recipe; never build on this machine."""
     destination.mkdir(parents=True, exist_ok=False)
     for path in sorted(base.rglob("*")):
@@ -133,10 +152,18 @@ def build_context(base: Path, profile: Profile, destination: Path, *, public: bo
 
 
 class NativeStages:
+    # [CLASS DOC] Stage implementations used by the Tasksmith runner for GPU tasks. Holds the
+    # runner, whose options, budget and remote() method are used.
     def __init__(self, runner):
+        # [FUNCTION DOC] Stores the Tasksmith runner. No side effects.
         self.runner = runner
 
     def begin(self, output: Path, inputs: dict):
+        # [FUNCTION DOC] HELPER: Resumability guard for a stage directory. Identity = inputs, gpus
+        # and sha256 of this module's source. If output exists: requires matching inputs.json (else
+        # ValueError), a stage-result.json (else ValueError "incomplete"), and, when the result has
+        # a bundle_hash, that the recorded task still has that identity (else ValueError); returns
+        # the saved result. Otherwise creates output, writes inputs.json and returns None.
         identity = {
             "inputs": inputs,
             "gpus": self.runner.options.gpus,
@@ -166,6 +193,14 @@ class NativeStages:
         return None
 
     def bootstrap(self, root, key, source, profile, checkout):
+        # [FUNCTION DOC] Native readiness stage for one PR; returns a stage-result dict (also saved
+        # to root/native/<key>/stage-result.json). Resumes via begin(). Calls runner.remote with a
+        # "prepare_native" request (source, profile, checkout); a non-completed result is saved and
+        # returned as-is. Otherwise validates readiness paths, builds the merged-head context and
+        # runs check_context with tests (must have returncode 0 and passed, else failure), then
+        # builds the public context (private assets removed) and runs the device-only check.
+        # Completed value: base and defective tree paths, removed files, readiness statuses, public
+        # image info and a dependency-cache note. Exceptions are converted via failure().
         output = root / "native" / key
         existing = self.begin(output, {"source": source, "profile": profile})
         if existing is not None:
@@ -227,6 +262,19 @@ class NativeStages:
         return result
 
     def construct(self, root, key, source, profile, design, ready):
+        # [FUNCTION DOC] Native construction stage: builds and validates the final Harbor task;
+        # returns and saves a stage-result dict. Resumes via begin(). Validates profile and design;
+        # with policy "replace" clears upstream test selectors; private additional tests are written
+        # to tests/tasksmith_behavior.py (ValueError if that path exists or tests/ is missing) and
+        # added to selectors/test paths. Runs the grading suite on the reference (healthy) context,
+        # which must pass, then on a broken copy where source files are replaced by defective
+        # versions or deleted; computes the execution contrast and requires non-empty PASS_TO_PASS.
+        # Exports the task with export_repository_task (defective/reference file maps, instruction,
+        # tasksmith metadata incl. source URL/shas and diff hash, private verifier sources),
+        # rewrites task.toml environment and verifier environment to the configured GPUs (L4, 4
+        # CPUs, 16 GB), refreshes the bundle identity. Completed result has bundle_hash, local path
+        # and value {task_relative, contrast, options, strategy, test_evidence}. Exceptions are
+        # converted via failure().
         output = root / "native" / key
         existing = self.begin(
             output, {"source": source, "profile": profile, "design": design, "ready": ready}
@@ -349,6 +397,12 @@ class NativeStages:
 
     @staticmethod
     def failure(output: Path, exc: Exception) -> dict:
+        # [FUNCTION DOC] Static. Converts a stage exception into a failed result dict, or re-raises.
+        # Raises RuntimeError (chained) if any allocation receipt under output is in a non-final
+        # state (other than reservation_failed caused by BudgetExceeded); re-raises BudgetExceeded.
+        # For Modal ImageBuildError, fetches `python -m modal image logs <id>` (60s) into image-
+        # build.stderr.txt (or a fallback note). Returns {"status": "failed", "error", "logs"} with
+        # the last 8000 chars of stdout/stderr/device/results files found under output.
         for path in output.glob("**/allocations/*.json"):
             if not path.name.endswith(".cost.json"):
                 record = json.loads(path.read_text())

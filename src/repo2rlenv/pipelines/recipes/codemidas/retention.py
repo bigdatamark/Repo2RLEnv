@@ -1,3 +1,6 @@
+# [MODULE DOC] Produces a labeled copy of a CodeMidas task carrying an advisory evaluation label for
+# the codemidas-v1 profile, built from checked Harbor control evidence and an optional audit
+# receipt. It never claims the shared "verified" status of the standard quality loop.
 """Advisory labels for the paper profile, separate from the shared quality loop."""
 
 from __future__ import annotations
@@ -12,6 +15,22 @@ from repo2rlenv.quality.labels import read_evaluation, write_labeled_copy
 
 
 def retain(task: Path, destination: Path, controls: Path, *, audit: Path | None = None) -> Path:
+    # [FUNCTION DOC] Copies task to destination with an EvaluationLabel. Inputs: task (bundle dir),
+    # destination (Path), controls (directory of nop-0..1 / oracle-0..3 trial receipts), keyword
+    # audit (optional Path to an audit result JSON). Computes the bundle hash, gathers control
+    # evidence (control_evidence raises ValueError if any control is missing/changed/wrong). Without
+    # audit: status unverified, stage controls, codes codemidas_controls_passed +
+    # rollout_review_not_run. With audit: requires matching bundle_hash and that
+    # curriculum(screen_rewards) equals the recorded curriculum (ValueError otherwise), adds the
+    # audit file as diagnosis evidence; if method_sound, stage is rollout (incomplete curriculum) or
+    # complete with codes method_sound / curriculum_<x> / standard_profile_not_run (status stays
+    # unverified); else stage review and status needs_repair when the review confirmed an exploit or
+    # any false positive/negative judgment, blocked with provider_policy_blocked +
+    # solver_review_passed (stage probes) when the adversarial stage was provider-blocked but
+    # solvers were sound, otherwise blocked with codemidas_review_incomplete (plus
+    # provider_policy_blocked if applicable). If destination exists, verifies its existing label
+    # matches hash, evidence, codes and status (ValueError otherwise) and returns it; else writes
+    # the labeled copy. Output: Path.
     """Copy an immutable task with checked control and optional audit references.
 
     The standard `verified` status belongs to the shared semantic-probe profile.

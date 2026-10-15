@@ -1,3 +1,8 @@
+# [MODULE DOC] Trusted verifier entrypoint copied into each CLI-Gym task as /tests/grade.py and run
+# inside the task container. Writes reward 0.0 first, then awards 1.0 only if protected repository
+# sources are unchanged, the original tests (restored from /tests/repository-tests) run under pytest
+# and every required healthy test id passes with exit code 0. Standalone: uses only the stdlib plus
+# the sibling /tests/test_results.py loaded by path.
 """Trusted entrypoint: restore original tests and require nonempty healthy test IDs."""
 
 from __future__ import annotations
@@ -12,6 +17,16 @@ from pathlib import Path
 
 
 def main() -> None:
+    # [FUNCTION DOC] Grades the task. Creates /logs/verifier and writes reward.txt = 0.0. Loads
+    # /tests/test_results.py as module test_results (registers it in sys.modules) and reads
+    # /tests/contract.json. For each protected_source entry, if /workspace/<path> is missing or its
+    # sha256 differs, writes reason.txt and returns. Replaces /workspace/tests (symlink, file or
+    # dir) with a copy of /tests/repository-tests, runs "python -m pytest tests -q --tb=short
+    # --junitxml= /logs/verifier/results.xml" in /workspace with output to test-output.txt and the
+    # contract timeout; returns (reward 0) on OSError/timeout, missing junit file or parse
+    # ValueError. Writes 1.0 when required tests are nonempty, the parsed returncode is 0 and
+    # required is a subset of the passed ids. Output: None. Side effects: filesystem writes in
+    # /logs/verifier and /workspace/tests, subprocess.
     output = Path("/logs/verifier")
     output.mkdir(parents=True, exist_ok=True)
     reward = output / "reward.txt"

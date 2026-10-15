@@ -1,3 +1,10 @@
+# [MODULE DOC] CLIGymPipeline: the controller side of the owned CLI-Gym recipe (env_repair). Builds
+# on RepositoryGenerationPipeline (which runs the remote worker's "prepare" mode to produce a
+# healthy image and candidates); for each candidate it asks the LLM for an inversion goal, then
+# iterates bounded rounds of LLM-authored destruction/recovery scripts evaluated remotely by
+# cli_gym.worker, writes a symptom-based repair instruction, exports a draft task, gates it with
+# Harbor nop/oracle trials and exports the accepted task. Execution feedback from each failed round
+# is fed back to the model.
 """CLI-Gym inversion goals, execution-feedback repair and symptom-based task assembly."""
 
 from __future__ import annotations
@@ -20,16 +27,40 @@ from repo2rlenv.spec.input import PipelineName
 
 
 class CLIGymPipeline(RepositoryGenerationPipeline):
+    # [CLASS DOC] Pipeline class for PipelineName.ENV_REPAIR with recipe_id "cli_gym" and
+    # worker_module repo2rlenv.pipelines.recipes.cli_gym.worker. Inherits run/resume/event plumbing
+    # from RepositoryGenerationPipeline and implements author_export.
     name = PipelineName.ENV_REPAIR
     recipe_id = "cli_gym"
     worker_module = "repo2rlenv.pipelines.recipes.cli_gym.worker"
 
     def __init__(self, input, options, bootstrap=None):
+        # [FUNCTION DOC] Delegates to the base constructor (input, options, bootstrap) and then
+        # raises ValueError unless options.test_paths is exactly ["tests"] (the grader restores a
+        # single tests directory).
         super().__init__(input, options, bootstrap)
         if options.test_paths != ["tests"]:
             raise ValueError("The first CLI-Gym profile requires a single tests directory")
 
     def author_export(self, generation, candidate, ledger, run, out_dir):
+        # [FUNCTION DOC] Authors, validates and exports one repair task for a candidate. Inputs:
+        # generation (Path of the prepare-mode generation output with environment.json and base/),
+        # candidate (dict from worker.prepare: id, repo, ref, direction, sampled_tests,
+        # image_digest), ledger (BudgetLedger), run (run directory), out_dir (final export dir).
+        # Steps: creates run/tasks/<id>; connects to the worker from the worker receipt; derives the
+        # runtime python from the wheel sha256 and a 20-char prefix from run_id and id; loads the
+        # environment record and up to 50 titles of other candidates' goals; fills
+        # inversion_prompt.md placeholders. Asks for an InversionGoal (ValueError if its selected
+        # tests are not a subset of the sampled tests) and saves goal.json. Then for
+        # options.max_rounds rounds: asks for an Inversion (including accumulated feedback), runs
+        # the worker in "evaluate" mode remotely (timeout 3 * test_timeout_sec + 180); on failure,
+        # missing contrast, or no overlap between selected tests and tests broken at baseline,
+        # appends feedback and continues. Otherwise asks for a RepairInstruction built from
+        # instruction_prompt.md and the baseline evidence, exports a draft bundle (protected sources
+        # exclude tests/ paths), runs nop and oracle Harbor trials and, if both completed with
+        # rewards [0, 1], exports to out_dir and returns its Path; otherwise appends the Harbor
+        # feedback. Raises ValueError when rounds are exhausted. Side effects: metered LLM calls
+        # (receipts per stage, reservation $1 each), remote jobs, file writes, progress events.
         execution = self.input.execution
         key = candidate["id"]
         directory = run / "tasks" / key
@@ -52,6 +83,12 @@ class CLIGymPipeline(RepositoryGenerationPipeline):
         )
 
         def call(stage, schema, system, payload, max_tokens=6000):
+            # [FUNCTION DOC] HELPER: One metered, schema-constrained LLM call. Inputs: stage
+            # (receipt / operation-id suffix), schema (Pydantic model class), system (system
+            # prompt), payload (JSON-serializable user content), max_tokens (default 6000). Uses
+            # metered_complete with the input LLM spec, ledger, receipt
+            # directory/<stage>-model.json, a $1.0 reservation and the run's resume flag. Output:
+            # the response validated into schema (raises ValidationError on bad JSON).
             response = metered_complete(
                 self.input.llm,
                 ledger=ledger,

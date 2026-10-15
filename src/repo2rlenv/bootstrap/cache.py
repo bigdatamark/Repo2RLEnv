@@ -1,3 +1,10 @@
+# [MODULE DOC] Filesystem cache for BootstrapResult records. Each (repo, ref, options) maps to the
+# slot <cache_dir>/<owner>__<name>/<ref[:12]>[__<opts_hash>]/ holding bootstrap.json, an optional
+# reconstructed Dockerfile, and (written by runner) transcript.jsonl and build logs. The 8-char
+# options hash distinguishes image-identity options (platform, base image, user Dockerfile,
+# registry, language hint) so e.g. amd64 and arm64 builds of one SHA do not collide.
+# KNOWN ISSUE: the module docstring says cache_dir defaults to ./envs; the actual default
+# (BootstrapSpec.cache_dir) is $R2E_CACHE_DIR or ./workspace/bootstrap.
 """Filesystem cache for bootstrap results.
 
 Layout under cache_dir (defaults to ./envs):
@@ -28,6 +35,9 @@ logger = logging.getLogger(__name__)
 
 
 def _options_hash(opts: dict[str, Any] | None) -> str:
+    # [FUNCTION DOC] HELPER: Returns the first 8 hex chars of SHA-256 over the sort_keys JSON
+    # (default=str) of the options with None values dropped. Returns "" when opts is None/empty or
+    # all values are None, keeping legacy short-commit-only slot paths. Output: str.
     """Stable 8-char hash of spec options that affect image identity.
 
     None / empty → returns "" so existing single-config caches keep their
@@ -51,6 +61,9 @@ def cache_key(
     *,
     options: dict[str, Any] | None = None,
 ) -> Path:
+    # [FUNCTION DOC] Computes the cache slot directory (does not create it). Inputs: repo
+    # "owner/name" (a bare name becomes owner "_"), ref (first 12 chars; empty means "head"),
+    # cache_dir, options (keyword). Output: Path cache_dir/owner__name/short[__hash].
     """Return the cache directory for a (repo, ref, options) tuple."""
     owner, _, name = repo.partition("/")
     if not name:
@@ -65,6 +78,10 @@ def cache_key(
 def save(
     result: BootstrapResult, cache_dir: Path, *, options: dict[str, Any] | None = None
 ) -> Path:
+    # [FUNCTION DOC] Writes result to its slot (creating directories): bootstrap.json with the
+    # dataclass as indented JSON (language as its string value, transcript_path as str) and, when
+    # non-empty, the Dockerfile reconstruction. Inputs: result, cache_dir, options (must match those
+    # used for load). Output: slot Path. Side effects: filesystem writes, overwrites existing files.
     """Write a BootstrapResult to its cache slot. Returns the dir."""
     slot = cache_key(result.repo, result.ref, cache_dir, options=options)
     slot.mkdir(parents=True, exist_ok=True)
@@ -89,6 +106,11 @@ def load(
     *,
     options: dict[str, Any] | None = None,
 ) -> BootstrapResult | None:
+    # [FUNCTION DOC] Reads a cached BootstrapResult for (repo, ref, options). Returns None if
+    # bootstrap.json is missing or unreadable/invalid JSON (logs a warning). Coerces language back
+    # to LanguageHint (unknown strings -> UNKNOWN), transcript_path to Path, and drops keys that are
+    # not dataclass fields for forward compatibility. Raises TypeError if required fields are
+    # missing from the JSON.
     """Return a cached BootstrapResult, or None if not present / unparseable."""
     slot = cache_key(repo, ref, cache_dir, options=options)
     f = slot / "bootstrap.json"

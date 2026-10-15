@@ -1,3 +1,6 @@
+# [MODULE DOC] Applies a recorded remote CPU bootstrap report (from bootstrap_matrix) to Tasksmith
+# Options: binds the Modal worker snapshot and per-repository BootstrapHints without copying any
+# target source images.
 """Consume recorded CPU bootstrap evidence without copying target source images."""
 
 from __future__ import annotations
@@ -11,6 +14,14 @@ from repo2rlenv.tasksmith.models import BootstrapHint, Options
 
 
 def apply_cpu_bootstrap(options: Options, path: Path) -> Options:
+    # [FUNCTION DOC] Reads the JSON bootstrap report at path and returns a new Options with
+    # worker_snapshot set to the report's snapshot_id and bootstrap_hints merged with the hints of
+    # all "ready" repositories (keyed by repository URL). Raises ValueError if the report is not a
+    # completed CPU report, options.provider is not "modal", the snapshot timestamp is naive or TTL
+    # not a positive int, the snapshot has expired (created + ttl <= now UTC), options already
+    # select a different snapshot, a hint is duplicated or its ref differs from the source ref,
+    # options carry a conflicting hint for the same URL, or no repository is ready. Pure apart from
+    # reading the file.
     report = json.loads(path.read_text())
     if report.get("resource") != "cpu" or report.get("status") != "completed":
         raise ValueError("Generation requires a completed CPU bootstrap report")

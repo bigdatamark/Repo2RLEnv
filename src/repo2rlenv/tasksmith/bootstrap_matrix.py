@@ -1,3 +1,9 @@
+# [MODULE DOC] Remote readiness matrix for Hugging Face repositories: generates explicit Dockerfile
+# recipes (CPU or GPU base), builds them through the bootstrap machinery inside a remote worker,
+# runs bootstrap_smoke.py offline in the image, and records evidence (freeze list, dependency cache
+# image, Dockerfile hash, BootstrapHint) per repository. Constants: CPU_IMAGE, GPU_IMAGE (PyTorch
+# CUDA runtime) and CPU_INDEX (CPU torch wheel index). Script entry point runs remote_main(config,
+# output).
 """Remote HF readiness matrix with explicit recipes, evidence and budget holds."""
 
 from __future__ import annotations
@@ -17,6 +23,9 @@ CPU_INDEX = "https://download.pytorch.org/whl/cpu"
 
 
 class RepositoryBootstrap(BaseModel):
+    # [CLASS DOC] Pydantic model (extra fields forbidden) for one repository to bootstrap: name (one
+    # of transformers/accelerate/trl/diffusers/peft/tokenizers), ref (40-hex commit sha) and
+    # extra_install (explicit single-line repair RUN commands).
     model_config = ConfigDict(extra="forbid")
     name: Literal["transformers", "accelerate", "trl", "diffusers", "peft", "tokenizers"]
     ref: str = Field(pattern=r"^[0-9a-f]{40}$")
@@ -25,10 +34,20 @@ class RepositoryBootstrap(BaseModel):
 
     @property
     def url(self) -> str:
+        # [FUNCTION DOC] Property: returns "https://github.com/huggingface/<name>".
         return f"https://github.com/huggingface/{self.name}"
 
 
 def dockerfile(spec: RepositoryBootstrap, resource: str, *, clone: bool = False) -> str:
+    # [FUNCTION DOC] Returns Dockerfile text for spec on resource "cpu" or "gpu" (ValueError
+    # otherwise). Installs apt build tools; for GPU creates a venv with system site packages and
+    # asserts CUDA torch; installs setuptools/wheel/pytest 8/parameterized; on CPU installs torch
+    # 2.11.0 from CPU_INDEX; for tokenizers installs Rust via rustup. Then either fetches and checks
+    # out spec.ref with git (clone=True) or COPYs the build context into /workspace, pip-installs
+    # the package editable (./bindings/python for tokenizers), appends extra_install RUN lines
+    # (ValueError if empty or multi-line), runs pip check and saves a freeze to /opt/bootstrap-
+    # freeze.txt, deletes .git and pip cache, and sets offline/telemetry-off env vars plus
+    # REPO2RLENV_REMOTE_WORKER=1.
     if resource not in {"cpu", "gpu"}:
         raise ValueError("Bootstrap resource must be cpu or gpu")
     base = CPU_IMAGE if resource == "cpu" else GPU_IMAGE
@@ -87,6 +106,16 @@ def dockerfile(spec: RepositoryBootstrap, resource: str, *, clone: bool = False)
 
 
 def cpu_build(spec: RepositoryBootstrap, output: Path) -> dict:
+    # [FUNCTION DOC] Builds and smoke-tests one repository on CPU inside a remote worker and returns
+    # the result dict (also saved to output/result.json). Raises RuntimeError unless env
+    # REPO2RLENV_REMOTE_WORKER=1. Writes output/Dockerfile, calls ensure_bootstrap with that user
+    # Dockerfile (no LLM, cache /work/hf-bootstrap-cache, 1800s), saves bootstrap.json, runs the
+    # smoke script in the image (docker run, no network, 4 CPUs, 8 GB, 180s timeout) saving
+    # smoke.stdout/.stderr (ValueError on failure), extracts pip-freeze.txt, keeps pinned "=="
+    # dependencies (excluding the editable target) plus the CPU extra index, and builds a dependency
+    # cache image via worker.build_dependency_image. Result includes status "ready", source spec,
+    # image digest, parsed smoke JSON, Dockerfile sha256, a hint {ref, base_image, dependencies,
+    # scope} and dependency_cache.
     """Runs inside the existing Docker worker, never on the controller."""
     import os
     import subprocess
@@ -183,6 +212,12 @@ def cpu_build(spec: RepositoryBootstrap, output: Path) -> dict:
 
 
 def remote_main(config: Path, output: Path) -> None:
+    # [FUNCTION DOC] Supervisor entry point: reads a JSON list of RepositoryBootstrap configs, runs
+    # cpu_build for each into output/<name>; on any exception writes error.txt (traceback) and a
+    # "failed" result.json for that repository and continues. Rewrites output/report.json
+    # {"repositories": rows} after each repository and prints "<name> <status>" to stdout.
+    # KNOWN ISSUE: uses print() rather than repo2rlenv.ui.console (project invariant), though it
+    # runs only as a remote script.
     """Supervisor entrypoint; preserve each failed repository independently."""
     import traceback
 

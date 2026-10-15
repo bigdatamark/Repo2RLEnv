@@ -1,3 +1,6 @@
+# [MODULE DOC] The "codemidas" CLI subcommand: "source" validates a pinned Stack v3 repository
+# manifest and prints its provenance; "audit" runs the paper-style adversarial/solver audit and
+# curriculum screening on an exported task. Results are printed as JSON.
 """CodeMidas-specific evidence inspection and paper-style audit commands."""
 
 from __future__ import annotations
@@ -9,6 +12,12 @@ from repo2rlenv.ui.errors import report_error
 
 
 def command(args):
+    # [FUNCTION DOC] Dispatch handler. Input: args (argparse.Namespace). For codemidas_action
+    # "source" lazily imports stack.provenance/read_manifest and computes provenance(manifest,
+    # materialization); otherwise calls audit.audit_task with task, controls, out, campaign,
+    # worker_receipt, runtime_wheel, screen_attempts, attempt_concurrency, max_cost and resume.
+    # Prints the result via console.json and returns 0; any Exception is reported through
+    # report_error (JSON output) whose return code is returned.
     try:
         if args.codemidas_action == "source":
             from repo2rlenv.pipelines.recipes.codemidas.stack import provenance, read_manifest
@@ -36,6 +45,11 @@ def command(args):
 
 
 def add_parser(subparsers):
+    # [FUNCTION DOC] Registers the "codemidas" subcommand with actions "source" (positional manifest
+    # Path, --materialization inline|hydrated default inline) and "audit" (positional task Path;
+    # required --controls, --out, --campaign, --worker-receipt, --runtime-wheel Paths;
+    # --screen-attempts int default 4; --attempt-concurrency 1-4 default 2; --max-cost default "6";
+    # --resume flag), both dispatching to command. Output: None.
     parser = subparsers.add_parser(
         "codemidas", help="Inspect sources and audit CodeMidas Harbor tasks"
     )

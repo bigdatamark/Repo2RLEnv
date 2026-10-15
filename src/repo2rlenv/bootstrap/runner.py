@@ -1,3 +1,11 @@
+# [MODULE DOC] Bootstrap orchestrator and public entry point (ensure_bootstrap). For a (repo, ref)
+# it shallow-clones with a token-bearing URL, scrubs the token from .git/config, resolves the HEAD
+# SHA, consults the filesystem cache, then either builds a user-supplied Dockerfile or runs the LLM
+# agent loop in a fresh DockerSandbox, persists the transcript, applies a lenient smoke gate (exit
+# 0/1/5 ok), ensures git exists in the image, commits it, verifies test_cmds in a fresh container
+# from the committed image, optionally pushes to a registry and re-resolves a pullable digest, and
+# saves a BootstrapResult to the cache. Progress is reported via on_phase(name, details) events and
+# logging.
 """Orchestrator: ensure a working Docker image exists for a (repo, ref).
 
 This is the public API of the bootstrap module. Sandbox-required pipelines
@@ -33,10 +41,15 @@ logger = logging.getLogger(__name__)
 
 
 class BootstrapError(RuntimeError):
+    # [CLASS DOC] RuntimeError raised when bootstrap cannot complete: disabled spec, Docker
+    # unavailable, missing token for a private repo, git clone/fetch/checkout failure, docker build
+    # failure, or an unsuccessful agent run.
     """Raised when bootstrap cannot complete (after honoring `enabled=False`)."""
 
 
 def _resolve_head_sha(local_clone: Path) -> str:
+    # [FUNCTION DOC] HELPER: Runs `git -C clone rev-parse HEAD` (30s timeout). Output: full SHA.
+    # Raises BootstrapError on non-zero exit.
     """Return the full 40-char SHA at HEAD of the local clone."""
     r = subprocess.run(
         ["git", "-C", str(local_clone), "rev-parse", "HEAD"],
@@ -52,10 +65,15 @@ def _resolve_head_sha(local_clone: Path) -> str:
 
 
 def _scrub_token(text: str, token: str | None) -> str:
+    # [FUNCTION DOC] HELPER: Replaces every occurrence of token in text with "***"; returns text
+    # unchanged when token is falsy.
     return text.replace(token, "***") if token else text
 
 
 def _cache_options(spec: BootstrapSpec) -> dict[str, object]:
+    # [FUNCTION DOC] HELPER: Returns the image-identity subset of a BootstrapSpec used for the cache
+    # key: platform, base_image, user_dockerfile (as str or None), image_registry and
+    # languages_hint. Budget fields (iterations, seconds, spend) are intentionally excluded.
     """Stable, image-identity-affecting subset of the spec for the cache key.
 
     Anything that would produce a *different* image must go here. We
@@ -78,6 +96,13 @@ def _run_git_streaming(
     timeout: int,
     on_progress: Callable[[str], None] | None,
 ) -> subprocess.CompletedProcess[str]:
+    # [FUNCTION DOC] HELPER: Runs a git command, optionally streaming progress. Without on_progress
+    # it is a plain captured subprocess.run. Otherwise uses Popen with two daemon reader threads
+    # (stderr in 256-char chunks forwarded line by line, token-scrubbed and truncated to 120 chars,
+    # skipping repeats; stdout buffered). On timeout the process is killed and a result with return
+    # code 124 and stderr "[timeout]" is returned. Output: CompletedProcess with captured text.
+    # Never raises on non-zero exit (subprocess.run's TimeoutExpired can still propagate in the non-
+    # streaming path).
     """Run git with --progress, streaming its stderr to on_progress.
 
     Returns a CompletedProcess-compatible result; never raises on non-zero exit.
@@ -106,6 +131,9 @@ def _run_git_streaming(
     last_line = ""
 
     def _pump_stderr() -> None:
+        # [FUNCTION DOC] HELPER: Reader thread: appends stderr chunks to err_buf and calls
+        # on_progress with each new, non-repeated, token-scrubbed line (max 120 chars), swallowing
+        # callback errors; updates the enclosing last_line.
         nonlocal last_line
         assert proc.stderr is not None
         while True:
@@ -124,6 +152,7 @@ def _run_git_streaming(
                     pass
 
     def _pump_stdout() -> None:
+        # [FUNCTION DOC] HELPER: Reader thread: drains stdout in 1024-char chunks into out_buf.
         assert proc.stdout is not None
         while True:
             chunk = proc.stdout.read(1024)
@@ -156,6 +185,12 @@ def _shallow_clone_at_ref(
     depth: int = 1,
     on_progress: Callable[[str], None] | None = None,
 ) -> None:
+    # [FUNCTION DOC] HELPER: Clones repo_url (token injected via auth_clone_url) into dest at ref.
+    # Empty/"HEAD": `git clone --depth N`. Otherwise first tries `git clone --depth N --branch ref`
+    # (branches/tags); on failure deletes dest, does a blob-less no-checkout clone, `git fetch
+    # --depth N origin ref`, and `git checkout ref` (commit SHAs). Inputs: depth default 1; optional
+    # on_progress. Raises BootstrapError with token-scrubbed stderr excerpts on failure. Side
+    # effects: network, filesystem.
     """Clone repo and check out `ref`. Works for HEAD, branch, tag, or commit SHA.
 
     Strategy:
@@ -228,6 +263,9 @@ def _shallow_clone_at_ref(
 
 
 def _scrub_clone_credentials(clone_dir: Path, repo_url: str) -> None:
+    # [FUNCTION DOC] HELPER: Resets the clone's origin remote URL to the token-free repo_url so the
+    # token is not baked into the committed image via .git/config. Failures to run git are logged as
+    # warnings, never raised (and a non-zero git exit is silently ignored).
     """Reset the clone's remote URL to a token-free form.
 
     `auth_clone_url()` embeds the GitHub PAT into the clone URL so the
@@ -259,6 +297,10 @@ def _verify_committed_image(
     platform: str,
     timeout: int = 300,
 ) -> tuple[bool, str]:
+    # [FUNCTION DOC] HELPER: Runs all test_cmds joined with " && " in a fresh `docker run --rm
+    # --platform P -w /workspace tag bash -lc` container (timeout default 300s). Exit 0, 1 or 5
+    # count as a working environment. Output: (ok, "exit=N; <last 200 chars of output>"). Empty
+    # test_cmds return (True, skip note).
     """Run test_cmds in a FRESH container from the committed image.
 
     More authoritative than the pre-commit smoke check: confirms the layer
@@ -298,6 +340,9 @@ def _verify_committed_image(
 
 
 def _resolve_repo_digest(tag: str) -> str | None:
+    # [FUNCTION DOC] HELPER: Returns the first RepoDigests entry (registry-qualified
+    # repo@sha256:...) from docker image inspect of tag, or None if inspection fails, output is not
+    # JSON, or the list is empty (images that were never pushed).
     """Return the pullable `repo@sha256:...` digest for a tagged image, if any.
 
     `docker image inspect` exposes registry-qualified digests in `RepoDigests`
@@ -324,6 +369,17 @@ def _bootstrap_from_user_dockerfile(
     *,
     force: bool,
 ) -> BootstrapResult:
+    # [FUNCTION DOC] HELPER: Agent-free path when spec.user_dockerfile is set. Raises BootstrapError
+    # if the file is missing. Clones the repo at ref into a temp dir, scrubs the token, resolves the
+    # SHA, and returns a cached result on hit (unless force). Otherwise copies the Dockerfile into
+    # the clone root, runs `docker build --platform P -t <registry or
+    # local/r2e-bootstrap>/<owner__name>:<sha12>` (timeout spec.max_seconds), writes
+    # build.stdout/stderr into the cache slot, raises BootstrapError on build failure, takes the
+    # local image Id as digest, pushes when image_registry contains "/" and upgrades to the
+    # RepoDigest if available. Returns and caches a BootstrapResult with language UNKNOWN, empty
+    # rebuild/test cmds, smoke_passed True, zero LLM cost and extra source=user_dockerfile.
+    # KNOWN ISSUE: unlike the agent path, a cache hit here is returned without checking that the
+    # image still exists locally or was pushed, so a pruned image yields a dead tag.
     """Bypass the agent loop: build the user-supplied Dockerfile directly.
 
     Skips LLM iteration entirely. The Dockerfile is responsible for installing
@@ -417,6 +473,9 @@ def _bootstrap_from_user_dockerfile(
 
 
 def _reconstruct_dockerfile(base_image: str, turns: list) -> str:
+    # [FUNCTION DOC] HELPER: Produces a best-effort Dockerfile: header comments, FROM base_image,
+    # WORKDIR /workspace, COPY . /workspace, then one RUN per BASH turn in order (multi-line
+    # commands continued with backslashes). READ_FILE/LIST_DIR turns are skipped. Output: str.
     """Produce a Dockerfile from the BASH commands the agent ran.
 
     Not always perfectly reproducible (commands may have depended on state
@@ -457,6 +516,25 @@ def ensure_bootstrap(
     on_executing=None,
     on_phase=None,
 ) -> BootstrapResult:
+    # [FUNCTION DOC] Public API: returns a working bootstrap image record for (repo, ref). Inputs:
+    # repo (RepoSpec), spec (BootstrapSpec: enabled, budgets, platform, base_image, user_dockerfile,
+    # cache_dir, image_registry, languages_hint, max_llm_spend_usd), llm (LLMSpec), auth (default
+    # AuthSpec()), force (ignore cache), UI callbacks on_turn/on_thinking/on_executing (passed to
+    # the agent loop) and on_phase(name, details). Flow: raise BootstrapError if disabled, Docker
+    # unavailable, or the repo is private without a token; log the budget; delegate to the user-
+    # Dockerfile path if set. Else clone (emitting clone_* events), scrub credentials, resolve SHA;
+    # on a cache hit whose image is present locally or was pushed, emit *_skipped events and return
+    # it (otherwise log and rebuild). Determine language (first languages_hint, else file detection)
+    # and base image; emit "detected". Start the sandbox, run the agent, always write
+    # transcript.jsonl to the cache slot, raise BootstrapError on agent failure (cost and transcript
+    # path included). Run the soft smoke gate (smoke_passed false for exit codes other than 0/1/5),
+    # install git via apt or apk if missing, commit to <registry or
+    # local/r2e-bootstrap>/<owner__name>:<sha12>, verify in a fresh container (failure only flags
+    # verify_passed), push when image_registry contains "/" and re-resolve the digest. Save the
+    # result, then re-save with transcript_path. Output: BootstrapResult. Side effects: network
+    # clone, Docker containers/images/pushes, LLM spend, cache writes, logging.
+    # KNOWN ISSUE: the private-repo error always tells the user to set a GitHub token, even for
+    # GitLab sources that resolve $GITLAB_TOKEN.
     """Return a working bootstrap image for (repo, ref). Cached after first call.
 
     Resolution order:
@@ -494,6 +572,8 @@ def ensure_bootstrap(
         return _bootstrap_from_user_dockerfile(repo, spec, llm, token, force=force)
 
     def _emit(phase: str, details: dict | None = None) -> None:
+        # [FUNCTION DOC] HELPER: Calls on_phase(phase, details or {}) if a callback was given,
+        # logging and swallowing callback errors.
         if on_phase is not None:
             try:
                 on_phase(phase, details or {})

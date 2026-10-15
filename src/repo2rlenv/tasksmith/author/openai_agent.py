@@ -1,3 +1,8 @@
+# [MODULE DOC] In-process OpenAI Responses API tool loop for tasksmith authoring. Credentials stay
+# with the controller (the OpenAI SDK's own env lookup); every turn reserves a worst-case cost in
+# the AuthorBudget before the call, persists request/response JSON next to the trace, and settles
+# actual cost. PRICES maps supported model names to (input, cached input, output, cache write) USD
+# per million tokens. Limits: MAX_INPUT_BYTES=240000 per request, MAX_OUTPUT_TOKENS=8192.
 """Bounded Responses tool loop with controller-held credentials and durable costs.
 
 Prices are standard tier USD per million tokens, verified 2026-09-25 at
@@ -25,14 +30,20 @@ MAX_OUTPUT_TOKENS = 8192
 
 
 class AgentLimitReached(ValueError):
+    # [CLASS DOC] ValueError subclass raised when the loop exhausts its turn or input-size
+    # allowance; workspace edits made by earlier tool calls are left in place.
     """A bounded attempt ended with any existing workspace edits preserved."""
 
 
 class ProviderRefusalError(RuntimeError):
+    # [CLASS DOC] RuntimeError subclass raised when the provider returns a refusal content part; it
+    # is metered and must not be retried by output-format recovery.
     """A metered provider refusal must not enter output-format recovery."""
 
 
 def model_name(model: str) -> str:
+    # [FUNCTION DOC] Strips an "openai/" prefix and returns the bare model name. Raises ValueError
+    # if the name is not a key in PRICES.
     name = model.removeprefix("openai/")
     if name not in PRICES:
         raise ValueError("This runtime requires openai/gpt-6-sol or openai/gpt-6-luna")
@@ -40,6 +51,11 @@ def model_name(model: str) -> str:
 
 
 def usage_cost(model: str, usage: dict) -> Decimal:
+    # [FUNCTION DOC] Computes the Decimal USD cost of a Responses usage dict for the given model.
+    # Reads input_tokens, output_tokens (KeyError if missing) and input_tokens_details.cached_tokens
+    # / cache_write_tokens (default 0). Raises ValueError if any count is not a nonnegative int,
+    # cached + written exceed input, or input exceeds 272000 tokens. Uncached input, cached, written
+    # and output tokens are each multiplied by their PRICES rate and the sum divided by 1e6.
     name = model_name(model)
     incoming, outgoing = usage["input_tokens"], usage["output_tokens"]
     cached = (usage.get("input_tokens_details") or {}).get("cached_tokens", 0)
@@ -71,6 +87,28 @@ async def run_openai_agent(
     client=None,
     max_output_tokens=MAX_OUTPUT_TOKENS,
 ):
+    # [FUNCTION DOC] Runs a bounded required-tool-call loop against the OpenAI Responses API and
+    # returns {"messages", "turns", "cost" (float)} once a tool result starts with "Artifact
+    # committed.". Inputs (keyword-only): model ("openai/gpt-6-sol|luna"), system (instructions),
+    # prompt (first user message), budget (AuthorBudget with reserve/settle and .budget ledger),
+    # tools (OpenAI function tool schemas), handlers (name -> async callable), trace (JSONL Path),
+    # max_turns (1..100), max_cost (USD, default 8), client (optional AsyncOpenAI; created with no
+    # retries and 180s timeout and closed at the end if not supplied), max_output_tokens
+    # (256..8192). Raises ValueError on invalid limits. Per turn: builds a stateless request (store
+    # False, medium reasoning, required tool choice, no parallel calls, encrypted reasoning
+    # included); raises AgentLimitReached if serialized size + 4096 exceeds MAX_INPUT_BYTES;
+    # reserves bytes * write price + max_output_tokens * output price, raising BudgetExceeded if it
+    # would exceed max_cost; writes <trace-stem>/<turn>-request.json and -response.json. On
+    # APIStatusError, client 4xx codes (400/401/403/404/422) settle 0, others mark the operation
+    # uncertain in the ledger; any other exception also marks it uncertain; all re-raise. A refusal
+    # part raises ProviderRefusalError. An incomplete response due to max_messages/max_output_tokens
+    # is retried once with a nudging user message (cost kept); otherwise non-completed status raises
+    # ProviderOutputError, as does a response with no function calls. Output items (null fields
+    # removed) are appended to the conversation; each function call is validated (known tool, JSON
+    # object arguments, signature binding) and executed, with errors turned into textual results;
+    # results (truncated to 24000 chars) are appended as function_call_output. Records input /
+    # model_request / model_response / tool_request / tool_result / provider_* events to the trace.
+    # Raises AgentLimitReached after max_turns without a committed artifact.
     name = model_name(model)
     if not 1 <= max_turns <= 100:
         raise ValueError("Agent turn limit must be between 1 and 100")
@@ -89,6 +127,8 @@ async def run_openai_agent(
     recovered = False
 
     def record(kind, **data):
+        # [FUNCTION DOC] HELPER: Appends {"kind": kind, **data} as one JSON line to the trace file.
+        # Returns None.
         with trace.open("a") as stream:
             stream.write(json.dumps({"kind": kind, **data}) + "\n")
 

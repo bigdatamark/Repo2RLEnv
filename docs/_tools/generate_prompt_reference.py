@@ -1,3 +1,10 @@
+# [MODULE DOC] Docs build tool that generates the (gitignored) prompt reference pages under
+# docs/pipelines/prompts/ by embedding the exact retained prompt templates, examples and the owned
+# source files that assemble model requests, read straight from src/repo2rlenv/pipelines/recipes and
+# related packages. It never imports or executes pipeline code: files are read as text (and
+# terminal/runner.py is parsed with ast). Module constants: ASSEMBLY (recipe id -> call-site source
+# files to embed), GUIDES (recipe id -> walkthrough page name), TERMINAL (recipes that share the
+# common terminal builder). Run as a script (--check, --out) or via hooks.on_pre_build.
 """Build the ignored prompt reference from canonical repository sources."""
 
 from __future__ import annotations
@@ -59,6 +66,17 @@ TERMINAL = {"seta_seed2synth", "seta_evol", "tmax", "endless_terminals", "termin
 
 
 def block(path: Path, text: str | None = None, *, label: str | None = None) -> str:
+    # [FUNCTION DOC] HELPER: Renders one source file as a collapsible Markdown section: "### title",
+    # a link to the file on GitHub (SOURCE_URL + repo-relative path), the SHA-256 of the original
+    # file bytes, then a <details> block containing the payload in a fenced code block. Inputs: path
+    # (file under ROOT; relative_to(ROOT) raises ValueError otherwise); text (payload override,
+    # default the file text); label (title override, default file name). Trailing whitespace on each
+    # line is stripped. Language tag is python/json/text by suffix. Fence length is max(4, longest
+    # all-backtick token + 1) so embedded Markdown fences do not terminate it. Output: Markdown
+    # string. Side effects: file reads.
+    # KNOWN ISSUE: only whitespace-separated tokens made purely of backticks are considered, so a
+    # payload containing a 4+-backtick fence with an attached language tag (e.g. four backticks then
+    # "python") is not counted and could close the 4-backtick fence early.
     payload = path.read_text() if text is None else text
     payload = "\n".join(line.rstrip() for line in payload.splitlines())
     relative = path.relative_to(ROOT).as_posix()
@@ -81,6 +99,10 @@ def block(path: Path, text: str | None = None, *, label: str | None = None) -> s
 
 
 def prompt_files(recipe: str) -> list[Path]:
+    # [FUNCTION DOC] HELPER: Lists the retained prompt assets of a recipe directory: *prompt.md,
+    # strategies/*.md, *demonstrations.json, *examples.json, strategies.json, plus
+    # design/tests/review/ audit.md for codemidas (added without existence checks). Input: recipe
+    # id. Output: sorted list of Paths.
     directory = RECIPES / recipe
     paths = list(directory.glob("*prompt.md")) + list(directory.glob("strategies/*.md"))
     if recipe == "codemidas":
@@ -93,6 +115,13 @@ def prompt_files(recipe: str) -> list[Path]:
 
 
 def render(recipe: str, title: str) -> str:
+    # [FUNCTION DOC] Builds the full prompt reference page for one recipe. Inputs: recipe id (key of
+    # ASSEMBLY and GUIDES) and display title. Chooses an intro paragraph (special variants for
+    # scaler, which makes zero LLM calls, and codemidas), adds a pointer to shared_terminal.md for
+    # TERMINAL recipes and a demonstrations note for swe_flow, then embeds every prompt_files()
+    # asset, tmax's DOMAIN_MODULES taxonomy excerpt, every ASSEMBLY source file and, for codemidas,
+    # two extra agent modules. Output: Markdown text ending with exactly one newline. Raises:
+    # KeyError for unknown recipe; file errors propagate.
     result = (
         f"# {title}: complete prompt reference\n\n"
         f"Read the [pipeline walkthrough](../{GUIDES[recipe]}.md) first. This reference "
@@ -158,6 +187,10 @@ def render(recipe: str, title: str) -> str:
 
 
 def shared() -> str:
+    # [FUNCTION DOC] Builds shared_terminal.md: intro, the _MATERIALIZATION string constant and the
+    # feedback_for/run_synthesis function sources extracted from recipes/terminal/runner.py via ast
+    # (literal_eval / get_source_segment), followed by terminal/templates.py, terminal/draft.py,
+    # quality/draft_review.py and campaigns/structured.py in full. Output: Markdown string.
     result = (
         "# Shared terminal prompts and output schemas\n\n"
         "SETA Seed2Synth and SETA Evol use the common builder. TMax and Endless "
@@ -186,6 +219,9 @@ def shared() -> str:
 
 
 def quality_loop() -> str:
+    # [FUNCTION DOC] Builds quality_loop.md: an intro plus the review/repair prompt templates and
+    # the models, context, probe and runner modules of src/repo2rlenv/quality/loop, each via
+    # block(). Output: Markdown string.
     root = ROOT / "src/repo2rlenv/quality/loop"
     result = (
         "# Harbor review and repair: complete prompt reference\n\n"
@@ -207,6 +243,9 @@ def quality_loop() -> str:
 
 
 def tasksmith() -> str:
+    # [FUNCTION DOC] Builds tasksmith.md: an intro plus the investigate/design prompts and the
+    # models, runner and author/artifact modules of src/repo2rlenv/tasksmith. Output: Markdown
+    # string.
     root = ROOT / "src/repo2rlenv/tasksmith"
     result = "# Tasksmith: complete prompt reference\n\nRead the [pipeline walkthrough](../tasksmith.md) for the stage diagram, contracts and execution boundaries. These prompts and schemas are generated from the implementation.\n\n"
     for relative in (
@@ -221,6 +260,10 @@ def tasksmith() -> str:
 
 
 def pages() -> dict[str, str]:
+    # [FUNCTION DOC] Computes every expected page deterministically: reads recipes/catalog.json to
+    # get each recipe's title, renders one page per ASSEMBLY recipe plus shared_terminal.md,
+    # quality_loop.md and tasksmith.md. Output: dict file name -> Markdown text. Raises: KeyError if
+    # a recipe is missing from the catalog.
     """Return deterministic pages without importing or executing pipeline code."""
     catalog = {r["id"]: r for r in json.loads((RECIPES / "catalog.json").read_text())}
     expected = {f"{recipe}.md": render(recipe, catalog[recipe]["title"]) for recipe in ASSEMBLY}
@@ -231,6 +274,11 @@ def pages() -> dict[str, str]:
 
 
 def generate(output: Path = OUTPUT, *, check: bool = False) -> int:
+    # [FUNCTION DOC] Writes or checks the prompt pages. Inputs: output directory (default OUTPUT);
+    # check flag (keyword-only). Computes which files are missing or differ. With check=True raises
+    # ValueError if any differ, writing nothing; otherwise creates the directory and rewrites only
+    # changed files. Output: total number of expected pages. Stale extra files in the directory are
+    # not removed.
     expected = {output / name: text for name, text in pages().items()}
     changed = [
         path for path, text in expected.items() if not path.exists() or path.read_text() != text
@@ -248,6 +296,8 @@ def generate(output: Path = OUTPUT, *, check: bool = False) -> int:
 
 
 def main() -> None:
+    # [FUNCTION DOC] CLI entry point: parses --check and --out, calls generate(), prints a count
+    # summary to stdout. Raises: ValueError from generate in check mode.
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true", help="Check already generated references")
     parser.add_argument("--out", type=Path, default=OUTPUT)

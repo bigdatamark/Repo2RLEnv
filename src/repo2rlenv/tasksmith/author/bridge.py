@@ -1,3 +1,10 @@
+# [MODULE DOC] Loopback HTTP bridge between an external (Node) author runtime and the Anthropic API.
+# It exposes an aiohttp server on 127.0.0.1 (random port) with three routes: POST /v1/messages
+# (proxied, metered model calls), GET /v1/models (single-model listing) and POST /tool (dispatch to
+# Python tool handlers). The runtime authenticates with a per-bridge random token; the real
+# ANTHROPIC_API_KEY is only read here. Every model call reserves a cost ceiling against an
+# AuthorBudget before forwarding and settles actual usage cost afterwards; incomplete streams keep
+# their reservation. All requests/responses are appended to a JSONL trace file.
 from __future__ import annotations
 
 import asyncio
@@ -20,10 +27,17 @@ from repo2rlenv.tasksmith.author.inference import (
 
 
 class ProviderOutputError(RuntimeError):
+    # [CLASS DOC] RuntimeError subclass raised when a completed, already-metered provider response
+    # is unusable (truncated or contains no text/tool call); callers may safely retry.
     """Completed, metered response was unusable; a bounded new attempt is safe."""
 
 
 class AgentBridge:
+    # [CLASS DOC] Async context manager that runs the loopback bridge server for one author run.
+    # Enforces: Anthropic-only models, a max number of model turns, a per-run USD cap (relative to
+    # the budget's spend at construction), a tool allowlist, and fixed inference settings. Tracks
+    # in-flight tool and model request tasks so it can cancel/drain them on stop. The first
+    # unexpected error is stored in `failure` and signalled through the `failed` asyncio.Event.
     """Only model inference and explicitly registered remote tools cross this API.
 
     Runtime processes receive a short-lived loopback token, never provider keys.
@@ -31,6 +45,13 @@ class AgentBridge:
     """
 
     def __init__(self, *, model, budget: Budget, tools, handlers, trace: Path, max_turns, max_cost):
+        # [FUNCTION DOC] Stores configuration and initialises state. Inputs (keyword-only): model
+        # (str, must start with "anthropic/"), budget (AuthorBudget used for reserve/settle and
+        # `spent`), tools (list of OpenAI-style tool schemas with function.name), handlers (dict
+        # name -> async callable taking keyword arguments, returning str), trace (Path of the JSONL
+        # trace), max_turns (int model-call cap), max_cost (USD cap for this run). Creates a random
+        # url-safe auth token, an Event `failed`, locks for tools and models, and empty task sets.
+        # Raises ValueError for non-Anthropic models. No I/O.
         if not model.startswith("anthropic/"):
             raise ValueError("The matched runtime experiment currently supports Anthropic models")
         self.model, self.budget = model, budget
@@ -48,10 +69,16 @@ class AgentBridge:
         self._model_tasks: set[asyncio.Task] = set()
 
     def record(self, kind, **data):
+        # [FUNCTION DOC] Appends one JSON line {"kind": kind, **data} to the trace file (non-JSON
+        # values stringified). Side effect: file append. Returns None.
         with self.trace.open("a") as f:
             f.write(json.dumps({"kind": kind, **data}, default=str) + "\n")
 
     async def __aenter__(self):
+        # [FUNCTION DOC] Starts the bridge: creates the trace's parent directory, an aiohttp
+        # ClientSession with MODEL_TIMEOUT_SEC total timeout, an aiohttp Application (8 MiB body
+        # limit) with the three routes, and binds a TCPSite on 127.0.0.1 port 0. Sets self.http,
+        # self.runner and self.url ("http://127.0.0.1:<port>"). Returns self.
         self.trace.parent.mkdir(parents=True, exist_ok=True)
         self.http = ClientSession(timeout=ClientTimeout(total=MODEL_TIMEOUT_SEC))
         app = web.Application(client_max_size=8 * 1024 * 1024)
@@ -67,6 +94,9 @@ class AgentBridge:
         return self
 
     def stop(self, *, cancel_models=False):
+        # [FUNCTION DOC] Marks the bridge closing so new requests get 503, and cancels in-flight
+        # tool tasks (and model tasks too when cancel_models=True, default False), never the current
+        # task. Returns None.
         """Reject new work and cancel tool effects before terminating the runtime."""
         self._closing = True
         tasks = self._tool_tasks | (self._model_tasks if cancel_models else set())
@@ -76,6 +106,10 @@ class AgentBridge:
                 task.cancel()
 
     async def __aexit__(self, exc_type, exc, tb):
+        # [FUNCTION DOC] Stops the bridge (cancelling model tasks only if exiting due to an
+        # exception), waits for all remaining tool/model tasks (exceptions swallowed) so late stream
+        # settlements are recorded, then cleans up the web runner and closes the HTTP client.
+        # Returns None (does not suppress exceptions).
         self.stop(cancel_models=exc_type is not None)
         try:
             # A runtime can exit as soon as it sees message_stop, before the
@@ -88,10 +122,15 @@ class AgentBridge:
                 await self.http.close()
 
     def ensure_open(self):
+        # [FUNCTION DOC] HELPER: Raises aiohttp HTTPServiceUnavailable (503) if stop() has been
+        # called; otherwise returns None.
         if self._closing:
             raise web.HTTPServiceUnavailable(text="Runtime bridge is stopping")
 
     def authenticate(self, request):
+        # [FUNCTION DOC] HELPER: Reads the token from the x-api-key header or from an
+        # "Authorization: Bearer" header and compares it to self.token in constant time. Raises
+        # HTTPUnauthorized (401) on mismatch.
         token = request.headers.get("x-api-key") or request.headers.get(
             "Authorization", ""
         ).removeprefix("Bearer ")
@@ -99,6 +138,9 @@ class AgentBridge:
             raise web.HTTPUnauthorized()
 
     def fail(self, exc):
+        # [FUNCTION DOC] Records the first fatal error: sets self.failure, sets the `failed` event
+        # and writes a "runtime_error" trace record (only once). Always then calls
+        # stop(cancel_models=True).
         if self.failure is None:
             self.failure = exc
             self.failed.set()
@@ -106,12 +148,25 @@ class AgentBridge:
         self.stop(cancel_models=True)
 
     async def models(self, request):
+        # [FUNCTION DOC] GET /v1/models handler. Authenticates and returns JSON listing exactly the
+        # configured model id (provider prefix stripped) with has_more False.
         self.authenticate(request)
         return web.json_response(
             {"data": [{"id": self.model.split("/", 1)[1], "type": "model"}], "has_more": False}
         )
 
     async def tool(self, request):
+        # [FUNCTION DOC] POST /tool handler. Authenticates, rejects if closing, registers itself as
+        # a tool task. Body JSON must have "name" (a registered handler) and dict "arguments", else
+        # 400. Before executing it waits (shielded) for all model requests that were in flight when
+        # the call arrived, so their cost is settled first; then, under the tool lock, runs the
+        # handler. In the artifact stage (a "submit_artifact" handler exists), "shell" calls are
+        # refused with an explanatory message when two or fewer model turns remain.
+        # ValueError/TypeError/KeyError from the handler become a "Tool input error" output; other
+        # exceptions call fail() and return HTTP 409 with {"error"}. Outputs longer than 24000 chars
+        # are truncated to first 8000 + last 16000 chars. In the artifact stage, shell outputs get a
+        # remaining-budget note appended. Records a "tool" trace entry and returns {"output": str}.
+        # Always unregisters the task.
         self.authenticate(request)
         self.ensure_open()
         preceding_models = tuple(self._model_tasks)
@@ -164,6 +219,11 @@ class AgentBridge:
             self._tool_tasks.discard(task)
 
     async def messages(self, request):
+        # [FUNCTION DOC] POST /v1/messages handler. Authenticates, rejects if closing, tracks the
+        # request as a model task and delegates to _messages. On cancellation calls fail() and re-
+        # raises; HTTP exceptions propagate; any other exception calls fail() and returns an
+        # Anthropic-style error JSON with status 429 for BudgetExceeded, otherwise 502. Always
+        # unregisters the task.
         self.authenticate(request)
         self.ensure_open()
         task = asyncio.current_task()
@@ -185,6 +245,23 @@ class AgentBridge:
             self._model_tasks.discard(task)
 
     async def _messages(self, request):
+        # [FUNCTION DOC] HELPER: Validates, meters and forwards one Anthropic Messages request.
+        # Checks the body's model equals the configured model and that all requested tools are in
+        # the allowlist (ValueError otherwise). Forces max_tokens=MAX_OUTPUT_TOKENS, strips thinking
+        # / temperature / top_p / top_k / output_config and applies anthropic_options; normalises
+        # cache_control to ephemeral. Looks up per-token prices via litellm.get_model_info
+        # (ValueError if missing). Ceiling = (body bytes + 4096) * input_rate * 1.25 + max_tokens *
+        # output_rate. Under the model lock: raises BudgetExceeded if the turn cap is reached or run
+        # spend + ceiling > max_cost, otherwise reserves the ceiling and increments turns. Logs a
+        # "model_request" trace record, then POSTs to https://api.anthropic.com/v1/messages with the
+        # real API key (env ANTHROPIC_API_KEY, KeyError if absent) and forwards any anthropic-beta
+        # header. Non-200: settles 0 for 4xx (5xx keeps the reservation) and raises RuntimeError.
+        # Non-streaming: computes usage_cost, settles, adds to self.cost, records, validates content
+        # and returns the JSON. Streaming: relays raw chunks to the client as text/event-stream
+        # while parsing "data:" SSE lines, reconstructs usage, content blocks and stop_reason; if no
+        # message_stop event or usage incomplete, records with cost None and raises (reservation
+        # retained). Otherwise settles, records, validates and writes EOF. Raises
+        # ProviderOutputError from validation after settlement.
         import litellm
 
         body = await request.json()
@@ -321,6 +398,9 @@ class AgentBridge:
 
 
 def validate_provider_response(content, stop_reason):
+    # [FUNCTION DOC] Raises ProviderOutputError if stop_reason is "max_tokens" or "length", or if no
+    # content block is either non-blank text or a tool_use. Inputs: content (list of dict blocks),
+    # stop_reason (str or None). Returns None.
     """A metered model turn needs usable text or a tool call, not just thinking."""
     if stop_reason in {"max_tokens", "length"}:
         raise ProviderOutputError(f"Provider response truncated: stop_reason={stop_reason}")
@@ -335,6 +415,9 @@ def validate_provider_response(content, stop_reason):
 
 
 def normalize_cache(value):
+    # [FUNCTION DOC] Recursively walks dicts/lists in place, replacing every dict-valued
+    # "cache_control" with {"type": "ephemeral"} (5-minute cache, dropping e.g. ttl). Mutates input;
+    # returns None.
     """Use the same five-minute cache pricing ceiling as the LangGraph baseline."""
     if isinstance(value, dict):
         if isinstance(value.get("cache_control"), dict):
@@ -347,6 +430,11 @@ def normalize_cache(value):
 
 
 def usage_cost(usage, input_rate, output_rate):
+    # [FUNCTION DOC] Computes USD cost of an Anthropic usage dict. Requires input_tokens and
+    # output_tokens (ValueError otherwise). Cache writes: 1h tokens at 2x input rate, 5m tokens at
+    # 1.25x (from cache_creation.ephemeral_5m_input_tokens, defaulting to
+    # cache_creation_input_tokens minus 1h tokens); cache reads at 0.1x. Returns (input + weighted
+    # cache tokens) * input_rate + output_tokens * output_rate as float.
     if "input_tokens" not in usage or "output_tokens" not in usage:
         raise ValueError("Provider returned incomplete usage; retain reservation")
     cache = usage.get("cache_creation", {})

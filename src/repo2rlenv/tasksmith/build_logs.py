@@ -1,3 +1,6 @@
+# [MODULE DOC] Private, bounded retention of image-build logs (including failed and timed-out
+# builds): redacts credentials, caps each stream at MAX_STREAM_BYTES (4 MiB), and builds short
+# excerpts that keep causal error lines.
 """Private, bounded image-build diagnostics, including failed and timed-out builds."""
 
 from __future__ import annotations
@@ -16,6 +19,10 @@ _ERROR_LINE = re.compile(
 
 
 def build_excerpt(text: str, limit: int = 6000) -> str:
+    # [FUNCTION DOC] Returns text unchanged if within limit (default 6000 chars); otherwise returns
+    # the first limit//6 chars, up to 8 error-looking lines (Traceback / *Error: / *Exception: /
+    # ERROR: / error: / fatal:, after stripping Docker "#N time" prefixes; each truncated to
+    # limit//16 chars) and the last limit//6 chars, separated by omission markers. Pure.
     """Keep causal lines even when Docker repeats a large inline RUN after them."""
     if len(text) <= limit:
         return text
@@ -36,6 +43,11 @@ def build_excerpt(text: str, limit: int = 6000) -> str:
 
 
 def redact_build_text(value: str | bytes | None) -> str:
+    # [FUNCTION DOC] Converts value (str, bytes decoded with replacement, or None -> "") to text and
+    # redacts: values (>= 8 chars) of environment variables whose names contain KEY / TOKEN / SECRET
+    # / PASSWORD / CREDENTIAL (longest first), URL userinfo credentials, and Authorization
+    # bearer/basic tokens, each replaced with [REDACTED]. Returns the redacted str. Reads
+    # os.environ.
     """Remove known credentials before retaining or surfacing build diagnostics."""
     text = value.decode(errors="replace") if isinstance(value, bytes) else (value or "")
     # Workers receive no model credentials. Still avoid retaining credentials
@@ -52,6 +64,11 @@ def redact_build_text(value: str | bytes | None) -> str:
 
 
 def save_build_logs(prefix: Path, stdout: str | bytes | None, stderr: str | bytes | None) -> str:
+    # [FUNCTION DOC] For stdout and stderr: redacts, writes <prefix>.stdout / <prefix>.stderr (if
+    # over MAX_STREAM_BYTES keeps head and tail halves around a marker containing the excerpt), and
+    # writes <prefix>.logs.json with per-stream path name, redacted and retained byte counts,
+    # complete flag and sha256. Returns the joined "<name> (<file>): <excerpt>" summaries for non-
+    # empty streams. Side effects: filesystem writes.
     """Save complete redacted streams up to the cap, explicitly mark larger logs."""
     records = {}
     summaries = []

@@ -1,3 +1,7 @@
+# [MODULE DOC] Primary-language detection for bootstrap. Detects from top-level marker files
+# (_MARKERS, checked in priority order Rust, Go, Node, Python, Java, C/C++ so more specific markers
+# win), maps a language to a default base Docker image, and translates GitHub Linguist language
+# names (_GITHUB_LANGUAGE_MAP, case-insensitive) to LanguageHint.
 """Auto-detect a repo's primary language from its files.
 
 We don't try to be exhaustive — just enough to pick a sensible base image
@@ -22,6 +26,9 @@ _MARKERS: list[tuple[LanguageHint, tuple[str, ...]]] = [
 
 
 def detect_language(repo_root: Path) -> LanguageHint:
+    # [FUNCTION DOC] Returns the LanguageHint for the first _MARKERS entry whose marker file name
+    # exists among the regular files directly in repo_root (non-recursive). Returns UNKNOWN when the
+    # directory does not exist or nothing matches. Side effects: directory listing.
     """Return the inferred primary language. UNKNOWN if no markers match."""
     if not repo_root.exists():
         return LanguageHint.UNKNOWN
@@ -33,6 +40,9 @@ def detect_language(repo_root: Path) -> LanguageHint:
 
 
 def base_image_for(lang: LanguageHint) -> str:
+    # [FUNCTION DOC] Maps a LanguageHint to its default base image: python:3.12-slim, node:22-slim,
+    # golang:1.23, rust:1-slim, eclipse-temurin:21-jdk, ubuntu:24.04 for C/C++ and UNKNOWN. Raises
+    # KeyError for a value outside the enum.
     """Pick a sensible base image per language."""
     return {
         LanguageHint.PYTHON: "python:3.12-slim",
@@ -67,6 +77,9 @@ _GITHUB_LANGUAGE_MAP: dict[str, LanguageHint] = {
 
 
 def language_from_github_name(name: str | None) -> LanguageHint:
+    # [FUNCTION DOC] Translates a GitHub Linguist language name (whitespace-trimmed, lower-cased) to
+    # LanguageHint via _GITHUB_LANGUAGE_MAP. None, empty or unmapped names yield UNKNOWN so callers
+    # can fall back to file-based detection.
     """Translate a GitHub Linguist language name to a LanguageHint.
 
     Returns `LanguageHint.UNKNOWN` for null / unrecognized inputs so callers

@@ -1,3 +1,9 @@
+# [MODULE DOC] Shared two-stage PR validation harness used by pr_runtime and cve_patches (and reused
+# by other runtime pipelines). Given a DockerSandbox holding the bootstrapped repo at /workspace, it
+# fetches the PR base commit, runs the recorded test commands once with only the test patch applied
+# (pre-fix) and once with gold patch plus test patch (post-fix), parses per-test statuses via
+# log_parsers.parse_logs, and derives FAIL_TO_PASS / PASS_TO_PASS sets. Logs through the module
+# logger; all side effects happen inside the sandbox via exec.
 """Validate a candidate PR inside the bootstrap container.
 
 Computes the FAIL_TO_PASS + PASS_TO_PASS sets that SWE-bench-style oracles
@@ -28,6 +34,12 @@ logger = logging.getLogger(__name__)
 
 @dataclass(slots=True)
 class ValidationOutcome:
+    # [CLASS DOC] Slotted dataclass returned by validate_pr. Fields: status (str; code only ever
+    # produces "verified" or "failed"), fail_to_pass / pass_to_pass (lists of test ids, sorted when
+    # verified), pre_log / post_log (raw, up to 5M chars, test output of each stage), reason (human
+    # readable failure reason, empty on success).
+    # KNOWN ISSUE: the inline comment lists "partial" and "skipped" statuses, but nothing in this
+    # module ever produces them.
     status: str  # verified | partial | failed | skipped
     fail_to_pass: list[str] = field(default_factory=list)
     pass_to_pass: list[str] = field(default_factory=list)
@@ -40,6 +52,9 @@ _HEREDOC = "EOF_R2E_VALIDATE"
 
 
 def _heredoc_apply(patch: str) -> str:
+    # [FUNCTION DOC] HELPER: Returns a shell snippet that pipes the given patch text into "git apply
+    # --verbose --reject -" via a quoted heredoc delimited by EOF_R2E_VALIDATE. Input: patch (str).
+    # Output: str. No side effects. A patch containing the delimiter line would break the heredoc.
     return f"git apply --verbose --reject - <<'{_HEREDOC}'\n{patch}\n{_HEREDOC}"
 
 
@@ -50,6 +65,16 @@ def _build_stage_script(
     apply_test_patch: str | None,
     test_cmds: list[str],
 ) -> str:
+    # [FUNCTION DOC] HELPER: Builds the bash script for one validation stage. Steps: enable "set
+    # -uxo pipefail", cd /workspace, mark it safe.directory, hard-reset to base_commit, git clean
+    # -fdx while excluding common dependency/build dirs (.venv, venv, __pycache__, .tox,
+    # node_modules, target, vendor, .gradle, .next, .pytest_cache; failure tolerated), then apply
+    # apply_patch and apply_test_patch (each skipped when None/blank) via heredoc git apply, then
+    # echo the start marker R2E_START_TEST_OUTPUT to stdout, disable tracing, run test_cmds joined
+    # with "&&" inside a brace group whose stderr is merged into stdout (or echo 'no test_cmds' when
+    # empty), re-enable tracing, and echo R2E_END_TEST_OUTPUT. Inputs: base_commit (sha), keyword
+    # apply_patch, apply_test_patch, test_cmds. Output: newline-joined script string. Assumes
+    # base_commit is already present.
     """Build the shell script for one validation stage (pre-fix or post-fix).
 
     Always resets to base_commit first, then applies whichever patches the
@@ -113,6 +138,12 @@ _GIT_DEFENSIVE_INSTALL = (
 
 
 def _ensure_git(sandbox: DockerSandbox) -> bool:
+    # [FUNCTION DOC] HELPER: Makes sure git exists in the sandbox. Checks "command -v git"; if
+    # absent runs a defensive install (apt-get git + ca-certificates, else apk add + update-ca-
+    # certificates, all errors swallowed, 120s timeout) and re-checks, returning False if still
+    # missing. Then marks /workspace as a git safe.directory (global git config inside the
+    # container). Input: sandbox (DockerSandbox). Output: bool (git available). Side effects:
+    # package installs and git config in the container.
     """Install git in the sandbox if missing + mark the repo as safe.directory.
 
     Idempotent — no-op when git is already on PATH. Returns True if git is
@@ -132,6 +163,14 @@ def _ensure_git(sandbox: DockerSandbox) -> bool:
 
 
 def _fetch_base_commit(sandbox: DockerSandbox, base_commit: str, *, timeout: int = 120) -> bool:
+    # [FUNCTION DOC] HELPER: Ensures base_commit is present in /workspace's object database
+    # (bootstrap images are depth-1 clones). Calls _ensure_git (warns and returns False if git
+    # cannot be installed); fast path returns True if "git cat-file -e" finds the commit; otherwise
+    # tries "git fetch --depth 1 origin <sha>" with the given timeout and returns True on success;
+    # on failure logs a warning and falls back to "git fetch --unshallow" (or depth 1000) with
+    # double timeout, returning False if that fails, else the result of a final cat-file existence
+    # check. Inputs: sandbox, base_commit (sha), keyword timeout (int seconds, default 120). Output:
+    # bool. Side effects: network fetches inside the container, logging.
     """Make `base_commit` available in the container's git object db.
 
     Bootstrap shallow-clones at depth=1, so only the bootstrap-time HEAD is
@@ -187,6 +226,11 @@ def _fetch_base_commit(sandbox: DockerSandbox, base_commit: str, *, timeout: int
 
 
 def _slice_test_output(output: str) -> str:
+    # [FUNCTION DOC] HELPER: Extracts the test-runner section of a stage's combined output: finds
+    # the first R2E_START_TEST_OUTPUT and R2E_END_TEST_OUTPUT occurrences; returns the whole output
+    # unchanged when the start marker is absent, otherwise the text between the markers (or to the
+    # end when the end marker is missing/before start) with the marker line itself removed. Input:
+    # output (str). Output: str. No side effects.
     """Trim to just the test-runner section between the START/END markers.
 
     The markers are echoed to stdout (see `_build_stage_script`); since
@@ -213,6 +257,21 @@ def validate_pr(
     language: str | None = None,
     timeout: int = 600,
 ) -> ValidationOutcome:
+    # [FUNCTION DOC] Runs the full two-stage validation for one PR in a (possibly shared) sandbox.
+    # Keyword inputs: sandbox (DockerSandbox), base_commit (sha), patch (gold source diff),
+    # test_patch (test diff), test_cmds (bootstrap-recorded commands), language (optional
+    # LanguageHint value used by the log parser as fallback), timeout (seconds per stage, default
+    # 600). Behavior: returns status "failed" immediately if test_cmds is empty or base_commit
+    # cannot be fetched. Pre stage applies only test_patch, runs tests, keeps up to 5,000,000 chars
+    # of output and parses statuses from the sliced test section; if the output contains "error:
+    # patch failed" or "patch does not apply" (case-insensitive) it fails with reason test_patch
+    # failed to apply. Post stage applies patch and test_patch and does the same (failure reason:
+    # gold patch failed to apply). F2P = tests whose pre status is FAILED or ERROR and post status
+    # PASSED; P2P = PASSED in both. Logs counts. Returns "failed" (reason no fail-to-pass tests)
+    # when F2P is empty, otherwise "verified" with sorted F2P/P2P and both logs. Output:
+    # ValidationOutcome. Exceptions from sandbox.exec propagate. Side effects: executes git and test
+    # commands in the container, logging. Note: the patch-failure check scans the whole log, so test
+    # output that happens to contain those phrases would be misread as an apply failure.
     """Run the two-stage validation and return the resulting outcome.
 
     Re-uses a shared sandbox across PRs; the `git reset --hard` at the top of

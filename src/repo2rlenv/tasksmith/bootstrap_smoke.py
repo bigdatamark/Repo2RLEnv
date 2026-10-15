@@ -1,3 +1,6 @@
+# [MODULE DOC] Tiny real smoke operations for the supported Hugging Face repositories, executed only
+# inside remote CPU/GPU sandboxes built by bootstrap_matrix. Run as a script with <repository>
+# <resource>; prints the check() result as JSON.
 """Small real HF operations, executed only in remote CPU/GPU sandboxes."""
 
 from __future__ import annotations
@@ -10,6 +13,16 @@ from pathlib import Path
 
 
 def check(repository: str, resource: str) -> dict:
+    # [FUNCTION DOC] Imports the repository's package, verifies it was imported from /workspace (the
+    # pinned checkout), then performs a small deterministic operation with torch (seed 0, 2
+    # threads): transformers tiny BERT forward/backward; accelerate device placement + SGD step; trl
+    # selective_log_softmax/entropy numerics with autograd; diffusers tiny UNet + DDPM step; peft
+    # LoRA gradients and merge; tokenizers WordLevel encode/decode/serialize. For GPU additionally
+    # asserts CUDA availability and runs a matmul on cuda. Inputs: repository name, resource
+    # "cpu"/"gpu". Returns dict with repository, resource, module_origin, repository_version, checks
+    # list, torch and cuda versions, gpu name (GPU only) and repository_uses_gpu. Raises
+    # RuntimeError unless env REPO2RLENV_REMOTE_WORKER=1 or if imported outside /workspace;
+    # ValueError for unsupported repository/resource; AssertionError on failed checks.
     if os.environ.get("REPO2RLENV_REMOTE_WORKER") != "1":
         raise RuntimeError("HF repository smoke checks execute remotely only")
     if resource not in {"cpu", "gpu"}:

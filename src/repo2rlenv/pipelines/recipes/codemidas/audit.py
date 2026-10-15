@@ -1,3 +1,9 @@
+# [MODULE DOC] Paper-style blind audit of an exported CodeMidas task plus separate curriculum
+# screening. Runs one adversarial ("exploit") Harbor attempt and four independent solver attempts on
+# a remote worker, indexes the resulting evidence, has an LLM reviewer (with read-only evidence
+# tools) judge each attempt and the task's soundness, validates the judgments against recorded
+# rewards, optionally runs N screening attempts to classify difficulty (all_pass / all_fail /
+# mixed), and writes a result receipt plus a retained labeled copy of the task.
 """Paper-style blind audit and separate mixed-outcome curriculum screening."""
 
 from __future__ import annotations
@@ -34,6 +40,9 @@ from repo2rlenv.tasksmith.author.budget import AuthorBudget
 
 
 class Judgment(Artifact):
+    # [CLASS DOC] Reviewer judgment of one attempt: trial id, outcome (legitimate_success,
+    # legitimate_failure, false_positive, false_negative, infrastructure, uncertain), explanation
+    # (30-2500 chars) and evidence citations (at least one, "path" or "path:first[-last]").
     trial: str
     outcome: Literal[
         "legitimate_success",
@@ -48,6 +57,9 @@ class Judgment(Artifact):
 
 
 class AuditReview(Artifact):
+    # [CLASS DOC] Reviewer verdict: sound (task method soundness), solver_sound (defaults to sound
+    # when omitted), exploit_confirmed, exploit_explanation (30-3000), exactly four judgments, and
+    # issues.
     sound: bool
     solver_sound: bool | None = None
     exploit_confirmed: bool
@@ -57,6 +69,10 @@ class AuditReview(Artifact):
 
     @model_validator(mode="after")
     def claims(self):
+        # [FUNCTION DOC] After-validator: fills solver_sound from sound when None; requires the
+        # judgments to cover exactly solve-0..solve-3; a sound review must have solver_sound, no
+        # confirmed exploit, no issues and only legitimate outcomes; solver_sound requires only
+        # legitimate outcomes. Raises ValueError otherwise; returns self (mutated).
         if self.solver_sound is None:
             self.solver_sound = self.sound
         if {item.trial for item in self.judgments} != {f"solve-{i}" for i in range(4)}:
@@ -80,6 +96,9 @@ class AuditReview(Artifact):
 
 
 def curriculum(rewards: list[float | None]) -> str:
+    # [FUNCTION DOC] Classifies screening rewards: "incomplete" if empty or any value is a bool or
+    # not 0/1 (e.g. None), "all_pass" if all 1, "all_fail" if all 0, else "mixed". Input: list of
+    # float|None. Output: str.
     if not rewards or any(isinstance(value, bool) or value not in {0, 1} for value in rewards):
         return "incomplete"
     if all(value == 1 for value in rewards):
@@ -90,6 +109,14 @@ def curriculum(rewards: list[float | None]) -> str:
 
 
 def validate_review(review: AuditReview, index: dict, summaries: list[dict]):
+    # [FUNCTION DOC] Cross-checks a review against evidence. Inputs: review (AuditReview), index
+    # (evidence path -> record with "path"), summaries (attempt dicts with trial, reward,
+    # exception). Raises ValueError if: the review claims soundness or a confirmed exploit while the
+    # exploit attempt has an exception; a judgment cites no evidence under attempts/<its trial>/; a
+    # success/failure/false-positive/negative outcome contradicts the attempt's reward (1,0,1,0) or
+    # the attempt had an exception; a citation path is not in the index; or cited line bounds are
+    # outside 1..file length or reversed. Raises KeyError if the exploit summary or a judged trial
+    # is missing. Output: None.
     """Reject invented evidence paths and judgments that contradict rewards."""
     attempts = {item["trial"]: item for item in summaries}
     if review.sound and attempts["exploit"]["exception"] is not None:
@@ -123,10 +150,21 @@ def validate_review(review: AuditReview, index: dict, summaries: list[dict]):
 
 
 def evidence_index(task: Path, directory: Path) -> dict:
+    # [FUNCTION DOC] Builds the reviewer-addressable evidence index. Inputs: task (bundle dir),
+    # directory (audit dir). Adds key task/<rel> for a fixed set of task files (instruction,
+    # task.toml, Dockerfiles, grader, driver, contract, generated test) and anything under
+    # solution/. For each attempt dir (exploit, solve-0..3), adds artifacts/workspace files that
+    # differ from (or are absent in) the task's environment/source, with SequenceMatcher changed
+    # line ranges when the original exists, plus the original under task/; also adds result.json,
+    # trial.json, manifest.json, trace.jsonl, conclusion.txt and .txt/.json files under a verifier
+    # dir. Skips symlinks, non-files and files over 2,000,000 bytes. Each record has resolved path,
+    # sha256 and byte size. Output: dict key -> record.
     """Keep every changed submission, without repeating entire unchanged repos."""
     index = {}
 
     def add(prefix, root, path):
+        # [FUNCTION DOC] HELPER: Adds one file under key prefix + "/" + path relative to root,
+        # unless it is a symlink, not a file or larger than 2MB. Mutates the enclosing index.
         if path.is_symlink() or not path.is_file() or path.stat().st_size > 2_000_000:
             return
         key = prefix + "/" + path.relative_to(root).as_posix()
@@ -194,6 +232,11 @@ def evidence_index(task: Path, directory: Path) -> dict:
 
 
 def control_evidence(directory: Path, identity: str) -> list[dict]:
+    # [FUNCTION DOC] Validates the Harbor control trials for a bundle. Inputs: directory (controls
+    # dir with nop-0..1 and oracle-0..3 subdirs, each holding trial.json), identity (bundle hash).
+    # For each, the receipt must be completed, match the bundle hash, its result file's sha256 must
+    # match result_sha256, the trial completed, and the reward equal 0 (nop) or 1 (oracle);
+    # otherwise ValueError. Output: list of {agent, result path, sha256, reward}.
     result = []
     for agent, count, expected in (("nop", 2, 0), ("oracle", 4, 1)):
         for index in range(count):
@@ -221,6 +264,12 @@ def control_evidence(directory: Path, identity: str) -> list[dict]:
 
 
 def completed_attempt(output: Path, *, identity: str, model: str, mode: str, worker, ledger):
+    # [FUNCTION DOC] Reuses a prior solver attempt on resume. Inputs: output (attempt dir), keyword
+    # identity, model, mode, worker, ledger. Requires trial.json to match the bundle hash, agent
+    # "responses", model "openai/<model>", agent_mode, max_turns 18, max_tokens 4096 and timeout 900
+    # (ValueError otherwise). If not completed, calls recover_trial and reloads the receipt.
+    # Verifies the result file hash (ValueError if changed). Output: trial read via read_trial. No
+    # new dispatch or cost.
     """Reuse a completed, bound attempt when only the controller review changes.
 
     Its original runtime remains in the receipt. No new solver is dispatched and
@@ -262,6 +311,24 @@ def audit_task(
     max_cost: str = "6",
     resume: bool = False,
 ):
+    # [FUNCTION DOC] Runs the full audit. Keyword inputs: task, controls, directory (audit output
+    # dir), campaign (campaign dir with budget.sqlite3), worker_receipt, wheel (runtime wheel),
+    # screen_attempts (2-16, default 4), attempt_concurrency (int 1-4, default 2), audit_model
+    # (default "gpt-6-luna", for solver attempts), screen_model (default "gpt-6-sol", for exploit,
+    # review and screening), max_cost (USD string for trials, default "6"), resume (default False).
+    # Raises ValueError for bad ranges, invalid controls, or a worker not running on this campaign's
+    # ledger. Connects/prepares the worker and installs the runtime; derives a stable prefix from
+    # the bundle hash and directory. Runs the exploit attempt first, then the four solver attempts
+    # in a thread pool; indexes evidence; runs the LLM review (artifact_stage, $1.25 max, 20 turns,
+    # 1200s) with read_evidence tools and validate_review as validator, then re-validates. If
+    # solver_sound, runs screen_attempts screening attempts in parallel. Builds the result dict
+    # (bundle_hash, method_sound, solver_review_sound, adversarial_status
+    # blocked/completed/incomplete, review, audit trials and retries, screen rewards and trials,
+    # curriculum, curriculum_selected = sound and mixed, controls, ...), saves it to
+    # results/<hash16>.json, retains a labeled task copy under retained/<rev>/<task name>, and
+    # writes result.json. Output: result dict. Side effects: remote Harbor trials, LLM spend through
+    # the budget ledger, file writes, a campaign-level policy-block file when the provider refuses
+    # the exploit stage.
     if not 2 <= screen_attempts <= 16:
         raise ValueError("Use 2-16 independent curriculum attempts")
     if type(attempt_concurrency) is not int or not 1 <= attempt_concurrency <= 4:
@@ -283,6 +350,13 @@ def audit_task(
     policy_block = campaign / "codemidas-adversarial-policy-block.json"
 
     def attempt(kind, model, mode="solve"):
+        # [FUNCTION DOC] HELPER: Runs or resumes one Harbor "responses" agent attempt named kind
+        # with the given model and mode (default "solve"). On resume with an existing receipt:
+        # abandons undispatched trials; if the state is not_dispatched, dispatches one replacement
+        # under kind/dispatch-1 (ValueError if that also needs it) and records
+        # dispatch-recovery.json; otherwise reuses via completed_attempt. Else calls run_trial with
+        # 18 turns, 4096 tokens, 900s timeout and reservation $1.25 for gpt-6-sol or $0.20
+        # otherwise. Output: trial evidence.
         output = directory / kind
         if resume and (output / "trial.json").exists():
             receipt = json.loads((output / "trial.json").read_text())
@@ -323,6 +397,13 @@ def audit_task(
         )
 
     def audit_attempt(pair):
+        # [FUNCTION DOC] HELPER: Runs one audit attempt from a (kind, model) pair. For "exploit"
+        # when the campaign policy-block file exists (and no prior receipt on resume), returns a
+        # blocked summary without running. Otherwise runs attempt (mode exploit or solve); if the
+        # exploit attempt hit BadRequestError mentioning cyber_policy or ProviderRefusalError,
+        # writes the policy block file. On ProviderOutputError (unless the exploit stage is blocked)
+        # retries once under kind/retry-1 and records the retry. Output: (summary dict {trial,
+        # reward, exception, result relative path, provider_policy_blocked}, retry record or None).
         kind, model = pair
         if (
             kind == "exploit"
@@ -390,6 +471,10 @@ def audit_task(
     index = evidence_index(task, directory)
 
     async def read_evidence(path: str, first_line: int = 1, lines: int = 150):
+        # [FUNCTION DOC] HELPER (async LLM tool): Returns up to `lines` (1-400, default 150)
+        # numbered lines starting at first_line (>= 1, default 1) from an indexed evidence path,
+        # capped at 24000 chars. Returns an instruction string on invalid arguments. Raises
+        # RuntimeError if the file's sha256 changed since indexing.
         if (
             not isinstance(path, str)
             or path not in index
@@ -411,6 +496,10 @@ def audit_task(
         )[:24000]
 
     async def read_evidence_batch(requests: list[dict]):
+        # [FUNCTION DOC] HELPER (async LLM tool): Reads 1-4 evidence windows (dicts with path and
+        # optional first_line/lines) via read_evidence, truncating each to 21000 / count chars with
+        # a truncation note, and joins them as "path\ncontent" blocks. Returns an instruction string
+        # for malformed requests.
         if not isinstance(requests, list) or not 1 <= len(requests) <= 4:
             return "Read one to four evidence windows per call."
         result = []
@@ -430,6 +519,11 @@ def audit_task(
         return "\n\n".join(result)
 
     async def review():
+        # [FUNCTION DOC] HELPER (async): Assembles reviewer inputs (task name, bundle hash,
+        # controls, attempt summaries, instruction, private tests, evidence index without local
+        # paths), loads audit.md as the system prompt, derives a review key from their hash, and
+        # runs artifact_stage with schema AuditReview, model openai/<screen_model>, its own $1.25
+        # RunBudget, the two evidence tools and the check validator. Output: AuditReview.
         inputs = {
             "task": task.name,
             "bundle_hash": identity,
@@ -449,6 +543,8 @@ def audit_task(
         root = directory / "reviews" / review_key
 
         async def check(value):
+            # [FUNCTION DOC] HELPER (async): Validator passed to artifact_stage; runs
+            # validate_review on a candidate review (raising ValueError to request a revision).
             validate_review(value, index, summaries)
 
         return await artifact_stage(
@@ -527,6 +623,9 @@ def audit_task(
     if reviewed.solver_sound:
 
         def screen(index):
+            # [FUNCTION DOC] HELPER: Runs screening attempt screen-<index> with screen_model,
+            # retrying once (screen-<index>-retry-1) only when the attempt did not complete with
+            # ProviderOutputError. Output: (reward if completed else None, list of attempt records).
             records = []
             for retry in range(2):
                 kind = f"screen-{index}" + ("-retry-1" if retry else "")

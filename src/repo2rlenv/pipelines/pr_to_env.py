@@ -1,3 +1,10 @@
+# [MODULE DOC] Implements the pr_to_env pipeline (owned SWE-gen recipe, RFC 0015): turns a caller-
+# supplied list of GitHub PR URLs into Harbor tasks. For each PR it fetches source metadata, runs
+# the swe_gen worker remotely to bootstrap and reverse the PR's source changes (producing a
+# defective snapshot plus contrast evidence), has an LLM write the task instruction, exports a draft
+# repository task, gates it with fresh Harbor nop/oracle trials (rewards must be 0 and 1), and
+# exports the accepted task to the output directory. Progress and per-PR outcomes are persisted in a
+# resumable run receipt under the campaign directory.
 """Caller-supplied PRs to Harbor tasks through the owned SWE-gen recipe."""
 
 from __future__ import annotations
@@ -28,6 +35,11 @@ from repo2rlenv.spec.recipe_options import PRRecipeOptions
 
 
 class PRToEnvPipeline:
+    # [CLASS DOC] Pipeline class registered as PipelineName.PR_TO_ENV. Class attributes:
+    # requires_bootstrap False (bootstrap happens inside the remote worker), supported_languages
+    # only Python, experimental True, native_supported False (only usable via the swe_gen recipe).
+    # Instance attributes: input (GenerationInput), options (PRRecipeOptions), on_event (progress
+    # callback, default no-op).
     name = PipelineName.PR_TO_ENV
     requires_bootstrap = False
     supported_languages = frozenset({LanguageHint.PYTHON})
@@ -35,6 +47,10 @@ class PRToEnvPipeline:
     native_supported = False
 
     def __init__(self, input: GenerationInput, options: PRRecipeOptions, bootstrap=None):
+        # [FUNCTION DOC] Validates and stores configuration. Inputs: input (GenerationInput; must
+        # have pipeline.recipe == "swe_gen", a PRSource source, an execution spec and an llm spec),
+        # options (PRRecipeOptions), bootstrap (ignored; accepted for constructor compatibility).
+        # Raises ValueError when any requirement is not met. Sets on_event to a no-op.
         if input.pipeline.recipe != "swe_gen" or not isinstance(input.source, PRSource):
             raise ValueError("pr_to_env requires explicit PR URLs and --recipe swe_gen")
         if input.execution is None or input.llm is None:
@@ -43,9 +59,33 @@ class PRToEnvPipeline:
         self.on_event = lambda event: None
 
     def set_event_callback(self, callback) -> None:
+        # [FUNCTION DOC] Replaces the progress callback (called with ProgressEvent objects). Input:
+        # callback (callable). Output: None.
         self.on_event = callback
 
     def run(self, out_dir: Path) -> PipelineResult:
+        # [FUNCTION DOC] Runs (or resumes) the recipe and returns a PipelineResult. Input: out_dir
+        # (Path where accepted tasks are exported). Steps: computes the run directory
+        # campaign_dir/runs/run_id and receipt run.json; fingerprints the input settings (minus the
+        # execution.resume flag) together with the runtime wheel digest (check_runtime_wheel). If
+        # the receipt exists, requires resume=True and an identical fingerprint (else ValueError);
+        # otherwise creates it with state "running". Re-checks every already-exported task's bundle
+        # hash (ValueError if changed) and returns immediately if state is "completed". Loads the
+        # budget ledger and worker receipt, requiring a running worker bound to this campaign's
+        # ledger (ValueError), connects to the worker, prepares Docker, installs the runtime wheel,
+        # and computes a deadline as the earlier of worker start + worker timeout and now +
+        # execution timeout. Per URL (up to options.max_candidates, stopping once options.target
+        # tasks exist, skipping URLs already recorded): raises TimeoutError if fewer than 900s
+        # remain; fetches (or reloads cached) source.json via fetch_source, recording skip
+        # "unsupported_source" on ValueError/GitHubError; runs the swe_gen worker module via
+        # run_generator (skip "bootstrap_or_contrast" when it returns None); writes the instruction
+        # via write_instruction (skip "substantiality" when not substantial); exports a draft task,
+        # runs nop and oracle Harbor trials and skips "harbor_packaging" unless both completed with
+        # rewards [0, 1]; finally exports to out_dir and records path, bundle info and trial result
+        # paths. The receipt is saved after each change and set to "completed" at the end. Output:
+        # PipelineResult(candidates = emitted + skipped, emitted, skipped, skip_reasons, out_dir).
+        # Side effects: filesystem writes under the campaign and out_dir, remote worker execution,
+        # LLM spend via the ledger, progress events.
         execution = self.input.execution
         run = execution.campaign_dir / "runs" / execution.run_id
         receipt = run / "run.json"
@@ -71,6 +111,8 @@ class PRToEnvPipeline:
             save_record(receipt, record)
 
         def result():
+            # [FUNCTION DOC] HELPER: Builds the PipelineResult from the current receipt record,
+            # counting skip reasons from record["skipped"]. No inputs; output PipelineResult.
             skipped = Counter(record["skipped"].values())
             return PipelineResult(
                 candidates=len(record["tasks"]) + sum(skipped.values()),
@@ -104,6 +146,9 @@ class PRToEnvPipeline:
         prefix = hashlib.sha256(execution.run_id.encode()).hexdigest()[:10]
 
         def event(stage, state, message):
+            # [FUNCTION DOC] HELPER: Emits a ProgressEvent via self.on_event for this recipe with
+            # the given stage, state and message, and metrics exported = number of recorded tasks,
+            # accepted = 0. Output: None.
             self.on_event(
                 ProgressEvent(
                     recipe=recipe.id,

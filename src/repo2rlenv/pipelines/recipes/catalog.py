@@ -1,3 +1,7 @@
+# [MODULE DOC] Dependency-free recipe catalog. Loads recipe metadata from the packaged catalog.json
+# and maps implemented recipe ids to lazily imported pipeline classes via the IMPLEMENTATIONS dict
+# ("module.path:ClassName" strings). Being catalogued does not mean a recipe is runnable; only ids
+# present in IMPLEMENTATIONS are implemented.
 """Dependency-free discovery of recipe scope; catalogued does not mean runnable."""
 
 from __future__ import annotations
@@ -11,6 +15,10 @@ from pydantic import BaseModel, ConfigDict
 
 
 class RecipeInfo(BaseModel):
+    # [CLASS DOC] Frozen Pydantic model (extra fields forbidden) for one catalog entry: id, title,
+    # pipeline (PipelineName value it belongs to), source_kinds (accepted input source kinds),
+    # summary, upstream (provenance dict, e.g. repository/paper/commit/version), rfc, target
+    # (default task count), recipe_version (default "1").
     model_config = ConfigDict(extra="forbid", frozen=True)
     id: str
     title: str
@@ -47,6 +55,10 @@ IMPLEMENTATIONS: dict[str, str] = {
 
 @lru_cache(maxsize=1)
 def recipes() -> tuple[RecipeInfo, ...]:
+    # [FUNCTION DOC] Loads and validates all catalog entries once (lru_cache, maxsize 1). Reads
+    # catalog.json from this package's resources and validates each record as RecipeInfo. Output:
+    # tuple of RecipeInfo. Raises ValueError on duplicate ids, Pydantic ValidationError on bad
+    # records, json/IO errors if the resource is missing or malformed.
     data = json.loads(files(__package__).joinpath("catalog.json").read_text())
     result = tuple(RecipeInfo.model_validate(record) for record in data)
     if len({record.id for record in result}) != len(result):
@@ -55,6 +67,8 @@ def recipes() -> tuple[RecipeInfo, ...]:
 
 
 def get_recipe(recipe_id: str) -> RecipeInfo:
+    # [FUNCTION DOC] Looks up a recipe by id. Input: recipe_id (str). Output: RecipeInfo. Raises
+    # ValueError for unknown ids (message points to 'repo2rlenv pipelines list').
     for recipe in recipes():
         if recipe.id == recipe_id:
             return recipe
@@ -62,6 +76,9 @@ def get_recipe(recipe_id: str) -> RecipeInfo:
 
 
 def describe(recipe: RecipeInfo) -> dict[str, Any]:
+    # [FUNCTION DOC] Returns a recipe as a plain dict: all model fields plus "status"
+    # ("experimental" if the id is in IMPLEMENTATIONS else "planned") and "implemented" (bool).
+    # Input: RecipeInfo.
     return {
         **recipe.model_dump(),
         "status": "experimental" if recipe.id in IMPLEMENTATIONS else "planned",

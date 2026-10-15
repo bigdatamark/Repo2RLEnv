@@ -1,3 +1,10 @@
+# [MODULE DOC] ReAct-style bootstrap agent. The LLM replies in a "Thought / Action / Input" text
+# format which is parsed leniently (_ACTION_RE stops the input at the next
+# Action/Thought/Observation header; trailing tool-call XML tags in _TOOL_CALL_TAGS are stripped).
+# Tools are BASH, READ_FILE and LIST_DIR, executed in a DockerSandbox; SAVE_SETUP (JSON with
+# rebuild_cmds/test_cmds/summary) ends in success and GIVE_UP ends in failure. run_agent_loop
+# enforces iteration, wall-clock and LLM spend budgets and accumulates cost from llm.complete
+# responses. Logs per-step info via the module logger.
 """ReAct-style bootstrap agent loop. Original implementation, not from RepoLaunch."""
 
 from __future__ import annotations
@@ -24,6 +31,9 @@ ActionName = Literal["BASH", "READ_FILE", "LIST_DIR", "SAVE_SETUP", "GIVE_UP", "
 
 @dataclass(slots=True)
 class AgentAction:
+    # [CLASS DOC] Slotted dataclass for one parsed action: name (one of BASH, READ_FILE, LIST_DIR,
+    # SAVE_SETUP, GIVE_UP or INVALID), input (sanitized argument string) and raw (the full LLM
+    # text).
     name: ActionName
     input: str
     raw: str = ""
@@ -31,6 +41,9 @@ class AgentAction:
 
 @dataclass(slots=True)
 class AgentTurn:
+    # [CLASS DOC] Slotted dataclass for one transcript entry: step index, thought, action,
+    # observation text, plus per-turn LLM cost estimate, prompt/completion token counts and duration
+    # in seconds (the latter four are only filled for executed tool turns; default 0).
     step: int
     thought: str
     action: AgentAction
@@ -43,6 +56,9 @@ class AgentTurn:
 
 @dataclass(slots=True)
 class AgentOutcome:
+    # [CLASS DOC] Slotted dataclass returned by run_agent_loop: success flag, human-readable reason,
+    # rebuild_cmds and test_cmds (only on success), summary from SAVE_SETUP, iterations consumed,
+    # transcript list and total_cost_estimate_usd accumulated over all LLM calls.
     success: bool
     reason: str
     rebuild_cmds: list[str] = field(default_factory=list)
@@ -75,6 +91,10 @@ _TOOL_CALL_TAGS = (
 
 
 def _sanitize_input(inp: str) -> str:
+    # [FUNCTION DOC] HELPER: Cleans an action input: strips whitespace, cuts everything from a
+    # simulated "Observation:" header on its own line onward (case-insensitive), then repeatedly
+    # removes known trailing tool-call closing tags (_TOOL_CALL_TAGS). Output: cleaned str. No side
+    # effects.
     """Strip trailing tool-call XML artifacts + simulated Observation: tails."""
     s = inp.strip()
     # Drop anything after a simulated `Observation:` header inside the input —
@@ -96,6 +116,11 @@ def _sanitize_input(inp: str) -> str:
 
 
 def parse_action(text: str) -> tuple[str, AgentAction]:
+    # [FUNCTION DOC] Parses an LLM response into (thought, AgentAction) using _ACTION_RE (first
+    # match). No match yields ("", INVALID action whose input is the first 500 chars of the stripped
+    # text). The action name is upper-cased; unknown names yield an INVALID action carrying the
+    # thought and sanitized input. Output: tuple(str, AgentAction); raw always holds the full text.
+    # Never raises.
     """Extract (thought, action) from an LLM response. Lenient."""
     m = _ACTION_RE.search(text)
     if not m:
@@ -109,6 +134,11 @@ def parse_action(text: str) -> tuple[str, AgentAction]:
 
 
 def _execute(action: AgentAction, sandbox: DockerSandbox) -> str:
+    # [FUNCTION DOC] HELPER: Runs a tool action in the sandbox and returns the observation string.
+    # BASH: sandbox.exec, formatted as "exit=N" plus the truncated combined output. READ_FILE: file
+    # contents, or "ERROR reading file: ..." on any exception. LIST_DIR: newline-joined entries
+    # (input defaults to "."), or a placeholder when empty/missing. Other action names return an
+    # empty string. Side effects: commands run inside the container.
     """Run a tool and return the observation string."""
     if action.name == "BASH":
         r: ExecResult = sandbox.exec(action.input)
@@ -125,6 +155,11 @@ def _execute(action: AgentAction, sandbox: DockerSandbox) -> str:
 
 
 def _parse_save_setup(input_str: str) -> dict[str, Any]:
+    # [FUNCTION DOC] HELPER: Parses a SAVE_SETUP payload tolerantly: strips surrounding ``` /
+    # ```json fences, starts at the first "{" and decodes only the first complete JSON value
+    # (raw_decode), ignoring trailing text. Requires a dict with rebuild_cmds and test_cmds each a
+    # list of strings; extra keys (e.g. summary) are kept. Output: dict. Raises: ValueError (no
+    # object, not a dict, missing or mistyped key) or json.JSONDecodeError.
     """Tolerantly parse SAVE_SETUP JSON. Returns dict or raises.
 
     Uses `JSONDecoder.raw_decode()` so trailing text after the first complete
@@ -167,6 +202,22 @@ def run_agent_loop(
     on_thinking: Callable[[int], None] | None = None,
     on_executing: Callable[[int, AgentAction], None] | None = None,
 ) -> AgentOutcome:
+    # [FUNCTION DOC] Drives the bootstrap agent. Inputs: sandbox (running DockerSandbox); repo, ref
+    # (for the initial prompt); language, base_image, platform (for the system prompt); llm
+    # (LLMSpec); max_iterations (default 20); max_seconds (default 1800, checked at the start of
+    # each step only); max_spend_usd (None = unlimited; stops once accumulated cost >= limit,
+    # checked before each call); optional callbacks on_thinking(step), on_executing(step, action)
+    # for executable tool actions, and on_turn(turn, total_cost) after each executed tool turn;
+    # callback exceptions are logged at debug and swallowed. Each step concatenates the full history
+    # (initial prompt plus every prior action/observation and correction message) into one user
+    # message and calls llm.complete (max_tokens 2048, temperature 0.2). INVALID: appends a format-
+    # reminder and continues. GIVE_UP: returns failure. SAVE_SETUP: returns success with the parsed
+    # commands, or appends a rejection message and continues if parsing fails. Tool actions:
+    # execute, append the observation to history, record the turn. Output: AgentOutcome (failure
+    # reasons: timeout, cost budget exceeded, agent gave up, hit max_iterations). Raises: whatever
+    # llm.complete raises. Side effects: LLM calls (cost), commands in the container, logging.
+    # KNOWN ISSUE: turns recorded for INVALID and rejected SAVE_SETUP responses carry no cost/token
+    # data and do not trigger on_turn, so per-turn costs in the transcript do not sum to the total.
     """Drive the bootstrap agent until it succeeds, gives up, or hits a budget."""
     system = system_prompt(language=language, base_image=base_image, platform=platform)
     history: list[str] = [initial_user_prompt(repo=repo, ref=ref)]

@@ -1,3 +1,9 @@
+# [MODULE DOC] Batch controller for Tasksmith PR campaigns. A BatchPlan lists GitHub PR candidates;
+# run_batch freezes the plan, runtime wheel and the owned controller code into the batch directory,
+# then dispatches each PR to a fresh isolated Python child process (via a thread pool of
+# supervisors) that runs one Tasksmith instance under nested shared budgets in a SQLite ledger.
+# Results, receipts and generated tasks are retained; uncertain work is never redispatched, and a
+# report.json tracks verified / generated_unverified / blocked counts. Also runnable as a script.
 """Bounded process-isolated PR campaigns with retained artifacts and shared budgets."""
 
 from __future__ import annotations
@@ -31,12 +37,18 @@ from repo2rlenv.tasksmith.reuse import prepared_probe_definitions
 
 
 def _url(value: str) -> str:
+    # [FUNCTION DOC] HELPER: Validates that value is a GitHub PR URL
+    # (https://github.com/<owner>/<repo>/pull/<n>, optional trailing slash) and returns it without
+    # the trailing slash. Raises ValueError otherwise.
     if not re.fullmatch(r"https://github.com/[\w.-]+/[\w.-]+/pull/[1-9][0-9]*/?", value):
         raise ValueError("Batch inputs must be GitHub PR URLs")
     return value.rstrip("/")
 
 
 class Candidate(Record):
+    # [CLASS DOC] Pydantic Record describing one PR in a batch: url, Tasksmith Options, optional
+    # generation_run (prior run dir) with reuse_evidence flag, optional frozen source_record,
+    # prepared_task directory and prepared_probes manifest.
     url: str
     options: Options
     generation_run: Path | None = None
@@ -50,6 +62,11 @@ class Candidate(Record):
 
     @model_validator(mode="after")
     def inputs(self):
+        # [FUNCTION DOC] After-validator: normalises the URL; requires generation_run when
+        # reuse_evidence is set; resolves generation_run; a prepared_task requires source_record and
+        # forbids generation_run (resolved to absolute); validates prepared probes against the task
+        # via prepared_probe_definitions with the option's max_probes and required focus. Raises
+        # ValueError on violations. Returns self.
         self.url = _url(self.url)
         if self.reuse_evidence and self.generation_run is None:
             raise ValueError("Evidence reuse requires a generation run")
@@ -71,6 +88,9 @@ class Candidate(Record):
 
 
 class BatchPlan(Record):
+    # [CLASS DOC] Pydantic Record for a whole batch: name (lowercase slug <=31 chars), 1-1000
+    # candidates, prior_verified result paths, target_verified (1-1000, default 50), max_parallel
+    # and max_gpu_parallel (1-8, default 2), max_spend_usd (decimal string, default "200.00").
     name: str = Field(pattern=r"^[a-z][a-z0-9-]{0,30}$")
     candidates: list[Candidate] = Field(min_length=1, max_length=1000)
     # Each result supplies its own source URL through the checksum-bound task.
@@ -82,6 +102,8 @@ class BatchPlan(Record):
 
     @model_validator(mode="after")
     def limits(self):
+        # [FUNCTION DOC] After-validator: rejects duplicate candidate URLs and non-finite or non-
+        # positive spend limits (ValueError); resolves prior_verified paths. Returns self.
         if len({item.url for item in self.candidates}) != len(self.candidates):
             raise ValueError("Batch PRs must be unique, including trailing-slash variants")
         limit = Decimal(self.max_spend_usd)
@@ -92,6 +114,10 @@ class BatchPlan(Record):
 
 
 def verified_result(path: Path) -> dict:
+    # [FUNCTION DOC] Loads a quality LoopResult JSON at path and checks that its task is labelled
+    # "verified" by label_from_quality (ValueError otherwise). Reads the task's task.toml
+    # metadata.repo2env.source_url. Returns dict with url, absolute task path, bundle_hash, absolute
+    # quality_result path and its sha256 digest. May raise KeyError/OSError/validation errors.
     """Count only a usable result with bound controls, probes and a judged rollout."""
     import tomllib
 
@@ -112,6 +138,9 @@ def verified_result(path: Path) -> dict:
 
 
 def _controller_identity() -> str:
+    # [FUNCTION DOC] HELPER: Returns a sha256 over a sorted JSON map of relative path -> digest for
+    # every .py/.md/.mjs/.js file under the repo2rlenv package directory (fingerprint of the running
+    # controller code).
     """Freeze owned controller code and prompts, including agent bridges."""
     root = Path(__file__).parents[1]
     hashes = {
@@ -123,6 +152,13 @@ def _controller_identity() -> str:
 
 
 def _freeze_controller(wheel: Path, destination: Path) -> dict[str, str]:
+    # [FUNCTION DOC] HELPER: Extracts the repo2rlenv/ package files from a wheel zip into
+    # destination as a read-only tree without importing them, and returns {member name: sha256}.
+    # Raises ValueError if >20000 files or >100 MiB, if any path is absolute, contains "..", is non-
+    # normalised, duplicated or a symlink, or if batch.py / __init__.py are missing. If destination
+    # already exists it is verified instead (no symlinks, identical file hashes and inventory, else
+    # ValueError). Otherwise files are written into a temp dir next to destination with mode 0555
+    # (executable) or 0444, directories set to 0555, then atomically renamed into place.
     """Copy only owned package files from the exact wheel, without importing them."""
     with zipfile.ZipFile(wheel) as archive:
         members = [
@@ -193,6 +229,12 @@ _run_candidate(data['configuration'], data['candidate'])
 
 
 def _supervise_candidate(configuration: dict, item: dict) -> dict:
+    # [FUNCTION DOC] HELPER: Runs in a supervisor thread. Creates candidates/<key> (mode 0700),
+    # refuses (ValueError) if a dispatch.json or batch-result.json already exists, (re)verifies the
+    # frozen controller, writes dispatch.json with configuration and candidate, and runs `python -I
+    # -B -c <bootstrap>` which imports only the frozen controller and calls _run_candidate.
+    # stdout/stderr go to newly created (exclusive, 0600) controller.stdout/.stderr files. Raises
+    # RuntimeError on nonzero exit; returns the child's batch-result.json contents.
     """A supervisor thread only waits; all Tasksmith work occurs in a fresh process."""
     directory = Path(configuration["directory"]) / "candidates" / _key(item["url"])
     directory.mkdir(parents=True, exist_ok=True)
@@ -230,14 +272,21 @@ def _supervise_candidate(configuration: dict, item: dict) -> dict:
 
 
 def _prefix(directory: Path) -> str:
+    # [FUNCTION DOC] HELPER: Returns the ledger prefix "tsbatch-" + first 12 hex chars of sha256 of
+    # the resolved directory path.
     return "tsbatch-" + hashlib.sha256(str(directory.resolve()).encode()).hexdigest()[:12]
 
 
 def _key(url: str) -> str:
+    # [FUNCTION DOC] HELPER: Returns the first 12 hex chars of sha256(url), used as a per-candidate
+    # id.
     return hashlib.sha256(url.encode()).hexdigest()[:12]
 
 
 def _cleanup_pending(directory: Path) -> list[str]:
+    # [FUNCTION DOC] HELPER: Scans workers/*.json and **/allocations/*.json receipts under directory
+    # (excluding *.cost.json) and returns absolute paths of those whose "state" is not terminated /
+    # build_failed / reservation_failed (i.e. provider resources possibly still live).
     receipts = [*directory.glob("workers/*.json"), *directory.glob("**/allocations/*.json")]
     return [
         str(path.resolve())
@@ -249,6 +298,11 @@ def _cleanup_pending(directory: Path) -> list[str]:
 
 
 def _outcome(directory: Path, url: str) -> dict:
+    # [FUNCTION DOC] HELPER: Builds the result row for one candidate directory: lists all task dirs
+    # (task.toml parents), status "generated_unverified" if any else "blocked"; if exactly one
+    # quality result exists and verified_result accepts it for the same URL, status becomes
+    # "verified" with the proof, otherwise a reason is recorded. Adds pipeline_status from
+    # report.json (when present) and cleanup_pending receipts. Returns the dict.
     # Keep every revision, failed build and generated bundle. No target imports.
     tasks = sorted({str(path.parent.resolve()) for path in directory.rglob("task.toml")})
     row = {"url": url, "status": "generated_unverified" if tasks else "blocked", "tasks": tasks}
@@ -270,6 +324,14 @@ def _outcome(directory: Path, url: str) -> dict:
 
 
 def _run_candidate(configuration: dict, item: dict) -> dict:
+    # [FUNCTION DOC] HELPER: Entry point executed inside the isolated child process. Validates the
+    # Candidate, returns an existing batch-result.json if present; verifies the controller hash and
+    # runtime wheel identity match the frozen configuration (ValueError otherwise). Creates a
+    # Tasksmith runner with a per-candidate prefix and a RunBudget nested inside the shared batch
+    # RunBudget, then runs it on a single-PR Panel with the candidate's reuse/prepared inputs.
+    # Exceptions are caught and summarised as a reason. For the modal provider, reconciles
+    # terminated worker receipts whose ledger operation is not yet settled. Writes and returns the
+    # outcome row with budget totals.
     """One child process owns one Tasksmith instance and its remote worker."""
     from repo2rlenv.tasksmith.matrix_runner import reconcile_worker
     from repo2rlenv.tasksmith.runner import Tasksmith
@@ -324,11 +386,16 @@ def _run_candidate(configuration: dict, item: dict) -> dict:
 
 
 def _available(budget: RunBudget) -> Decimal:
+    # [FUNCTION DOC] HELPER: Returns the Decimal remaining spend: min(batch limit - batch totals,
+    # ledger-reported remaining_usd).
     batch_used = sum(Decimal(value) for value in budget.totals().values())
     return min(budget.limit - batch_used, Decimal(budget.status()["remaining_usd"]))
 
 
 def _report(configuration: dict, entries: dict, budget: RunBudget) -> dict:
+    # [FUNCTION DOC] HELPER: Builds and saves report.json: combines prior verified proofs with newly
+    # verified entries, raises ValueError on duplicate URLs or bundle hashes, and counts verified /
+    # prior / new / generated_unverified / blocked plus budget totals and available USD. Returns it.
     verified = [
         *configuration["prior_verified"],
         *[row["verified"] for row in entries.values() if row.get("status") == "verified"],
@@ -366,6 +433,25 @@ def run_batch(
     expected_prior_verified: list[dict] | None = None,
     preallocation_check: Callable[[], None] | None = None,
 ):
+    # [FUNCTION DOC] Runs or resumes a batch and returns the report dict (with stop_reason and
+    # pending). Inputs: plan (BatchPlan), directory (batch output dir), campaign (dir holding
+    # budget.sqlite3), wheel (runtime wheel), on_event (callback for progress strings, default
+    # print), expected_prior_verified (optional list that freshly computed prior proofs must equal),
+    # preallocation_check (optional callable run before any budget allocation). Takes an exclusive
+    # file lock on directory/.lock. Validates prior results (no duplicate URLs), writes or verifies
+    # configuration.json (frozen plan, paths, runtime and controller hash; mismatch raises
+    # ValueError), copies the wheel and freezes the controller. Reloads saved entries: rows left
+    # "running" become their child result or "blocked/interrupted_controller"; verified proofs are
+    # re-checked; cleanup_pending lists refreshed. If any entry needs reconciliation it stops
+    # immediately with stop_reason "reconciliation_required". Otherwise loops with a thread pool of
+    # max_parallel supervisors, admitting pending PRs while slots remain (bounded by
+    # target_verified), the worker reservation fits the available budget and the GPU parallel cap
+    # allows; admission halts once a drain-request.json exists or reconciliation is needed.
+    # Supervisor exceptions mark the PR blocked. Final stop_reason: reconciliation_required,
+    # target_reached, drained, budget_headroom or panel_exhausted. Side effects: filesystem,
+    # subprocesses, ledger.
+    # KNOWN ISSUE: on_event defaults to print(), violating the project rule that library code must
+    # use repo2rlenv.ui.console instead of print.
     """Resume undispatched PRs; uncertain child/provider work is never redispatched."""
     directory, campaign, wheel = directory.resolve(), campaign.resolve(), wheel.resolve()
     directory.mkdir(parents=True, exist_ok=True)
@@ -529,6 +615,10 @@ def run_batch(
 
 
 def main():
+    # [FUNCTION DOC] Script entry point: parses positional plan (JSON) and output paths plus
+    # required --campaign and --runtime-wheel, runs run_batch, and prints the report without the
+    # candidates map as indented JSON.
+    # KNOWN ISSUE: uses print() directly instead of repo2rlenv.ui.console (project invariant).
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("plan", type=Path)
     parser.add_argument("output", type=Path)

@@ -1,3 +1,7 @@
+# [MODULE DOC] argparse registration and dispatch for the `repo2rlenv tasksmith` command group:
+# batch (parallel PR campaign), bootstrap (remote CPU/GPU readiness matrix), install-runtime (Node
+# author runtimes), show (render a saved report) and run (run/resume a fixed PR panel). All output
+# goes through repo2rlenv.ui.console (Rich tables, kv panels or JSON).
 """Tasksmith CLI: explicit pilot inputs, bounded spend, durable progress."""
 
 from __future__ import annotations
@@ -10,6 +14,10 @@ from repo2rlenv.ui import console
 
 
 def _show_batch(report: dict, *, as_json: bool) -> int:
+    # [FUNCTION DOC] HELPER: Renders a batch report: as JSON when as_json, otherwise a Rich table of
+    # PR / status / reason plus a "Batch progress" kv panel (verified/target, new, unverified,
+    # stop_reason, budget totals, available USD). Returns exit code 0 only if stop_reason is
+    # "target_reached", else 1.
     if as_json:
         console.json(report)
     else:
@@ -36,6 +44,18 @@ def _show_batch(report: dict, *, as_json: bool) -> int:
 
 
 def command(args):
+    # [FUNCTION DOC] Dispatch function for all tasksmith subcommands; returns an int exit code.
+    # batch: optionally loads a dotenv credentials file (ValueError if missing; existing env vars
+    # win), validates the BatchPlan JSON, runs run_batch with console (or silent in --json) event
+    # output, and renders via _show_batch. bootstrap: delegates to _bootstrap. install-runtime: runs
+    # runtime.install() and prints its path, returns 0. show: reads <output>/report.json; batch
+    # reports go to _show_batch, panel reports fall through to the panel rendering below. run: loads
+    # dotenv, builds Options from --options JSON or from --provider (default modal) / --author
+    # (default pi), raising ValueError if explicit flags conflict with the options file; applies a
+    # CPU bootstrap report if given; validates the Panel and runs Tasksmith with
+    # limit/generation_run/reuse_evidence/ sources/prepared_task. Panel reports are printed as JSON
+    # or as a table of PR / state / task path plus a generated/usable/spend summary line. Returns 0
+    # if all inputs are usable, else 1.
     if args.action == "batch":
         from dotenv import load_dotenv
 
@@ -136,6 +156,12 @@ def command(args):
 
 
 def _bootstrap(args):
+    # [FUNCTION DOC] HELPER: Implements `tasksmith bootstrap`. Validates the matrix JSON as distinct
+    # RepositoryBootstrap entries (ValueError otherwise), loads an optional dotenv file, runs
+    # run_cpu_matrix for cpu/both into <output>/cpu and, for gpu/both, run_gpu_repository per
+    # repository into <output>/gpu/<name>, stopping after the first non-ready GPU result. Renders
+    # JSON or a readiness table plus the receipts path. Returns 1 if any report or repository is not
+    # ready/completed, else 0.
     from dotenv import load_dotenv
     from rich.table import Table
 
@@ -202,6 +228,11 @@ def _bootstrap(args):
 
 
 def add_parser(subparsers):
+    # [FUNCTION DOC] Registers the "tasksmith" subparser and its actions (batch, bootstrap, install-
+    # runtime, show, run) with their positional and option arguments (required --campaign, --output,
+    # --runtime-wheel paths; --env-file; --json; run-specific --sources, --prepared-task,
+    # --generation-run, --reuse-evidence, --bootstrap-report, --options, --provider, --author,
+    # --stop-after; bootstrap --resource cpu/gpu/both) and sets func=command on each. Returns None.
     parser = subparsers.add_parser(
         "tasksmith", help="Build faithful Harbor tasks from PRs with a remote coding agent"
     )

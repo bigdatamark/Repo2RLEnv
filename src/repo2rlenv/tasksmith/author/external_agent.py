@@ -1,3 +1,6 @@
+# [MODULE DOC] Runs an external Node-based author agent runtime ("pi" or "opencode") as a
+# subprocess, wired to an AgentBridge so the runtime only talks to a loopback, metered model/tool
+# proxy and never sees provider keys.
 from __future__ import annotations
 
 import asyncio
@@ -18,6 +21,9 @@ from repo2rlenv.tasksmith.author.inference import (
 
 
 def runtime_path(engine: str) -> Path:
+    # [FUNCTION DOC] Returns the Path to the <engine>.mjs adapter inside the installed tasksmith
+    # runtime directory. Raises ValueError for engines other than "pi"/"opencode", and RuntimeError
+    # if node_modules is missing or `node` is not on PATH (asks the user to run install-runtime).
     if engine not in {"pi", "opencode"}:
         raise ValueError(f"Unknown external runtime: {engine}")
     from repo2rlenv.tasksmith.runtime import directory
@@ -33,6 +39,21 @@ def runtime_path(engine: str) -> Path:
 async def run_external_agent(
     *, engine, model, system, prompt, budget, tools, handlers, trace, max_turns, max_cost=8
 ):
+    # [FUNCTION DOC] Runs one external author session to completion and returns {"messages",
+    # "turns", "cost"}. Inputs (keyword-only): engine, model ("anthropic/..."), system and prompt
+    # strings, budget (AuthorBudget), tools (schemas), handlers (tool name -> async callable), trace
+    # (JSONL Path), max_turns, max_cost (USD, default 8). Creates a session dir next to the trace
+    # ("<stem>-runtime"), starts an AgentBridge, records an "input" trace entry, writes runner-
+    # config.json (mode 0600) containing model, prompts, bridge URL/token, tools, limits and
+    # inference options, and launches `node <adapter> <config>` in a new process session with a
+    # minimal environment (PATH/LANG/LC_ALL/TMPDIR, HOME set to a private dir) and stderr to
+    # runtime-stderr.log. Waits up to 3600s for either process completion or a bridge failure.
+    # Writes stdout to runtime-result.json and parses it as JSON. Raises: the bridge's stored
+    # failure; TimeoutError after one hour; RuntimeError on nonzero exit or an "error" key in the
+    # result; JSON errors on bad stdout. Cleanup always: stops the bridge (cancelling model calls
+    # unless completed), SIGTERMs the process group then SIGKILL after 12s, cancels helper tasks and
+    # deletes the config file. After the bridge exits (draining streams), re-raises any late bridge
+    # failure.
     adapter = runtime_path(engine)
     trace.parent.mkdir(parents=True, exist_ok=True)
     session_dir = trace.with_suffix("").with_name(trace.stem + "-runtime").resolve()

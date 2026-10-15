@@ -1,3 +1,8 @@
+# [MODULE DOC] Per-language hint presets injected into the bootstrap system prompt: a default base
+# image, useful apt packages, install hints, quick sanity checks and known pitfalls per LanguageHint
+# (PRESETS), plus _UNIVERSAL_PITFALLS appended for every language. Hints are advisory; the agent may
+# ignore them. Kept dependency-free (only imports LanguageHint) because it is imported during prompt
+# construction.
 """Per-language presets to seed the bootstrap agent with known-good patterns.
 
 The agent works for any repo, but giving it language-specific hints (where
@@ -21,6 +26,8 @@ from repo2rlenv.bootstrap.spec import LanguageHint
 
 @dataclass(slots=True, frozen=True)
 class LanguagePreset:
+    # [CLASS DOC] Frozen, slotted dataclass holding one ecosystem's recipe: base_image and tuples
+    # apt_packages, install_hints, sanity_checks and known_pitfalls (all default empty).
     """Recipe of known-good patterns for a single language ecosystem."""
 
     base_image: str
@@ -188,11 +195,17 @@ PRESETS: dict[LanguageHint, LanguagePreset] = {
 
 
 def preset_for(lang: LanguageHint) -> LanguagePreset:
+    # [FUNCTION DOC] Returns PRESETS[lang], falling back to the UNKNOWN preset for any missing key.
     """Return the preset for a language, falling back to UNKNOWN."""
     return PRESETS.get(lang, PRESETS[LanguageHint.UNKNOWN])
 
 
 def preset_hints_block(lang: LanguageHint) -> str:
+    # [FUNCTION DOC] Renders the preset for lang as prompt text: an apt packages line, then "Install
+    # hints:", "Quick sanity checks once env is built:" (commands in backticks) and "Known
+    # pitfalls:" (language pitfalls followed by universal ones) as indented "- " bullets; empty
+    # sections are omitted. Output: newline-joined str (the fallback "(no language-specific presets
+    # available)" is effectively unreachable since universal pitfalls are always present).
     """Render the preset as a prompt-ready bullet list. Includes universal pitfalls."""
     p = preset_for(lang)
     parts: list[str] = []
@@ -217,5 +230,6 @@ def preset_hints_block(lang: LanguageHint) -> str:
 
 
 def universal_pitfalls() -> tuple[str, ...]:
+    # [FUNCTION DOC] Returns the raw _UNIVERSAL_PITFALLS tuple, for tests and docs.
     """Exposed for tests / docs that want the raw list."""
     return _UNIVERSAL_PITFALLS

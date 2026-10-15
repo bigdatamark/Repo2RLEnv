@@ -1,3 +1,9 @@
+# [MODULE DOC] CodeMidasPipeline: controller for the owned CodeMidas recipe on the repo_reconstruct
+# pipeline. For each candidate anchor produced by the remote worker it runs agentic LLM stages
+# (feature design with sandboxed shell observation, test authoring executed remotely for contrast,
+# independent review with optional contract repair), removes the feature's bodies, exports a
+# sanitized repository task, gates it with 2 nop and 4 oracle Harbor trials, and retains a labeled
+# copy in the output directory.
 """Agentic source discovery, observed tests and independent review to Harbor."""
 
 from __future__ import annotations
@@ -31,15 +37,25 @@ from repo2rlenv.tasksmith.author.budget import AuthorBudget
 
 
 class ConstructionExhausted(RuntimeError):
+    # [CLASS DOC] RuntimeError subclass signalling that a candidate was deliberately rejected or ran
+    # out of repair allowance (not a provider fault). Converted to ValueError by author_export.
     """Stop this candidate without treating a known rejection as a provider fault."""
 
 
 class CodeMidasPipeline(RepositoryGenerationPipeline):
+    # [CLASS DOC] Pipeline class for PipelineName.REPO_RECONSTRUCT with recipe_id "codemidas" and
+    # worker_module repo2rlenv.pipelines.recipes.codemidas.worker; inherits run/resume machinery
+    # from RepositoryGenerationPipeline.
     name = PipelineName.REPO_RECONSTRUCT
     recipe_id = "codemidas"
     worker_module = "repo2rlenv.pipelines.recipes.codemidas.worker"
 
     def __init__(self, input, options, bootstrap=None):
+        # [FUNCTION DOC] Calls the base constructor, then raises ValueError unless the LLM's
+        # qualified name equals options.author_model with no custom endpoint and no fallback. If
+        # options.stack_manifest is set, reads it and requires the input repo URL to be
+        # https://github.com/<repo_path> and the ref to equal the row's commit_id (ValueError
+        # otherwise).
         super().__init__(input, options, bootstrap)
         if (
             input.llm.qualified_name != options.author_model
@@ -62,6 +78,8 @@ class CodeMidasPipeline(RepositoryGenerationPipeline):
                 )
 
     def source_identity(self):
+        # [FUNCTION DOC] Returns extra identity for the run fingerprint: {stack_manifest_sha256:
+        # sha256 of the manifest file} when a Stack manifest is configured, else an empty dict.
         if self.options.stack_manifest:
             return {
                 "stack_manifest_sha256": hashlib.sha256(
@@ -71,6 +89,8 @@ class CodeMidasPipeline(RepositoryGenerationPipeline):
         return {}
 
     def worker_configuration(self, run):
+        # [FUNCTION DOC] Extends the base worker configuration for run with stack_source = the
+        # parsed Stack manifest when configured. Output: config dict.
         config = super().worker_configuration(run)
         if self.options.stack_manifest:
             from repo2rlenv.pipelines.recipes.codemidas.stack import read_manifest
@@ -79,12 +99,31 @@ class CodeMidasPipeline(RepositoryGenerationPipeline):
         return config
 
     def author_export(self, generation, candidate, ledger, run, out_dir):
+        # [FUNCTION DOC] Synchronous wrapper: runs _author_export with asyncio.run and converts
+        # ConstructionExhausted / ProviderOutputError into ValueError (so the base runner records a
+        # skip). Inputs as _author_export. Output: Path of the exported task.
         try:
             return asyncio.run(self._author_export(generation, candidate, ledger, run, out_dir))
         except (ConstructionExhausted, ProviderOutputError) as exc:
             raise ValueError(str(exc)) from exc
 
     async def _author_export(self, generation, candidate, ledger, run, out_dir):
+        # [FUNCTION DOC] HELPER (async): Builds one task for a candidate. Inputs: generation
+        # (prepare output dir with base/), candidate (dict with id, anchor, path, repo, ref,
+        # image_digest, private_paths, optional source_kind/source_provenance), ledger, run (run
+        # dir), out_dir. Sets up worker connection, runtime python, a per-candidate RunBudget
+        # (candidate_budget_usd), a deadline of min(2400s, execution timeout) and persisted shell
+        # observations. Stage "design" yields a Feature (validated by check_feature); raises
+        # ValueError if the resulting reconstruction identity already exists in out_dir. Then up to
+        # max_rounds rounds: "tests" stage yields a Verifier validated by check_verifier (remote
+        # execution); "review" stage (reviewer_model, with shell) yields a Review; stop when
+        # approved; when repair_target is "contract" and rounds remain, re-run design as a contract
+        # repair preserving the same symbols; feed review issues into the next tests round. If never
+        # approved raises ConstructionExhausted. Loads execution evidence from disk if none in
+        # memory (ValueError if absent). Builds defective/reference maps and the public profile,
+        # exports a draft with the generated test file and metadata, runs nop x2 (reward 0) and
+        # oracle x4 (reward 1) Harbor trials (ValueError on any mismatch), retains the task into
+        # out_dir/<name> and writes quality.json. Output: Path.
         execution = self.input.execution
         key = candidate["id"]
         directory = run / "tasks" / key
@@ -102,6 +141,12 @@ class CodeMidasPipeline(RepositoryGenerationPipeline):
         )
 
         async def shell(command, timeout_sec=120):
+            # [FUNCTION DOC] HELPER (async LLM tool): Runs a bounded shell command (str up to 20000
+            # chars, else ValueError) in a throwaway container of the candidate image on the worker:
+            # no network, read-only root with 128m /tmp tmpfs, 1 CPU, test_memory_mb memory, 128
+            # pids, wrapped in "timeout" clamped to 1-120s. Appends an observation {id, command,
+            # returncode, last 20000 chars of stdout} and persists observations.json; always
+            # force-removes the container. Output: observation as JSON string.
             if not isinstance(command, str) or len(command) > 20000:
                 raise ValueError("Use a bounded shell command")
             timeout_sec = max(1, min(int(timeout_sec), 120))
@@ -156,6 +201,13 @@ class CodeMidasPipeline(RepositoryGenerationPipeline):
             use_shell=False,
             initial_draft_key=None,
         ):
+            # [FUNCTION DOC] HELPER (async): Runs one artifact_stage. Inputs: schema, label (stage
+            # dir name), inputs (context dict), prompt_name (system prompt file <name>.md), model,
+            # validate (optional async validator), use_shell (expose shell tool), initial_draft_key.
+            # Emits a started event; if context.json exists, requires it to equal inputs ignoring
+            # "observations" and "execution" keys (ValueError) and reuses the stored context, else
+            # saves it. For design/tests prompts exposes a reject_candidate tool. Uses the candidate
+            # budget, max_turns and deadline. Output: validated artifact.
             self.event(label, "started", candidate["anchor"])
             root = directory / label
             context_path = root / "context.json"
@@ -163,6 +215,8 @@ class CodeMidasPipeline(RepositoryGenerationPipeline):
                 previous = json.loads(context_path.read_text())
 
                 def immutable(value):
+                    # [FUNCTION DOC] HELPER: Returns the dict without the "observations" and
+                    # "execution" keys (used to compare stage contexts on resume).
                     return {
                         k: v for k, v in value.items() if k not in {"observations", "execution"}
                     }
@@ -174,6 +228,9 @@ class CodeMidasPipeline(RepositoryGenerationPipeline):
                 save_record(context_path, inputs)
 
             async def reject_candidate(reason):
+                # [FUNCTION DOC] HELPER (async LLM tool): Returns an instruction string if reason is
+                # not a 20-2000 char string; otherwise writes rejection.json and raises
+                # ConstructionExhausted(reason).
                 if not isinstance(reason, str) or not 20 <= len(reason) <= 2000:
                     return "Give a concrete reason between 20 and 2000 characters."
                 save_record(root / "rejection.json", {"reason": reason})
@@ -222,6 +279,9 @@ class CodeMidasPipeline(RepositoryGenerationPipeline):
             )
 
         async def check_feature(value):
+            # [FUNCTION DOC] HELPER (async validator): Ensures the feature's symbols form a valid
+            # implementation_pair (ValueError otherwise) and include the candidate's anchor symbol
+            # at its path (ValueError otherwise).
             implementation_pair(generation / "base", value, self.options.source_paths)
             if not any(
                 symbol.path == candidate["path"] and symbol.qualified_name == candidate["anchor"]
@@ -250,6 +310,11 @@ class CodeMidasPipeline(RepositoryGenerationPipeline):
         ]
 
         async def check_verifier(value):
+            # [FUNCTION DOC] HELPER (async validator): Validates assertion mapping, raises
+            # ConstructionExhausted once max_rounds executions exist, then runs the worker in
+            # "evaluate" mode remotely (timeout 2 * test_timeout_sec + 90) in execution-<n>; raises
+            # ConstructionExhausted if the job produced no output; appends the evaluation and raises
+            # ValueError with the evaluation JSON when it shows no contrast (so the model revises).
             validate_assertions(feature, value)
             if len(evaluations) >= self.options.max_rounds:
                 raise ConstructionExhausted("CodeMidas construction repair allowance exhausted")
@@ -323,6 +388,9 @@ class CodeMidasPipeline(RepositoryGenerationPipeline):
                 selected = feature.symbols
 
                 async def check_revision(value, selected=selected):
+                    # [FUNCTION DOC] HELPER (async validator): Runs check_feature and additionally
+                    # requires the revised feature's symbols to equal the previously selected ones
+                    # (ValueError).
                     await check_feature(value)
                     if value.symbols != selected:
                         raise ValueError("A contract repair must preserve the selected feature")

@@ -1,3 +1,8 @@
+# [PACKAGE DOC] Top-level package for Repo2RLEnv (PyPI: repo2rlenv), which turns a repository into a
+# verifiable RL dataset in Harbor task format. Exposes only __version__, read from installed package
+# metadata via importlib.metadata; falls back to "0.0.0+unknown" when the distribution is not
+# installed (PackageNotFoundError). No other side effects on import. Subpackages (pipelines,
+# bootstrap, emitter, ui, ...) are imported explicitly by callers.
 """Repo2RLEnv — turn any repository into an RL environment for training and evaluation."""
 
 from importlib.metadata import PackageNotFoundError

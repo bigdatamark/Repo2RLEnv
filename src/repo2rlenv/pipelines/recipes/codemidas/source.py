@@ -1,3 +1,7 @@
+# [MODULE DOC] Source manipulation for CodeMidas: removes selected function bodies (replacing them
+# with raise NotImplementedError) while keeping signatures and other code, computes a reconstruction
+# identity for deduplication, and validates that a generated verifier maps every top-level test to
+# declared requirements.
 """Remove selected bodies while preserving interfaces and unrelated source."""
 
 from __future__ import annotations
@@ -13,6 +17,9 @@ from repo2rlenv.pipelines.recipes.codemidas.models import Feature, Verifier
 
 
 def reconstruction_identity(repo: str, revision: str, defective: dict[str, bytes]) -> str:
+    # [FUNCTION DOC] Returns a sha256 hex digest of sorted-key JSON {repository, revision, files:
+    # path -> sha256(defective content)}, identifying a missing implementation independently of the
+    # anchor that produced it. Inputs: repo, revision, defective (path -> bytes).
     """Identify the missing implementation, independently of the authoring anchor."""
     value = {
         "repository": repo,
@@ -23,6 +30,11 @@ def reconstruction_identity(repo: str, revision: str, defective: dict[str, bytes
 
 
 def existing_reconstructions(directory: Path) -> set[str]:
+    # [FUNCTION DOC] Scans directory/*/task.toml for tasks whose metadata.repo2env.recipe is
+    # "codemidas" and returns the set of their reconstruction identities, rebuilt from the defective
+    # files at environment/source/<p> for every .py under solution/reference. Input: directory
+    # (Path). Output: set[str]. Raises on missing files or metadata keys
+    # (repository/source_revision).
     identities = set()
     for config in directory.glob("*/task.toml"):
         metadata = tomllib.loads(config.read_text()).get("metadata", {}).get("repo2env", {})
@@ -43,10 +55,16 @@ def existing_reconstructions(directory: Path) -> set[str]:
 
 
 def symbols(source: str) -> dict[str, ast.FunctionDef | ast.AsyncFunctionDef]:
+    # [FUNCTION DOC] Parses source and returns a map from qualified name (nested classes joined with
+    # ".") to FunctionDef/AsyncFunctionDef nodes for module- and class-level functions. Names
+    # defined more than once are dropped as ambiguous. Functions nested inside functions are not
+    # visited. Input: source (str). Output: dict. Raises SyntaxError for invalid source.
     result = {}
     ambiguous = set()
 
     def visit(nodes, prefix=""):
+        # [FUNCTION DOC] HELPER: Recursive walk over a node list with a name prefix; records
+        # functions, moves duplicates to the ambiguous set, and recurses into class bodies.
         for node in nodes:
             name = prefix + getattr(node, "name", "")
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -63,6 +81,11 @@ def symbols(source: str) -> dict[str, ast.FunctionDef | ast.AsyncFunctionDef]:
 
 
 def remove_bodies(source: str, names: list[str]) -> str:
+    # [FUNCTION DOC] Replaces the whole body (from the first body statement to the function's last
+    # line, including any docstring) of each named function with a single raise
+    # NotImplementedError("Implement the requested behavior") line at the body's indentation.
+    # Inputs: source (str), names (qualified names). Raises ValueError for unknown/ambiguous names
+    # or one-line definitions; SyntaxError if the result does not parse. Output: new source str.
     available = symbols(source)
     lines = source.splitlines(keepends=True)
     spans = []
@@ -90,6 +113,12 @@ def remove_bodies(source: str, names: list[str]) -> str:
 
 
 def implementation_pair(base: Path, feature: Feature, source_paths: list[str]):
+    # [FUNCTION DOC] Builds defective and reference file maps for a feature. Each symbol's path must
+    # be a .py file equal to or under one of source_paths (normalized via relative_asset_path; else
+    # ValueError). Groups symbols per file, rejects symlinks or paths escaping base (ValueError),
+    # reads reference bytes and produces defective bytes via remove_bodies. Inputs: base (Path),
+    # feature (Feature), source_paths (list[str]). Output: tuple (defective, reference) of path ->
+    # bytes dicts.
     grouped = {}
     for symbol in feature.symbols:
         path = relative_asset_path("environment/" + symbol.path).relative_to("environment")
@@ -111,6 +140,10 @@ def implementation_pair(base: Path, feature: Feature, source_paths: list[str]):
 
 
 def validate_assertions(feature: Feature, verifier: Verifier):
+    # [FUNCTION DOC] Checks a Verifier against its Feature. Raises ValueError when test_code is not
+    # valid Python, when the set of mapped tests differs from the top-level synchronous test_*
+    # functions or a test is mapped twice, when the union of mapped requirement ids differs from the
+    # declared ids, or when no assert statement exists anywhere. Output: None.
     try:
         tree = ast.parse(verifier.test_code)
     except SyntaxError as exc:
