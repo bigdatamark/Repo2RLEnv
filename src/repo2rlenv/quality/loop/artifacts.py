@@ -1,3 +1,8 @@
+# [MODULE DOC] Read-only ingestion of Harbor task directories and trial evidence, plus transactional
+# text repairs and semantic-probe variants. Every new revision is built in a temporary sibling
+# directory, checked, then atomically renamed into place; its bundle hash (metadata.repo2env) is
+# refreshed and a JSON record (repair.json / probe.json) is saved beside it. Constant
+# EXPECTED_PASSES_CONTRACT names tests/contract.json, the owned-task test contract.
 """Read-only task/evidence ingestion and transactional text repairs."""
 
 from __future__ import annotations
@@ -26,11 +31,17 @@ EXPECTED_PASSES_CONTRACT = "tests/contract.json"
 
 
 def digest(path: Path) -> str:
+    # [FUNCTION DOC] Returns the hex SHA-256 of the file at path (streamed via hashlib.file_digest).
+    # Raises OSError if unreadable. No side effects.
     with path.open("rb") as handle:
         return hashlib.file_digest(handle, "sha256").hexdigest()
 
 
 def task_identity(task: Path) -> str:
+    # [FUNCTION DOC] Returns the task's content bundle hash as computed by
+    # emitter.bundle.inspect_bundle. Raises ValueError if the task records a claimed bundle hash
+    # that no longer matches its content (integrity failed). Tasks without a claimed hash are
+    # accepted.
     identity = inspect_bundle(task)
     if identity["claimed_hash"] is not None and not identity["integrity_passed"]:
         raise ValueError("Task differs from its recorded bundle hash")
@@ -38,6 +49,8 @@ def task_identity(task: Path) -> str:
 
 
 def parse_task(task: Path):
+    # [FUNCTION DOC] Loads the directory as a Harbor Task object (harbor.models.task.task.Task) and
+    # returns it. Raises ValueError if the optional harbor extra is not installed.
     try:
         from harbor.models.task.task import Task
     except ImportError as exc:
@@ -46,6 +59,11 @@ def parse_task(task: Path):
 
 
 def snapshot(task: Path, destination: Path) -> Path:
+    # [FUNCTION DOC] Copies a task to destination atomically and returns destination. Inputs: task
+    # (source dir), destination (target dir). If destination already exists it must have the same
+    # identity (else ValueError) and is reused. Otherwise copies into a temp dir under destination's
+    # parent, re-verifies identity (ValueError 'Task changed during snapshot'), then renames.
+    # Creates parents.
     identity = task_identity(task)
     destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.exists():
@@ -62,6 +80,11 @@ def snapshot(task: Path, destination: Path) -> Path:
 
 
 def refresh_identity(task: Path) -> str:
+    # [FUNCTION DOC] Recomputes and stores the bundle hash in task.toml metadata.repo2env when the
+    # task carries one. If the hash changed it also replaces metadata.repo2env.evaluation with a
+    # fresh generated_evaluation record bound to the new hash, with reason_codes ['task_changed']
+    # (invalidating prior acceptance). Rewrites task.toml (via tomli_w, formatting not preserved).
+    # Returns task_identity(task) afterwards. Tasks without bundle_hash metadata are not modified.
     config_path = task / "task.toml"
     config = tomllib.loads(config_path.read_text())
     metadata = config.get("metadata", {}).get("repo2env", {})
@@ -79,6 +102,9 @@ def refresh_identity(task: Path) -> str:
 
 
 def edit_path(value: str) -> str:
+    # [FUNCTION DOC] HELPER: Validates a repair edit path and returns it unchanged. 'instruction.md'
+    # is allowed as-is; anything else must pass emitter.bundle.relative_asset_path (which raises on
+    # unsafe or non-asset paths).
     if value == "instruction.md":
         return value
     relative_asset_path(value)
@@ -86,6 +112,17 @@ def edit_path(value: str) -> str:
 
 
 def apply_repair(task: Path, repair: Repair, destination: Path) -> Path:
+    # [FUNCTION DOC] Applies a model-authored Repair to a new copy of task at destination and
+    # returns destination. Each Edit with nonempty old must match exactly once in its file (replaced
+    # once); an Edit with empty old creates a new file exclusively (fails if it exists) with mode
+    # 755/644 per edit.executable. append_expected_passes is appended to tests/contract.json.
+    # Raises: FileExistsError if destination exists; ValueError if total new text exceeds 150000
+    # chars, if appends and a text edit of tests/contract.json are combined, if an old text is not
+    # unique, if instruction.md ends up blank, if a tasksmith task's behavioral verifier fails
+    # check_behavioral_verifier, or if the hash is unchanged and no probe_replacements were given;
+    # ValueError from task_identity if the source fails integrity. Side effects: temp dir under the
+    # destination parent, refresh_identity on the copy, atomic rename, and writes repair.json
+    # (parent_hash, bundle_hash, repair dump) next to destination.
     """Apply exact replacements and case-ID appends to a new, unverified copy."""
     task_identity(task)
     if destination.exists():
@@ -143,7 +180,13 @@ def apply_repair(task: Path, repair: Repair, destination: Path) -> Path:
 
 
 def _append_expected_passes(task: Path, additions: list[str]) -> None:
+    # [FUNCTION DOC] HELPER: Appends case IDs to tests/contract.json's expected_passes list and
+    # rewrites the file (indent 2, trailing newline). Raises ValueError if the contract file is
+    # missing, has duplicate JSON keys, lacks a list of nonempty string IDs, already contains
+    # duplicates, or already contains any of the additions.
     def unique_fields(pairs):
+        # [FUNCTION DOC] HELPER: JSON object_pairs_hook that builds a dict from key/value pairs and
+        # raises ValueError on a duplicate key.
         fields = {}
         for key, value in pairs:
             if key in fields:
@@ -169,6 +212,17 @@ def _append_expected_passes(task: Path, additions: list[str]) -> None:
 
 
 def probe_variant(task: Path, probe: SemanticProbe, destination: Path) -> Path:
+    # [FUNCTION DOC] Builds a private semantic-probe variant of a task at destination and returns
+    # it. Snapshots the task, moves solution/solve.sh to solution/quality-original-solve.sh and
+    # writes a new solve.sh wrapper that runs the original reference, then the probe script via bash
+    # -eu -c, then prints the __QUALITY_PROBE_COMPLETED__ receipt. When tests/contract.json declares
+    # submitted_files/submitted_roots, it also copies probe_audit.py and a boundary JSON
+    # (submitted_files, submitted_roots, immutable_assets, require_valid_python for wrong_solution
+    # probes focused on model_behavior/compiled_execution) into solution/ and runs the audit
+    # 'before' and 'after' the probe script. Instruction, tests and environment stay unchanged.
+    # Raises FileExistsError if destination exists; ValueError if the task has no solution/solve.sh
+    # or already uses a reserved probe filename. Side effects: refresh_identity on the variant and
+    # probe.json (parent_hash, bundle_hash, probe dump) next to destination.
     """Private reference-then-mutation control; instruction/tests/build stay exact."""
     if destination.exists():
         raise FileExistsError(destination)
@@ -235,6 +289,16 @@ def probe_variant(task: Path, probe: SemanticProbe, destination: Path) -> Path:
 
 
 def import_trial(path: Path, task: Path, role: str) -> TrialRecord:
+    # [FUNCTION DOC] Imports existing trial evidence for task under a role and returns a
+    # TrialRecord. Input path may be a receipt (trial.json, or a directory containing one), a Harbor
+    # result.json, or a single-trial job directory. Receipt binding: state must be completed,
+    # bundle_hash equal the task identity, trial_id match a slug pattern, exactly one adjacent
+    # <trial_id>/*/result.json that is not a symlink and stays inside the receipt dir, and its
+    # sha256 must match result_sha256. Otherwise harbor_checksum binding: exactly one result.json
+    # containing task_checksum, equal to the parsed task's checksum. Role checks: baseline must use
+    # agent 'nop', oracle 'oracle'; rollout must not be nop/oracle/unknown. Reward, exception type,
+    # model and agent/exit-code.txt are read into the record. Raises ValueError on any violation
+    # (also from task_identity/parse_task).
     """Import a receipt, trial result, or single-trial job; require content binding."""
     identity = task_identity(task)
     receipt = None

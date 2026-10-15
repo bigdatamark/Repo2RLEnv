@@ -1,3 +1,9 @@
+# [MODULE DOC] Resume a native rollout whose private verifier allocation was denied, without
+# re-running the completed learner. Isolates the use of Harbor 0.22's single-step verifier
+# internals. At collection time a seal (verifier-inputs.json) binds the receipt, result, allocation
+# claims and the hashed artifacts/ and agent/ trees; a continuation re-checks the seal, copies the
+# evidence into a fresh trial and runs only the verifier. Unknown provider outcomes are never
+# retried automatically.
 """Resume a denied private verifier without repeating a completed learner.
 
 Harbor 0.22's single-step verifier API is isolated here. A seal written at
@@ -20,6 +26,10 @@ from repo2rlenv.quality.loop.artifacts import digest, import_trial, task_identit
 
 
 def evidence_tree(root: Path) -> dict:
+    # [FUNCTION DOC] Returns {relative path: {sha256, bytes, mode}} for every regular file under
+    # root. Raises ValueError if root is a symlink or not a directory, if any entry is a link or
+    # special file, if totals exceed 1 GB or 100000 files, or if the tree is empty. Reads files
+    # only.
     """Hash ordinary files and modes, rejecting links and incomplete submissions."""
     if root.is_symlink() or not root.is_dir():
         raise ValueError("Recovery evidence must be an ordinary directory")
@@ -44,6 +54,14 @@ def evidence_tree(root: Path) -> dict:
 
 
 def verifier_inputs(task: Path, output: Path, budget) -> dict:
+    # [FUNCTION DOC] Builds the recovery seal for a rollout in output and returns it
+    # (schema_version, bundle_hash, receipt and result sha256, allocation claim digests, artifacts
+    # and agent evidence trees). Requires: a single-step native task; the receipt imports as a
+    # rollout; execution provider native-modal; agent terminus-2; no verifier_result or
+    # step_results; a proven verifier-only denial (model_cost_after_verifier_denial); every claim's
+    # ledger equals budget.path; a nonempty artifacts/manifest.json whose items are all status ok
+    # with existing, relative 'artifacts/...' destinations; and agent/trajectory.json present.
+    # Raises ValueError on any violation.
     """Prove this is a completed native solver followed by a denied allocation."""
     from repo2rlenv.quality.loop.native import (
         model_cost_after_verifier_denial,
@@ -109,6 +127,8 @@ def verifier_inputs(task: Path, output: Path, budget) -> dict:
 
 
 def seal_verifier_inputs(task: Path, output: Path, budget):
+    # [FUNCTION DOC] Writes output/verifier-inputs.json from verifier_inputs once. Raises ValueError
+    # if already sealed (or if the inputs are not provable).
     """Persist once, as the controller collects a failed verifier result."""
     path = output / "verifier-inputs.json"
     if path.exists():
@@ -117,6 +137,19 @@ def seal_verifier_inputs(task: Path, output: Path, budget):
 
 
 async def resume_verifier(task: Path, source: Path, destination: Path, budget, options, execution):
+    # [FUNCTION DOC] Async verifier-only continuation of a denied rollout; never dispatches the
+    # agent or reserves model spend. Inputs: task, source (original trial output), destination (new,
+    # must not exist), budget, options (trial timeout), execution (identity dict). Verifies the seal
+    # still matches, rebuilds a TrialConfig from known fields only (terminus-2,
+    # MeteredModalEnvironment), writes a receipt (claimed -> dispatched -> completed, mode
+    # verifier-only, resumed_from provenance) and resumption.json, creates the Harbor trial (must be
+    # SingleStepTrial), copies artifacts/ and agent/ and checks their trees, seeds the result from
+    # the original with exception/verifier cleared, saves original result/receipt/seal copies, runs
+    # trial._run_verifier with a timeout (exceptions recorded on the trial), writes result.json, and
+    # re-checks the seal. Raises ValueError on evidence mismatches; on any exception marks the
+    # receipt interrupted and re-raises; always stops environments and raises RuntimeError if
+    # cleanup is uncertain (unless cancelled). Uses private Harbor trial methods, so it is pinned to
+    # Harbor 0.22 internals.
     """One continuation; never dispatch an agent or reserve model tokens."""
     from harbor.models.trial.config import TrialConfig
     from harbor.models.trial.result import TrialResult

@@ -1,3 +1,7 @@
+# [MODULE DOC] Pydantic models for the practical-generation-v1 quality profile: model-facing review
+# and repair schemas (Citation, Assessment, Issue, ReadRequest, SemanticProbe, Review, Edit,
+# Repair), the probe manifest, run options (LoopOptions), trial evidence (TrialRecord) and the final
+# LoopResult. All models forbid extra fields. ProbeFocus enumerates semantic probe focus areas.
 """Evidence and bounded decisions for the practical-generation review profile."""
 
 from __future__ import annotations
@@ -10,6 +14,7 @@ from repo2rlenv.spec.input import LLMSpec
 
 
 class Record(BaseModel):
+    # [CLASS DOC] Base model for every record here; config forbids unknown fields.
     model_config = ConfigDict(extra="forbid")
 
 
@@ -19,11 +24,14 @@ ProbeFocus = Literal[
 
 
 class Citation(Record):
+    # [CLASS DOC] Evidence citation: document path and a verbatim quote of 1-1000 chars.
     path: str
     quote: str = Field(min_length=1, max_length=1000)
 
 
 class Assessment(Record):
+    # [CLASS DOC] One review criterion: status pass/fail/unknown, score 0-4, explanation and at
+    # least one citation.
     status: Literal["pass", "fail", "unknown"]
     score: int = Field(ge=0, le=4)
     explanation: str
@@ -31,6 +39,9 @@ class Assessment(Record):
 
 
 class Issue(Record):
+    # [CLASS DOC] A reviewer finding: category
+    # (instruction/verifier/leakage/reference/packaging/probe), severity blocking|improvement,
+    # problem and suggested repair text, and at least one citation.
     category: Literal["instruction", "verifier", "leakage", "reference", "packaging", "probe"]
     severity: Literal["blocking", "improvement"]
     problem: str
@@ -39,6 +50,8 @@ class Issue(Record):
 
 
 class ReadRequest(Record):
+    # [CLASS DOC] Model request for more evidence: path plus either a literal query or a line range.
+    # query is required (may be null); start_line/end_line are always required and >=1.
     path: str
     query: str | None = Field(
         description="One exact literal substring to search, not a regex or a list of words. Use separate read requests for different terms."
@@ -48,12 +61,17 @@ class ReadRequest(Record):
 
     @model_validator(mode="after")
     def bounded_range(self):
+        # [FUNCTION DOC] Validator: requires end_line >= start_line and fewer than 400 lines
+        # spanned; raises ValueError otherwise. Returns self.
         if not 0 <= self.end_line - self.start_line < 400:
             raise ValueError("Read at most 400 lines in forward order")
         return self
 
 
 class SemanticProbe(Record):
+    # [CLASS DOC] A known counterexample (wrong_solution) or alternative (valid_alternative): slug
+    # name (<=36 chars), focus, rationale, citations, and a shell script (<=16000 chars) run after
+    # the reference solution inside a private probe variant.
     name: str = Field(pattern=r"^[a-z][a-z0-9-]{0,35}$")
     kind: Literal["wrong_solution", "valid_alternative"]
     focus: ProbeFocus = "general"
@@ -64,11 +82,15 @@ class SemanticProbe(Record):
 
 
 class ProbeManifest(Record):
+    # [CLASS DOC] User-supplied probe file bound to a task bundle hash (sha256:<64 hex>) with 1-4
+    # probes.
     bundle_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     probes: list[SemanticProbe] = Field(min_length=1, max_length=4)
 
 
 class Review(Record):
+    # [CLASS DOC] Structured reviewer output: summary, task/verifier/leakage assessments, rollout
+    # verdict, up to 12 issues, up to 4 proposed probes, and up to 6 read requests.
     summary: str
     task: Assessment
     verifier: Assessment
@@ -89,6 +111,9 @@ class Review(Record):
 
     @property
     def sound(self) -> bool:
+        # [FUNCTION DOC] Property: True when no read requests remain, all three assessments pass, no
+        # issue is blocking and the rollout verdict is not reward_hack, task_defect or
+        # insufficient_evidence.
         return (
             not self.read_requests
             and all(
@@ -100,6 +125,8 @@ class Review(Record):
 
 
 class Edit(Record):
+    # [CLASS DOC] A repair text edit: path, old text (empty means create new file), new text,
+    # executable flag.
     path: str
     old: str
     new: str
@@ -107,6 +134,9 @@ class Edit(Record):
 
 
 class Repair(Record):
+    # [CLASS DOC] Model-authored repair: explanation (<=1500 chars), addressed issue list (>=1), up
+    # to 16 edits, up to 256 expected-pass IDs to append to tests/contract.json, and up to 4 probe
+    # replacements.
     explanation: str = Field(max_length=1500)
     addressed_issues: list[str] = Field(min_length=1)
     edits: list[Edit] = Field(max_length=16)
@@ -122,6 +152,8 @@ class Repair(Record):
 
     @model_validator(mode="after")
     def targeted_changes(self):
+        # [FUNCTION DOC] Validator: requires at least one edit, append or probe replacement, and
+        # nonempty, unique appended IDs; raises ValueError otherwise. Returns self.
         if not self.edits and not self.append_expected_passes and not self.probe_replacements:
             raise ValueError("A repair must change task files or a diagnosed invalid probe")
         if any(not value.strip() for value in self.append_expected_passes):
@@ -134,6 +166,11 @@ class Repair(Record):
 
 
 class LoopOptions(Record):
+    # [CLASS DOC] Run options for QualityLoop: review/repair/escalation/solver LLMSpecs (defaults
+    # anthropic claude-sonnet-4-6 for review and solver), repair and run_rollout switches, bounded
+    # counts (repairs, read rounds, probes, context chars, model tokens, solver turns/tokens, trial
+    # timeout), success_reward threshold, USD reservation strings for model and solver calls, shared
+    # reservation wait seconds, and max_spend_usd for the whole run.
     review_model: LLMSpec = Field(
         default_factory=lambda: LLMSpec(provider="anthropic", model="claude-sonnet-4-6")
     )
@@ -160,6 +197,9 @@ class LoopOptions(Record):
 
     @model_validator(mode="after")
     def explicit_routes_and_limits(self):
+        # [FUNCTION DOC] Validator: USD fields must be finite positive decimals and every configured
+        # model must be an openai/anthropic route without fallback; raises ValueError (or
+        # decimal.InvalidOperation for unparsable amounts). Returns self.
         from decimal import Decimal
 
         for name in ("model_reservation_usd", "solver_reservation_usd", "max_spend_usd"):
@@ -180,6 +220,9 @@ class LoopOptions(Record):
 
 
 class TrialRecord(Record):
+    # [CLASS DOC] One trial bound to a task revision: role, bundle hash, result.json path and
+    # sha256, agent, model, reward (strict float or None), exception type, binding kind (receipt or
+    # harbor_checksum), agent exit code, whether a probe was installed, and the probe itself.
     role: Literal["baseline", "oracle", "rollout", "probe"]
     bundle_hash: str
     result: str
@@ -196,6 +239,9 @@ class TrialRecord(Record):
 
 
 class LoopResult(Record):
+    # [CLASS DOC] Final report: schema/profile version, status (usable/reviewed/needs_repair/
+    # needs_evidence/budget_exhausted), source and final bundle hashes, final task path, repair
+    # count, last review, trials, reasons, and accounted/reserved USD strings.
     schema_version: Literal["1"] = "1"
     profile: Literal["practical-generation-v1"] = "practical-generation-v1"
     status: Literal["usable", "reviewed", "needs_repair", "needs_evidence", "budget_exhausted"]

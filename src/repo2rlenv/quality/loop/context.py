@@ -1,3 +1,8 @@
+# [MODULE DOC] Bounded evidence packs for the LLM reviewer. EvidenceContext gathers a task's files
+# and trial evidence into a character-budgeted set of documents with an inventory, records explicit
+# omissions, serves bounded follow-up reads (line ranges or literal searches), serializes the pack
+# as JSON, and verifies that every citation in a model Review quotes text actually present in the
+# documents shown.
 """Bounded evidence packs, explicit omissions and verifiable model citations."""
 
 from __future__ import annotations
@@ -15,6 +20,13 @@ from repo2rlenv.quality.loop.rollout_evidence import rollout_documents
 
 
 def _search_excerpts(lines: list[str], query: str, *, maximum: int | None = None) -> str:
+    # [FUNCTION DOC] HELPER: Literal substring search over lines returning labelled excerpts. Each
+    # hit yields a window from 5 lines before to 25 after (merged with the previous window when
+    # overlapping and still <=3000 chars); when a window would exceed 3000 chars (e.g. one huge
+    # minified line) it emits column slices of up to 3000 chars around each hit instead. Stops after
+    # 8 windows and appends a note. Returns '[No literal matches found]' when nothing matches. If
+    # maximum is given and the result is longer, drops trailing windows with an explicit omission
+    # note; raises ValueError if not even one window fits.
     """Bound both match count and characters, including minified JSON traces."""
     excerpts = []
     ranges = []
@@ -81,7 +93,23 @@ def _search_excerpts(lines: list[str], query: str, *, maximum: int | None = None
 
 
 class EvidenceContext:
+    # [CLASS DOC] Character-bounded evidence pack over a task directory and its TrialRecords.
+    # Attributes: documents (key -> text shown to the model), inventory (path/bytes/sha256 of every
+    # readable item), omitted (reasons strings), verifier_paths (selected test files), plus private
+    # maps of readable paths and in-memory texts.
     def __init__(self, task: Path, trials: list[TrialRecord], *, limit: int):
+        # [FUNCTION DOC] Builds the initial pack. Inputs: task dir, trials, limit (total chars).
+        # Inventories every task file, includes priority files (instruction, task.toml, Dockerfile,
+        # solve.sh, test.sh, contract.json; 12000 chars each), derives instruction symbols and, from
+        # tests/contract.json (expected_passes, test_paths), selected test files/symbols. Then
+        # includes top-level tests/solution helpers, small whole selected test files (<=24000 bytes)
+        # or symbol excerpts of Python files. Initial task share is 35% of limit when trials exist,
+        # else 70%. For each trial: verifies the result.json sha256 (ValueError 'Trial result
+        # changed since ingestion'), adds a summarized result.json (with exception message tail),
+        # probe scripts and rollout_documents as in-memory texts, and selected
+        # verifier/agent/artifact files by priority (baseline evidence deprioritized). Raises
+        # ValueError if a trial file is a symlink or escapes the trial dir. Then includes the
+        # collected trial candidates up to 70% of limit, tail-preserving. Reads files only.
         self.task, self.limit = task, limit
         self.documents: dict[str, str] = {}
         self.inventory: list[dict] = []
@@ -271,6 +299,8 @@ class EvidenceContext:
                 self._include(key, self._paths[key], maximum=maximum, tail=True)
 
     def _include(self, key: str, path: Path, *, maximum: int, tail: bool = False):
+        # [FUNCTION DOC] HELPER: Includes a file via _include_text unless it exceeds 2 MB or is not
+        # decodable text, in which case it records an omission reason instead.
         if path.stat().st_size > 2_000_000:
             self.omitted.append(key + ": larger than 2 MB")
             return
@@ -282,6 +312,9 @@ class EvidenceContext:
         self._include_text(key, text, maximum=maximum, tail=tail)
 
     def _include_text(self, key: str, text: str, *, maximum: int, tail: bool):
+        # [FUNCTION DOC] HELPER: Adds text under key bounded by min(maximum, remaining initial
+        # budget). Records 'context budget' omission if fewer than 100 chars remain; when truncating
+        # records a partial-text omission and keeps either head+tail halves (tail=True) or the head.
         # Leave room for model-requested source excerpts instead of filling the
         # initial prompt with unrelated repository documentation and test names.
         remaining = self._initial_limit - sum(len(value) for value in self.documents.values())
@@ -299,6 +332,12 @@ class EvidenceContext:
         self.documents[key] = text
 
     def _include_symbols(self, key: str, path: Path, symbols: set[str]):
+        # [FUNCTION DOC] HELPER: For a Python file, extracts source of functions/classes whose names
+        # match any symbol (len>=3) case- and underscore-insensitively (also 'XTests' classes for
+        # symbol X), each up to 400 lines, stopping near 12000 chars, prefixed by the module header
+        # (first 60 lines, <=4000 chars). Stores at most 16000 chars only if it fits the initial
+        # budget and records a 'symbol excerpts only' omission. Silently ignores unparsable or
+        # non-text files.
         if not symbols:
             return
         try:
@@ -344,6 +383,10 @@ class EvidenceContext:
             )
 
     def add_text(self, key: str, text: str, *, maximum: int):
+        # [FUNCTION DOC] Registers controller-supplied text under a new key: stores the full text
+        # for later reads, adds an inventory entry, and shows it in documents up to min(maximum,
+        # remaining total limit) with an end marker when truncated (recording an omission). Raises
+        # ValueError if the key already exists.
         """Register controller context with bounded excerpts and a readable full source."""
         if key in self._paths or key in self._texts or key in self.documents:
             raise ValueError("Evidence document already exists")
@@ -369,6 +412,12 @@ class EvidenceContext:
             )
 
     def read_more(self, requests: list[ReadRequest]):
+        # [FUNCTION DOC] Serves the model's ReadRequests, all-or-nothing. Each request names an
+        # inventory path and either a literal query (1-200 chars, via _search_excerpts bounded by
+        # remaining budget) or a start/end line range. Adds documents keyed '<path>:search=<q>' or
+        # '<path>:L<a>-L<b>' (duplicates skipped). Raises ValueError for unknown paths (listing
+        # exact basename matches), files over 2 MB, empty results, or exceeding the total limit; on
+        # error documents are unchanged.
         additions = {}
         for request in requests:
             if request.path not in self._paths and request.path not in self._texts:
@@ -433,6 +482,11 @@ class EvidenceContext:
         self.documents = updated
 
     def _inventory_payload(self) -> dict:
+        # [FUNCTION DOC] HELPER: Returns the inventory section of the payload: a flat list of
+        # path/bytes if its JSON is <=30000 chars, else grouped by directory if that fits, else
+        # stores a full JSONL catalogue as the in-memory document evidence/full-file-inventory.jsonl
+        # and returns a summary (counts per directory, first 100). Raises ValueError if the task
+        # already has that reserved path. Mutates the private text map in the last case.
         entries = [{"path": item["path"], "bytes": item["bytes"]} for item in self.inventory]
         if len(json.dumps(entries)) <= 30000:
             return {"inventory": entries}
@@ -475,6 +529,9 @@ class EvidenceContext:
         }
 
     def payload(self, **extra) -> str:
+        # [FUNCTION DOC] Serializes the pack as JSON (documents, selected verifier files up to 32,
+        # inventory section, non-budget omissions, a budget-omission count, plus any extra keyword
+        # fields) and returns it. Raises ValueError if longer than limit + 70000 chars.
         result = json.dumps(
             {
                 "documents": self.documents,
@@ -498,6 +555,10 @@ class EvidenceContext:
         return result
 
     def validate_review(self, review: Review):
+        # [FUNCTION DOC] Checks every citation in a Review (three assessments, issues and probes):
+        # the cited path must be a shown document and the quote must appear in it after whitespace
+        # normalization. Raises ValueError with protocol.citation_path_error guidance on the first
+        # failure.
         citations = [
             citation
             for name in ("task", "verifier", "leakage")

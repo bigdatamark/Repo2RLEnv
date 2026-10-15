@@ -1,3 +1,8 @@
+# [MODULE DOC] GPU trial backend: Harbor trials orchestrated in-process with all target execution on
+# native Modal sandboxes (execution.harbor_modal.MeteredModalEnvironment), metered per allocation
+# via NativeAccounting. Provides task validation for native GPU trials, helpers that classify budget
+# denials to settle solver spend correctly, and NativeModalTrials, which exposes the same run/close
+# interface as remote.RemoteTrials and writes the same trial.json receipts.
 """Harbor trials orchestrated locally with all target execution on native Modal."""
 
 from __future__ import annotations
@@ -17,6 +22,10 @@ from repo2rlenv.quality.loop.remote import RemoteTrials
 
 
 def validate_native_task(task: Path):
+    # [FUNCTION DOC] Parses the task and enforces the native GPU shape: verifier environment_mode
+    # must be 'separate', and both learner and verifier environments must request 1 or 2 GPUs of
+    # type exactly ['L4'] with network_mode 'no-network'. Returns the parsed Harbor Task. Raises
+    # ValueError otherwise (or from parse_task).
     parsed = parse_task(task)
     config = parsed.config
     if config.verifier.environment_mode.value != "separate":
@@ -32,6 +41,10 @@ def validate_native_task(task: Path):
 
 
 def model_was_not_dispatched(result: Path, allocations: Path) -> bool:
+    # [FUNCTION DOC] Returns True only when the trial was denied before any learner/model run: there
+    # is at least one allocation claim, every claim's state is reservation_failed, result.json has
+    # agent_execution and agent_result explicitly null, and its exception type is BudgetExceeded.
+    # Inputs: result.json path, allocations directory. Reads files only.
     """Prove a reservation denial happened before any learner sandbox/model run."""
     data = json.loads(result.read_text())
     claims = [json.loads(path.read_text()) for path in allocations.glob("*.json")]
@@ -47,6 +60,11 @@ def model_was_not_dispatched(result: Path, allocations: Path) -> bool:
 
 
 def model_cost_after_verifier_denial(result: Path, allocations: Path) -> Decimal | None:
+    # [FUNCTION DOC] Returns the completed solver's cost (Decimal >= 0) when the agent finished but
+    # only the verifier allocation was denied, else None. Conditions: exception type BudgetExceeded,
+    # agent_execution.finished_at set, at least one reservation_failed claim and all such claims are
+    # for '__verifier__' providers, all claims (excluding *.cost.json) are terminated or
+    # reservation_failed, and agent_result.cost_usd parses as a finite non-negative non-bool number.
     """Retain completed solver usage even when its later verifier cannot allocate."""
     data = json.loads(result.read_text())
     execution = data.get("agent_execution") or {}
@@ -74,6 +92,11 @@ def model_cost_after_verifier_denial(result: Path, allocations: Path) -> Decimal
 
 
 def settle_completed_agent(data: dict, receipt: Path, budget, operation: str) -> bool:
+    # [FUNCTION DOC] Settles the solver reservation before verification when the agent finished
+    # normally (no exception, finished_at set, finite non-negative non-bool cost_usd). Writes a
+    # receipt (operation id, trial name, agent execution/result, accounted cost, verifier_pending)
+    # and calls budget.settle(operation, cost, evidence=receipt path). Returns True if settled, else
+    # False. Inputs: data (trial result dict), receipt path, budget, operation id.
     """Close model accounting before verification when the agent finished normally."""
     agent = data.get("agent_result") or {}
     if (
@@ -104,12 +127,18 @@ def settle_completed_agent(data: dict, receipt: Path, budget, operation: str) ->
 
 
 class NativeModalTrials:
+    # [CLASS DOC] Trial runner for GPU tasks with the RemoteTrials interface (run, close) but no
+    # Docker worker; holds the output directory, a RunBudget and LoopOptions.
     """The same trial-runner interface as RemoteTrials, without a Docker worker."""
 
     def __init__(self, directory, budget, options):
+        # [FUNCTION DOC] Stores directory, budget and options. No side effects.
         self.directory, self.budget, self.options = directory, budget, options
 
     def identity(self):
+        # [FUNCTION DOC] Returns the execution identity recorded in receipts: provider
+        # 'native-modal', installed harbor version, and SHA-256 of the harbor_modal adapter, this
+        # module and native_recovery source files. Reads source files.
         from importlib.metadata import version
 
         from repo2rlenv.execution import harbor_modal
@@ -126,6 +155,13 @@ class NativeModalTrials:
         }
 
     def run(self, task: Path, role: str, key: str):
+        # [FUNCTION DOC] Runs (or resumes) one trial and returns its TrialRecord. Inputs: task path,
+        # role (baseline/oracle/probe/rollout), key (output subdirectory under trials/). Validates
+        # the task. If trials/<key>/trial.json exists, re-reads it; for a rollout that ended in
+        # BudgetExceeded with sealed verifier-inputs.json, performs at most one verifier-only
+        # continuation into verifier-resume/ (via native_recovery.resume_verifier) and returns that
+        # record. Otherwise runs _run under asyncio.run and reads the receipt via
+        # RemoteTrials._read. Raises ValueError/ RuntimeError from the underlying steps.
         output = self.directory / "trials" / key
         validate_native_task(task)
         if (output / "trial.json").exists():
@@ -151,6 +187,21 @@ class NativeModalTrials:
         return RemoteTrials._read(output, task, role)
 
     async def _run(self, task, role, key, output):
+        # [FUNCTION DOC] HELPER: Executes one Harbor trial natively. Agent is nop (baseline), oracle
+        # (oracle/probe) or terminus-2 with the solver model (rollout). For rollouts requires a
+        # direct anthropic/openai model without endpoint/fallback, a resolvable key from the
+        # standard env var (ValueError otherwise), and reserves solver_reservation_usd under
+        # operation 'trial:<prefix>-<key>'. Creates the output dir (must not exist), writes
+        # trial.json through states claimed -> dispatched -> completed (result path/sha256, reward,
+        # exception type), builds a TrialConfig using MeteredModalEnvironment (sandbox timeout
+        # min(1800, trial_timeout_sec)), installs NativeAccounting in the ACCOUNTING context var,
+        # hooks VERIFICATION_START on single-step trials to settle model cost early, and runs with
+        # an asyncio timeout. Afterwards settles the model reservation as 0 (not dispatched), the
+        # completed cost (verifier denied), the reported cost, or marks it uncertain; seals verifier
+        # inputs when the verifier was denied. On any exception marks the receipt interrupted, marks
+        # unsettled model spend uncertain and re-raises. Always stops all environments; if any stop
+        # fails or any allocation is not terminated/build_failed it marks cleanup_uncertain and
+        # raises RuntimeError (unless the run was cancelled). Resets the accounting context var.
         from harbor.models.trial.config import TrialConfig
         from harbor.trial.hooks import TrialEvent
         from harbor.trial.single_step import SingleStepTrial
@@ -223,6 +274,10 @@ class NativeModalTrials:
         model_settled = False
 
         async def before_verifier(event):
+            # [FUNCTION DOC] HELPER: Trial hook run at verification start; calls
+            # settle_completed_agent on the in-progress result (receipt completed-agent.json) and,
+            # if settled, records model_dispatch 'completed_before_verification' in the trial
+            # receipt.
             nonlocal model_settled
             model_settled = settle_completed_agent(
                 event.result.model_dump(mode="json"),
@@ -309,5 +364,6 @@ class NativeModalTrials:
                 ACCOUNTING.reset(token)
 
     def close(self):
+        # [FUNCTION DOC] No-op; each native trial stops its own environments before returning.
         # Each trial owns and closes both of its environments before returning.
         pass

@@ -1,3 +1,8 @@
+# [MODULE DOC] Mechanical, deterministic corrections around model output that never invent evidence
+# or edit semantics: citation error messages, restoration of inline-code backticks in Markdown
+# quotes, resolution of compressed or prefix-less JSON test-result quotes to the exact source bytes,
+# de-duplication/renaming of proposed probes, and resolution of verifier edit paths that omitted a
+# directory when exactly one existing file matches.
 """Mechanical corrections that preserve model-proposed checks and exact edits."""
 
 from __future__ import annotations
@@ -12,6 +17,8 @@ from repo2rlenv.quality.loop.models import Citation, Repair, Review, SemanticPro
 
 
 def _citation_document_matches(citation: Citation, documents: dict[str, str]) -> list[str]:
+    # [FUNCTION DOC] HELPER: Returns sorted document paths whose whitespace-normalized text contains
+    # the citation's whitespace-normalized quote (empty list for an empty quote).
     quote = " ".join(citation.quote.split())
     if not quote:
         return []
@@ -19,6 +26,9 @@ def _citation_document_matches(citation: Citation, documents: dict[str, str]) ->
 
 
 def citation_path_error(citation: Citation, documents: dict[str, str]) -> str:
+    # [FUNCTION DOC] Returns an explanatory error string for an ungrounded citation: the cited path,
+    # the quote (first 250 chars), how many and which supplied documents (up to 8) contain the quote
+    # exactly, and instructions to copy a contiguous excerpt. No side effects.
     """Explain unsupported citation paths without guessing or adding evidence."""
     matches = _citation_document_matches(citation, documents)
     listed = matches[:8]
@@ -35,6 +45,11 @@ def citation_path_error(citation: Citation, documents: dict[str, str]) -> str:
 
 
 def _inline_markdown_matches(document: str, quote: str) -> list[str]:
+    # [FUNCTION DOC] HELPER: Finds lines in a Markdown document that equal the quote once single
+    # backticks are removed. Only for quotes of >=32 chars (also after removing backticks) without
+    # newlines, backslashes or double backticks; skips fenced/indented code, lines with
+    # double/escaped backticks, and lines with zero or an odd number of backticks. Returns the
+    # original line substrings (with backticks) for each match.
     """Match literal words with only single-backtick formatting differences."""
     if len(quote) < 32 or any(value in quote for value in ("\n", "\r", "\\", "``")):
         return []
@@ -64,6 +79,9 @@ def _inline_markdown_matches(document: str, quote: str) -> list[str]:
 
 
 def resolve_markdown_citations(review: Review, documents: dict[str, str]) -> tuple[Review, list]:
+    # [FUNCTION DOC] Returns (deep-copied review, change list) where each .md citation not already
+    # grounded is replaced by its unique backtick-restored match (<=1000 chars) from the document.
+    # Changes are {path, old, new}. The input review is not mutated.
     """Restore inline-code delimiters in unique Markdown prose excerpts.
 
     No word, case, punctuation or numeric changes are accepted. Fenced/indented
@@ -86,6 +104,9 @@ def resolve_markdown_citations(review: Review, documents: dict[str, str]) -> tup
 
 
 def _matching_json_keys(node, requested: str, expected: str):
+    # [FUNCTION DOC] HELPER: Generator over a decoded JSON tree yielding dict keys equal to
+    # requested (or, for 'test_*' names, ending in '::name' or '.name') whose value serializes
+    # (sorted keys) to expected.
     if isinstance(node, dict):
         for key, candidate in node.items():
             matches = key == requested or (
@@ -100,6 +121,11 @@ def _matching_json_keys(node, requested: str, expected: str):
 
 
 def resolve_json_citations(review: Review, documents: dict[str, str]) -> tuple[Review, list]:
+    # [FUNCTION DOC] Returns (deep-copied review, change list) where each ungrounded .json citation
+    # that parses as a single '"key": value' fragment is replaced by the exact source excerpt,
+    # provided exactly one matching key with an equal value exists in the document and exactly one
+    # raw occurrence (<=1000 chars) is found. Unparsable documents/fragments and ambiguous matches
+    # are left unchanged.
     """Resolve unique structured test-result citations, never paraphrased prose.
 
     Reviewers sometimes omit a test's module prefix or compress JSON formatting.
@@ -154,6 +180,10 @@ def resolve_json_citations(review: Review, documents: dict[str, str]) -> tuple[R
 def distinct_probes(
     proposed: list[SemanticProbe], retained: list[SemanticProbe]
 ) -> list[SemanticProbe]:
+    # [FUNCTION DOC] Returns proposed probes minus those whose (kind, focus, script) duplicates a
+    # retained or earlier proposed probe; a name collision is resolved by truncating to 27 chars and
+    # appending an 8-hex hash of the signature. Raises ValueError if the renamed name still
+    # collides.
     """Keep existing controls; rename collisions without changing their scripts."""
     known = {probe.name: probe for probe in retained}
     signatures = {(probe.kind, probe.focus, probe.script) for probe in retained}
@@ -176,6 +206,10 @@ def distinct_probes(
 
 
 def resolve_verifier_paths(task: Path, repair: Repair) -> Repair:
+    # [FUNCTION DOC] Returns a copy of the repair where each replacement edit (nonempty old) under
+    # tests/ whose path does not exist is redirected to the unique existing file under tests/ with
+    # the same trailing path components that contains old exactly once. Other edits are unchanged;
+    # may raise ValueError from edit_path for invalid paths.
     """Resolve an omitted directory only with one existing, exact verifier match.
 
     No fuzzy text replacement, new-file redirection, or source/oracle path

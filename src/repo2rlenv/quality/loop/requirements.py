@@ -1,3 +1,7 @@
+# [MODULE DOC] Explicit quality requirements (currently required probe focus areas) stored in
+# task.toml under metadata.repo2env.quality_requirements and bound to the task's bundle identity.
+# Adding requirements produces an annotated copy with a new identity rather than editing the
+# original.
 """Explicit quality requirements bound to a task's executable bundle identity."""
 
 from __future__ import annotations
@@ -16,10 +20,14 @@ from repo2rlenv.quality.loop.models import ProbeFocus, Record
 
 
 class QualityRequirements(Record):
+    # [CLASS DOC] Model for metadata.repo2env.quality_requirements: probe_focus, a list of up to 4
+    # unique ProbeFocus values (normalized to sorted order).
     probe_focus: list[ProbeFocus] = Field(default_factory=list, max_length=4)
 
     @model_validator(mode="after")
     def unique_focus(self):
+        # [FUNCTION DOC] Validator: raises ValueError on duplicate focus entries, then sorts
+        # probe_focus in place. Returns self.
         if len(set(self.probe_focus)) != len(self.probe_focus):
             raise ValueError("Required probe focus entries must be unique")
         self.probe_focus = sorted(self.probe_focus)
@@ -27,6 +35,9 @@ class QualityRequirements(Record):
 
 
 def task_probe_focus(task: Path) -> set[ProbeFocus]:
+    # [FUNCTION DOC] Returns the set of required probe focus areas from the task's task.toml (empty
+    # when absent). Raises ValueError if metadata or metadata.repo2env is not a table, or pydantic
+    # ValidationError for invalid requirements.
     """Read strict, explicit requirements; absent metadata preserves legacy behavior."""
     configuration = tomllib.loads((task / "task.toml").read_text())
     metadata = configuration.get("metadata", {})
@@ -37,6 +48,13 @@ def task_probe_focus(task: Path) -> set[ProbeFocus]:
 
 
 def with_probe_requirements(task: Path, destination: Path, required: Sequence[ProbeFocus]) -> Path:
+    # [FUNCTION DOC] Returns a task path whose requirements include required. If already satisfied,
+    # returns the resolved original. Otherwise copies the task (keeping symlinks) to a temp dir
+    # beside destination, writes the merged sorted probe_focus and bundle_hash into task.toml, calls
+    # refresh_identity (which resets evaluation), and renames it to destination unless an identical
+    # destination already exists. Raises ValueError if destination is a symlink or inside the task,
+    # if the task changed during copying/annotation, or if an existing destination has a different
+    # identity.
     """Publish an annotated copy, preserving originals and refusing stale evidence.
 
     A semantic no-op returns the original. A changed requirement set creates a new

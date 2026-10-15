@@ -1,3 +1,6 @@
+# [MODULE DOC] CPU trial backend: lazily provisions (or reuses) one Modal/Daytona worker per run,
+# installs the repo2rlenv runtime wheel and Docker on it, and runs Harbor trials remotely through
+# execution.harbor.run_trial with budget reservations, importing each result as a TrialRecord.
 """Lazy, reusable Modal/Daytona execution for the quality loop."""
 
 from __future__ import annotations
@@ -15,6 +18,8 @@ from repo2rlenv.quality.loop.models import LoopOptions, TrialRecord
 
 
 class RemoteTrials:
+    # [CLASS DOC] Remote trial runner bound to an output directory, RunBudget and LoopOptions. Owns
+    # the worker it provisions (stopped in close) unless an existing worker receipt was supplied.
     def __init__(
         self,
         directory: Path,
@@ -26,6 +31,9 @@ class RemoteTrials:
         worker_receipt: Path | None = None,
         worker_reservation_usd: str = "3.00",
     ):
+        # [FUNCTION DOC] Stores directory, budget, options, wheel path, provider (default modal),
+        # optional worker receipt and worker reservation USD (default '3.00'). owns_worker is True
+        # when no receipt was given. No side effects; the worker is created lazily.
         self.directory, self.budget, self.options = directory, budget, options
         self.wheel, self.provider, self.receipt = wheel, provider, worker_receipt
         self.worker_reservation = worker_reservation_usd
@@ -34,6 +42,9 @@ class RemoteTrials:
         self.python = None
 
     def identity(self) -> dict:
+        # [FUNCTION DOC] Returns the execution identity: provider, runtime wheel sha256 (via
+        # check_runtime_wheel, which may raise), resolved worker receipt path and worker
+        # reservation.
         return {
             "provider": self.provider,
             "runtime_sha256": check_runtime_wheel(self.wheel),
@@ -42,6 +53,13 @@ class RemoteTrials:
         }
 
     def _ready(self):
+        # [FUNCTION DOC] HELPER: Ensures a usable worker once. Checks the wheel; without a receipt,
+        # scans workers/<prefix>-w<N>.json, skipping terminated ones, and either provisions a new
+        # worker (2 CPU, 4096 MB, 7200 s, reserving worker_reservation_usd) or adopts the first
+        # non-terminated receipt. A receipt-based worker must be running and on this campaign's
+        # ledger (else ValueError) and is connected. Then prepares Docker and installs the runtime
+        # wheel, setting self.python. Side effects: remote provisioning and installs, budget
+        # reservation, receipts under the run directory.
         if self.worker is not None:
             return
         check_runtime_wheel(self.wheel)
@@ -86,6 +104,10 @@ class RemoteTrials:
         )
 
     def run(self, task: Path, role: str, key: str) -> TrialRecord:
+        # [FUNCTION DOC] Runs one trial and returns its TrialRecord; reuses trials/<key>/trial.json
+        # if present. Agent is nop/oracle/oracle/terminus-2 for baseline/oracle/probe/rollout;
+        # rollouts use the solver model and may wait shared_reservation_wait_sec for budget. Trial
+        # id is '<prefix>-<key>'. Propagates errors from provisioning, run_trial and import.
         output = self.directory / "trials" / key
         if (output / "trial.json").exists():
             return self._read(output, task, role)
@@ -116,6 +138,9 @@ class RemoteTrials:
 
     @staticmethod
     def _read(output: Path, task: Path, role: str) -> TrialRecord:
+        # [FUNCTION DOC] HELPER (static): Imports a trial output (probes as oracle evidence), sets
+        # the role and, for probes, probe_installed = whether agent/oracle.txt contains
+        # __QUALITY_PROBE_COMPLETED__. Raises ValueError from import_trial.
         record = import_trial(output, task, "oracle" if role == "probe" else role)
         updates = {"role": role}
         if role == "probe":
@@ -126,6 +151,8 @@ class RemoteTrials:
         return record.model_copy(update=updates)
 
     def close(self):
+        # [FUNCTION DOC] Stops the worker via stop_worker if this instance owns it and one was
+        # started, then clears it. Caller-supplied workers are left running.
         if self.owns_worker and self.worker is not None and self.receipt is not None:
             stop_worker(self.receipt, self.budget)
             self.worker = None

@@ -1,3 +1,7 @@
+# [MODULE DOC] CLI surface for 'repo2rlenv quality': argparse registration (show / run subcommands),
+# the cmd_quality handler that wires LoopOptions, the campaign BudgetLedger, QualityLoop and a
+# remote trial backend together, and Rich display of a LoopResult. Output goes through ui.console;
+# errors go through ui.errors.report_error.
 """CLI entry point using the shared console and campaign ledger."""
 
 from __future__ import annotations
@@ -16,6 +20,9 @@ from repo2rlenv.ui.errors import report_error
 
 
 def model_spec(value: str) -> LLMSpec:
+    # [FUNCTION DOC] HELPER: argparse type parsing 'provider/model' into an LLMSpec with
+    # timeout_sec=180. Only openai and anthropic providers are accepted; raises
+    # argparse.ArgumentTypeError otherwise or when the separator/model is missing.
     provider, separator, model = value.partition("/")
     if not separator or not model or provider not in {"openai", "anthropic"}:
         raise argparse.ArgumentTypeError("Use openai/MODEL or anthropic/MODEL")
@@ -23,6 +30,9 @@ def model_spec(value: str) -> LLMSpec:
 
 
 def display(result: LoopResult):
+    # [FUNCTION DOC] Renders a LoopResult on the console: a key/value panel (status, profile, task,
+    # repairs, accounted and reserved USD), then a table of the task/verifier/leakage assessments if
+    # a review exists, then one bullet line per reason. Returns None.
     console.kv(
         {
             "status": result.status,
@@ -47,6 +57,11 @@ def display(result: LoopResult):
 def execution_backend(
     task: Path, *, provider: str, wheel: Path | None, worker_receipt: Path | None
 ):
+    # [FUNCTION DOC] Chooses the trial backend from the task's resources before any dispatch. If the
+    # learner or verifier environment requests GPUs: requires provider 'modal' and no
+    # worker_receipt, validates via native.validate_native_task, and returns 'native-modal'.
+    # Otherwise requires a runtime wheel and returns the provider name. Raises ValueError on
+    # violations (or from task parsing/validation).
     """Select from the task's resources before any worker or model dispatch."""
     from repo2rlenv.quality.loop.artifacts import parse_task
     from repo2rlenv.quality.loop.native import validate_native_task
@@ -68,6 +83,16 @@ def execution_backend(
 
 
 def cmd_quality(args) -> int:
+    # [FUNCTION DOC] Handler for both quality subcommands; returns an exit code. 'show' loads a
+    # LoopResult from a result.json file or a directory containing it. 'run' optionally loads an
+    # --env-file with python-dotenv (without overriding existing env vars), builds LoopOptions from
+    # the same-named args, selects a backend when --repair or --run-rollout is set, opens the
+    # campaign's budget.sqlite3 ledger, constructs QualityLoop (with an on_event printer unless
+    # --json) and attaches NativeModalTrials or RemoteTrials as loop.remote, runs the loop on the
+    # task with any supplied baseline/oracle/rollout/probes and --resume, merges budget totals into
+    # the result, and saves <out>/result.json. Prints JSON or the display view. Returns 0 for status
+    # usable/reviewed, else 1. ValueError/OSError/RuntimeError are converted by report_error into
+    # its return code.
     from repo2rlenv.quality.loop.runner import QualityLoop
 
     try:
@@ -93,6 +118,8 @@ def cmd_quality(args) -> int:
             ledger = BudgetLedger(args.campaign / "budget.sqlite3")
 
             def on_event(event):
+                # [FUNCTION DOC] HELPER: Event callback printing '[stage] message' to the console
+                # unless --json output was requested.
                 if not args.json:
                     console.print(Text(f"[{event.stage}] {event.message}"))
 
@@ -136,6 +163,15 @@ def cmd_quality(args) -> int:
 
 
 def add_quality_parser(subparsers):
+    # [FUNCTION DOC] Registers the 'quality' subparser with 'show' (path, --json) and 'run' (task,
+    # required --campaign/--out, --env-file, --baseline/--oracle/--rollout, --probes, model options
+    # typed by model_spec, integer limits, USD reservation strings, --success-reward, --repair,
+    # --run-rollout, --provider modal|daytona, --runtime-wheel, --worker-receipt,
+    # --worker-reservation-usd default 3.00, --resume, --json). Defaults come from LoopOptions().
+    # Both route to cmd_quality. Mutates the given subparsers object.
+    # KNOWN ISSUE: LoopOptions.shared_reservation_wait_sec has no CLI flag, yet cmd_quality builds
+    # LoopOptions from getattr(args, key) for every model field, so 'quality run' raises
+    # AttributeError (not caught by the handler) unless something else sets that attribute.
     parser = subparsers.add_parser(
         "quality", help="Review and repair a Harbor task using rollout evidence"
     )

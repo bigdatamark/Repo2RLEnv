@@ -1,3 +1,6 @@
+# [MODULE DOC] Publishes a quality-labeled copy of the reviewed task (via quality.labels) under the
+# run directory without modifying the original task referenced by saved trials, recording the
+# outcome in labeled-task.json.
 """Publish a labeled copy without changing the task used by a saved trial."""
 
 from __future__ import annotations
@@ -11,6 +14,13 @@ from repo2rlenv.quality.loop.models import LoopResult
 
 
 def publish_label(directory: Path) -> dict:
+    # [FUNCTION DOC] Reads <directory>/result.json, derives a label with label_from_quality, and
+    # writes a labeled copy at <directory>/labeled/<result sha256>/<task name> (or, if it already
+    # exists, verifies its saved evaluation equals the label apart from timestamp/source fields and
+    # that the source path and task.toml digest still match). Returns and saves a receipt to
+    # labeled-task.json with state completed (paths, result hash, bundle hash, label status) or
+    # failed (error type and message). OSError/ValueError/KeyError/IndexError are captured in the
+    # receipt rather than raised.
     """Retain the quality result even if publication fails, and report that failure.
 
     The result digest selects an immutable export. Repeating publication checks

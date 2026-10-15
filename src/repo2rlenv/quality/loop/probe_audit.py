@@ -1,3 +1,8 @@
+# [MODULE DOC] Standalone in-container audit for semantic probes, copied into a probe variant as
+# solution/quality-probe-audit.py and run before and after the probe script. It fingerprints the
+# collected submission files (bytes and, for Python, an AST dump hash) without importing them, and
+# in the after phase prints the changed files, failing if nothing changed. Stdlib only; print() is
+# intentional because this runs as a script inside the task container, not as library code.
 """Standalone private control audit; hash submissions without importing their code."""
 
 from __future__ import annotations
@@ -10,10 +15,18 @@ from pathlib import Path, PurePosixPath
 
 
 def submission_files(workspace: Path, contract: dict) -> dict[str, dict | None]:
+    # [FUNCTION DOC] Returns {relative name: {sha256, syntax_sha256} or None if missing} for the
+    # contract's submitted_files plus every *.py under submitted_roots, minus immutable_assets,
+    # resolved against workspace. syntax_sha256 is the hash of the AST dump for parsable .py files,
+    # else None. Raises ValueError for non-canonical/absolute paths, symlinks on the path, or
+    # non-regular/over 8 MB files.
     """Track the mutable files collected by our repository-task verifier."""
     workspace = workspace.resolve()
 
     def checked(relative: str) -> Path:
+        # [FUNCTION DOC] HELPER: Validates a contract-relative path (nonempty, relative, no
+        # backslash, no empty/'.'/'..' components, no symlinked component) and returns the workspace
+        # path; raises ValueError otherwise.
         value = PurePosixPath(relative)
         if (
             not relative
@@ -57,7 +70,13 @@ def submission_files(workspace: Path, contract: dict) -> dict[str, dict | None]:
 
 
 def changed_files(before: dict, after: dict, *, require_valid_python: bool = False) -> dict:
+    # [FUNCTION DOC] Compares two submission snapshots and returns {name: {before, after}} for files
+    # whose identity (syntax hash if available, else byte hash, or None) differs. Raises ValueError
+    # if nothing changed, or, when require_valid_python, if a .py file became unparseable (it was
+    # absent or parsable before).
     def identity(value):
+        # [FUNCTION DOC] HELPER: Returns None for a missing file, else its syntax hash or, failing
+        # that, its byte hash.
         return None if value is None else value["syntax_sha256"] or value["sha256"]
 
     changes = {
@@ -81,6 +100,10 @@ def changed_files(before: dict, after: dict, *, require_valid_python: bool = Fal
 
 
 def main() -> None:
+    # [FUNCTION DOC] Script entry: argv is contract path, state path, phase. Snapshots /workspace.
+    # 'before' writes the snapshot JSON to the state file; 'after' compares against it, prints
+    # '__QUALITY_PROBE_CHANGED_FILES__ <json>' to stdout and deletes the state file. Raises
+    # ValueError for an unknown phase or audit failures (non-zero exit fails the probe setup).
     contract, state, phase = sys.argv[1:]
     boundary = json.loads(Path(contract).read_text())
     snapshot = submission_files(Path("/workspace"), boundary)

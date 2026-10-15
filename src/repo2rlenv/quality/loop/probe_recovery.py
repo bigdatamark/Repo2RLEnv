@@ -1,3 +1,9 @@
+# [MODULE DOC] Evidence-bound correction of wrong_solution probe controls whose installation never
+# completed (the probe variant's setup failed before the __QUALITY_PROBE_COMPLETED__ marker).
+# Attempts are journaled under probe-attempts/ so they survive revision changes; a failure is
+# exposed to the model only when independently reconstructed from the owned receipt, variant and
+# logs, and a probe may be replaced only when the review grounds a probe-category diagnosis in that
+# attempt's evidence.
 """Evidence-bound correction of controls that never completed installation."""
 
 from __future__ import annotations
@@ -11,6 +17,10 @@ from repo2rlenv.quality.loop.models import SemanticProbe, TrialRecord
 
 
 def _files(trial: TrialRecord) -> dict[str, str | None]:
+    # [FUNCTION DOC] HELPER: Returns {path: sha256 or None if absent} for a probe trial's
+    # result.json, its receipt trial.json (two directories up), agent/oracle.txt and
+    # agent/exit-code.txt. Raises ValueError if any path component is a symlink or an existing path
+    # is not a regular file.
     result = Path(trial.result)
     paths = [
         result,
@@ -29,6 +39,9 @@ def _files(trial: TrialRecord) -> dict[str, str | None]:
 
 
 def capture_attempt(parent_hash: str, trial: TrialRecord) -> dict:
+    # [FUNCTION DOC] Returns an attempt record {parent_hash, trial dump, files hashes} for a trial,
+    # adding behavior_files (probe_behavior.behavior_files) when the probe focus is behavioral.
+    # Reads files only.
     from repo2rlenv.quality.loop.probe_behavior import BEHAVIOR_FOCI, behavior_files
 
     attempt = {
@@ -42,6 +55,10 @@ def capture_attempt(parent_hash: str, trial: TrialRecord) -> dict:
 
 
 def record_attempt(directory: Path, key: str, parent_hash: str, trial: TrialRecord) -> dict:
+    # [FUNCTION DOC] Journals an attempt at <directory>/probe-attempts/<key>.json and returns it. If
+    # the journal already exists it must not be a symlink and must equal the newly captured attempt
+    # (ignoring behavior_files when the old journal lacked it), else ValueError; the saved record is
+    # returned. New journals are written with save_record.
     """Keep prior installations even after current-revision trials are discarded."""
     attempt = capture_attempt(parent_hash, trial)
     path = directory / "probe-attempts" / f"{key}.json"
@@ -65,6 +82,13 @@ def record_attempt(directory: Path, key: str, parent_hash: str, trial: TrialReco
 
 
 def installation(attempt: dict) -> bool:
+    # [FUNCTION DOC] Reconstructs whether a probe installation completed and returns True/False.
+    # Requires an owned (receipt-bound) probe trial, unchanged and present evidence files, the
+    # result sha256, the variant's probe.json manifest matching parent hash/bundle hash/probe and
+    # the variant identity, and the receipt re-importing (as oracle) to an equivalent TrialRecord.
+    # Completion is the marker in agent/oracle.txt (<=16 MB), which must agree with
+    # trial.probe_installed with a known exit code. Raises ValueError on any mismatch, or when the
+    # marker is missing yet exit code was 0 (inconclusive).
     """Reconstruct completion from the owned receipt, exact variant and saved logs.
 
     An absent receipt/log or uncertain exit is not proof of a failed installation.
@@ -117,6 +141,10 @@ def installation(attempt: dict) -> bool:
 
 
 def failed_installations(task: Path, trials: list[TrialRecord]) -> list[dict]:
+    # [FUNCTION DOC] Returns failure descriptors (name, result, sha256, exit code, evidence
+    # summary/log paths keyed by trial index, diagnosis text) for wrong_solution probe trials with
+    # probe_installed False and a nonzero exit code whose installation() independently returns
+    # False. Trials whose evidence cannot be reconstructed are silently skipped.
     """Only expose independently reconstructed failures to the model."""
     failures = []
     parent_hash = task_identity(task)
@@ -150,6 +178,9 @@ def failed_installations(task: Path, trials: list[TrialRecord]) -> list[dict]:
 
 
 def grounded_diagnosis(failure: dict, review, context) -> bool:
+    # [FUNCTION DOC] Returns True if the review has a probe-category issue with a citation to this
+    # failure's summary/log/extra evidence path whose quote (whitespace-normalized) appears in the
+    # context's shown document; else False.
     """Require a probe-category issue citing this attempt, not an unrelated defect."""
     for issue in review.issues:
         if issue.category != "probe":
@@ -170,6 +201,11 @@ def grounded_diagnosis(failure: dict, review, context) -> bool:
 def replacement_evidence(
     task: Path, probe: SemanticProbe, history: list[dict], failures: list[dict], review, context
 ) -> dict | None:
+    # [FUNCTION DOC] Returns {probe dump, attempts} authorizing replacement of a probe, or None.
+    # Only for wrong_solution probes with a reconstructed failure of the same name, at least one
+    # journaled attempt under that name, none of which ever completed installation (errors -> None),
+    # an exact attempt on the current parent hash with the identical probe whose result matches the
+    # failure, and a grounded_diagnosis by the review.
     """A completed installation under this name permanently closes this exception."""
     if probe.kind != "wrong_solution" or not any(
         failure["name"] == probe.name for failure in failures

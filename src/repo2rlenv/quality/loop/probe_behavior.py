@@ -1,3 +1,9 @@
+# [MODULE DOC] Minimum execution evidence for wrong_solution probes whose focus is model_behavior or
+# compiled_execution (BEHAVIOR_FOCI). A zero reward alone is not accepted as a behavioral
+# counterexample: the probe's recorded attempt journal, mutation audit log and structured verifier
+# outputs (verifier/result.json, verifier/results.xml) must show a real failing test that is not
+# merely an import/syntax/collection error. _LIMIT caps evidence files at 16 MB; _IMPORT_ERROR
+# matches import/syntax error lines.
 """Minimum execution evidence for numerical and compiled-behavior controls."""
 
 from __future__ import annotations
@@ -19,6 +25,8 @@ _IMPORT_ERROR = re.compile(
 
 
 def _read(path: Path) -> str:
+    # [FUNCTION DOC] HELPER: Returns a file's text after requiring it (and no ancestor) to be a
+    # symlink-free regular file of at most 16 MB; raises ValueError otherwise.
     if (
         any(part.is_symlink() for part in (path, *path.parents))
         or not path.is_file()
@@ -29,6 +37,9 @@ def _read(path: Path) -> str:
 
 
 def behavior_files(trial: TrialRecord) -> dict[str, str | None]:
+    # [FUNCTION DOC] Returns {absolute path: sha256 or None} for the trial's verifier/result.json
+    # and verifier/results.xml, binding them when an attempt is first recorded. Raises ValueError if
+    # an existing one is a symlink, not a regular file or too large.
     """Bind structured verifier results when an owned attempt is first recorded."""
     root = Path(trial.result).parent
     files = {}
@@ -43,6 +54,15 @@ def behavior_files(trial: TrialRecord) -> dict[str, str | None]:
 
 
 def _execution_problem(trial: TrialRecord) -> str | None:
+    # [FUNCTION DOC] HELPER: Returns a problem string when a behavioral probe's evidence does not
+    # show a behavioral rejection, or None when it does. Loads the attempt journal at
+    # <run>/probe-attempts/<trial dir name>.json (located via fixed parent offsets of the result
+    # path), requires it to equal the trial, validates it with quality.labels._trial_evidence,
+    # checks the agent/oracle.txt digest, and requires exactly one nonempty changed-files audit
+    # line. Returns a problem if the mutation introduced unparseable Python, if verifier result.json
+    # returncode is not 1, or if every failing JUnit testcase looks like an import/syntax error.
+    # Raises ValueError for tampered/missing evidence or XML with DOCTYPE/ENTITY declarations; may
+    # raise KeyError, IndexError, TypeError, OSError or ParseError on malformed data.
     from repo2rlenv.quality.labels import _trial_evidence
 
     result = Path(trial.result)
@@ -93,6 +113,11 @@ def _execution_problem(trial: TrialRecord) -> str | None:
 
 
 def behavioral_failure(trial: TrialRecord, success: float = 1.0) -> str | None:
+    # [FUNCTION DOC] Returns 'Probe <name>: <problem>' when an installed, failing (reward below
+    # success, no exception, exit code None/0) wrong_solution probe with a behavioral focus lacks
+    # adequate execution evidence; otherwise None (including for all non-qualifying trials).
+    # Evidence errors are converted to a 'needs diagnosis (<ExceptionType>)' problem rather than
+    # raised.
     """Reward zero alone cannot establish a required model/compiled counterexample.
 
     This is an execution floor, not proof that an assertion measures the claimed
