@@ -1,3 +1,7 @@
+# [MODULE DOC] repo_reconstruct pipeline (recipe swe_flow): owned SWE-Flow reconstruction on the
+# shared RepositoryGenerationPipeline. The remote worker (swe_flow.worker) produces scheduled
+# development steps; this module authors docstrings and an instruction, skeletonizes the scheduled
+# functions to build the defective state, verifies it with Harbor nop/oracle trials, then exports.
 """Repository reconstruction through the owned SWE-Flow development schedule."""
 
 from __future__ import annotations
@@ -17,11 +21,26 @@ from repo2rlenv.spec.input import PipelineName
 
 
 class RepoReconstructPipeline(RepositoryGenerationPipeline):
+    # [CLASS DOC] RepositoryGenerationPipeline subclass for PipelineName.REPO_RECONSTRUCT: recipe_id
+    # "swe_flow", worker_module "repo2rlenv.pipelines.recipes.swe_flow.worker". Overrides
+    # author_export.
     name = PipelineName.REPO_RECONSTRUCT
     recipe_id = "swe_flow"
     worker_module = "repo2rlenv.pipelines.recipes.swe_flow.worker"
 
     def author_export(self, generation, candidate, ledger, run, out_dir):
+        # [FUNCTION DOC] Author, verify and export one reconstruction candidate. Inputs: generation
+        # (Path with base/ checkout), candidate (dict: id, source_files, schedule incl. step,
+        # functions, contrast, repo, ref), ledger, run (Path), out_dir (Path). Calls swe_flow
+        # author() for docstrings and instruction (models under run/tasks/<id>/models); builds
+        # defective file bytes by skeletonize() of each changed source file per the schedule and
+        # docstrings, and reference bytes from the base; assembles export_repository_task arguments
+        # (name "swe-flow-<id>", org, contrast, metadata incl. recipe id, pipeline, recipe_version
+        # "1", upstream commit, repository, source revision, development step and scheduled function
+        # count). Exports a draft, runs Harbor "nop" and "oracle" trials (ids "flow-<20
+        # hex>-<agent>") on the campaign worker and requires rewards [0, 1] with both completed.
+        # Output: Path of the task exported to out_dir. Raises: ValueError on failed checks; helper
+        # errors. Side effects: LLM spend, remote execution, filesystem writes.
         execution = self.input.execution
         key = candidate["id"]
         directory = run / "tasks" / key

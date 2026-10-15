@@ -1,3 +1,7 @@
+# [MODULE DOC] repo_mutate pipeline (recipe swe_smith): owned SWE-smith procedural bug generation
+# built on the shared RepositoryGenerationPipeline, which runs swe_smith.worker remotely to produce
+# execution-contrasted mutation candidates. This module supplies the per-candidate authoring/export
+# step: LLM issue text, draft export, fresh Harbor nop/oracle checks, final export.
 """Repository mutation family: owned SWE-smith procedural generation."""
 
 from __future__ import annotations
@@ -15,11 +19,24 @@ from repo2rlenv.spec.input import PipelineName
 
 
 class RepoMutatePipeline(RepositoryGenerationPipeline):
+    # [CLASS DOC] RepositoryGenerationPipeline subclass for PipelineName.REPO_MUTATE: recipe_id
+    # "swe_smith", worker_module "repo2rlenv.pipelines.recipes.swe_smith.worker". Overrides
+    # author_export.
     name = PipelineName.REPO_MUTATE
     recipe_id = "swe_smith"
     worker_module = "repo2rlenv.pipelines.recipes.swe_smith.worker"
 
     def author_export(self, generation, candidate, ledger, run, out_dir):
+        # [FUNCTION DOC] Author, verify and export one mutation candidate. Inputs: generation (Path
+        # of the worker's generation output), candidate (dict record with "id" etc.), ledger
+        # (BudgetLedger), run (Path run dir), out_dir (final dataset dir). Steps: write_issue with
+        # the LLM (receipt run/models/<id>.json, operation id "issue:<run_id>:<id>"); export a draft
+        # task to run/tasks/<id>/draft; connect to the campaign worker from the worker receipt;
+        # derive the runtime python from the SHA-256 of the runtime wheel; run Harbor trials "nop"
+        # and "oracle" (trial ids "smith-<20 hex>-<agent>") into run/tasks/<id>/<agent>. Requires
+        # both completed with rewards [0, 1]. Output: Path of the task exported to out_dir. Raises:
+        # ValueError when the checks fail; errors from issue writing, export, worker connection or
+        # trials. Side effects: LLM spend, remote execution, filesystem writes, a progress event.
         execution = self.input.execution
         issue = write_issue(
             generation,

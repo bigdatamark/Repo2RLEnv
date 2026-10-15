@@ -1,3 +1,9 @@
+# [MODULE DOC] Typed LLM author output for terminal tasks and its materialization into a standalone
+# Harbor task bundle. Pydantic models validate the author's environment files, setup Dockerfile
+# fragment, pytest tests, weights and reference solution; dockerfile_for_setup builds the owned
+# Dockerfile; emit_draft writes the full bundle (environment, solution, tests incl. the copied
+# grade.py and test_results.py parser, contract.json) via emitter.bundle.write_bundle with no-
+# network agent and verifier policies.
 """Typed author output and standalone Harbor materialization."""
 
 from __future__ import annotations
@@ -16,6 +22,9 @@ from repo2rlenv.pipelines.recipes.catalog import RecipeInfo
 
 
 class EnvironmentFile(BaseModel):
+    # [CLASS DOC] Pydantic model (extra fields forbidden) for one author-supplied file placed under
+    # the task's environment/ directory. Fields: path (str, relative path under environment/),
+    # content (str text), executable (bool, whether to set the executable bit).
     model_config = ConfigDict(extra="forbid")
     path: str
     content: str
@@ -23,18 +32,29 @@ class EnvironmentFile(BaseModel):
 
 
 class TestWeight(BaseModel):
+    # [CLASS DOC] Pydantic model (extra forbidden) giving the reward weight of one pytest test.
+    # Fields: name (str, top-level test function name); weight (float, 0 < weight <= 1).
     model_config = ConfigDict(extra="forbid")
     name: str
     weight: float = Field(gt=0, le=1)
 
 
 class EnvironmentDefinition(BaseModel):
+    # [CLASS DOC] Pydantic model (extra forbidden) for the author-defined environment:
+    # environment_setup (str, up to 16000 chars of Dockerfile lines appended after the owned base)
+    # and environment_files (up to 100 EnvironmentFile items). Validated so it cannot override the
+    # owned Dockerfile or base image.
     model_config = ConfigDict(extra="forbid")
     environment_setup: str = Field(max_length=16000)
     environment_files: list[EnvironmentFile] = Field(max_length=100)
 
     @model_validator(mode="after")
     def valid_environment(self):
+        # [FUNCTION DOC] Post-validation check. For each environment file, validates
+        # "environment/<path>" with relative_asset_path (which raises on unsafe paths), rejects a
+        # file named exactly "Dockerfile", and rejects duplicate paths. Rejects any setup line whose
+        # stripped, upper-cased form starts with "FROM ", "USER ", "ENTRYPOINT " or "CMD ". Output:
+        # self. Raises: ValueError on any violation.
         paths = []
         for item in self.environment_files:
             relative_asset_path("environment/" + item.path)
@@ -52,6 +72,10 @@ class EnvironmentDefinition(BaseModel):
 
 
 class TerminalDraft(EnvironmentDefinition):
+    # [CLASS DOC] Complete author draft for a terminal task, extending EnvironmentDefinition with:
+    # instruction (40- 16000 chars), tests_python (40-50000 chars of pytest source), solution_shell
+    # (20-50000 chars bash reference solution), weights (5-10 TestWeight entries), self_review
+    # (20-8000 chars author notes).
     instruction: str = Field(min_length=40, max_length=16000)
     tests_python: str = Field(min_length=40, max_length=50000)
     solution_shell: str = Field(min_length=20, max_length=50000)
@@ -60,6 +84,12 @@ class TerminalDraft(EnvironmentDefinition):
 
     @model_validator(mode="after")
     def complete_contract(self):
+        # [FUNCTION DOC] Post-validation contract check. Parses tests_python with ast (a SyntaxError
+        # is not a ValueError, so it propagates unwrapped rather than as a pydantic ValidationError)
+        # and collects top-level sync function names starting with "test_". Requires weight names to
+        # be unique and exactly equal to that set, weights to sum to 1.0 (abs tol 0.001), and
+        # solution_shell to begin with "#!/bin/bash" followed by a newline. Output: self. Raises:
+        # ValueError (wrapped by pydantic) on violation; SyntaxError on unparsable tests.
         tree = ast.parse(self.tests_python)
         tests = {
             node.name
@@ -77,6 +107,16 @@ class TerminalDraft(EnvironmentDefinition):
 
 
 def dockerfile_for_setup(setup: str, agent_user: str | None = None) -> str:
+    # [FUNCTION DOC] Build the owned task Dockerfile text. Inputs: setup (str) - author Dockerfile
+    # lines appended (right-stripped) after the base; agent_user (str or None, default None) -
+    # optional unprivileged user the agent runs as. Base: python:3.12-slim with apt packages bash
+    # tmux curl git jq sqlite3, pinned pytest 9.0.3 and uv 0.10.9, PYTHONDONTWRITEBYTECODE and
+    # PYTEST_DISABLE_PLUGIN_AUTOLOAD env, WORKDIR /workspace and COPY of the build context; WORKDIR
+    # /workspace is re-set after setup. With agent_user: creates the user if missing, chowns
+    # /workspace and its home, registers each .git directory found under those trees as a system git
+    # safe.directory (so the root verifier can use them), and sets HOME. Output: Dockerfile string.
+    # Raises: ValueError if agent_user is not a simple lowercase Unix name (letter then up to 31 of
+    # [a-z0-9_]).
     if agent_user is not None and re.fullmatch(r"[a-z][a-z0-9_]{0,31}", agent_user) is None:
         raise ValueError("Agent user must be a simple Unix username")
     dockerfile = (
@@ -113,6 +153,19 @@ def emit_draft(
     resume: bool = False,
     agent_user: str | None = None,
 ) -> Path:
+    # [FUNCTION DOC] Materialize a validated TerminalDraft into a Harbor task directory. Inputs:
+    # draft; destination (Path); keyword-only name, org (task identity), recipe (RecipeInfo for
+    # provenance metadata), lineage (dict merged into metadata), timeout_sec (pytest timeout,
+    # verifier timeout is this + 30), resume (bool, default False, passed to write_bundle),
+    # agent_user (optional). Files written: environment/ author files, environment/Dockerfile,
+    # solution/solve.sh (executable), tests/test_outputs.py, tests/weights.json, tests/grade.py and
+    # tests/test_results.py (copied from package resources), executable tests/test.sh running
+    # grade.py with isolated python, tests/contract.json (test_names, timeout_sec). Metadata
+    # includes recipe id/version, pipeline, upstream commit, reward_kinds ["test_execution"],
+    # quality_status "exported". Agent and verifier both use network_mode "no-network"; verifier
+    # runs as root. Output: Path returned by write_bundle. Raises: ValueError from
+    # dockerfile_for_setup; errors from write_bundle (e.g. existing destination without resume).
+    # Note: weights.json is written but grade.py awards binary reward (all tests must pass).
     dockerfile = dockerfile_for_setup(draft.environment_setup, agent_user)
     assets = {
         "environment/" + item.path: TaskFile.text(item.content, executable=item.executable)

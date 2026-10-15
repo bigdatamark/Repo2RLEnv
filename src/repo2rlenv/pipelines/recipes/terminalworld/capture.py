@@ -1,3 +1,8 @@
+# [MODULE DOC] Script copied into a disposable replay container (as /tmp/capture.py) by
+# worker.capture. It snapshots file metadata under /workspace, /app and /home/user, runs the
+# reference bash script with a timeout, snapshots again, and writes /tmp/recording-snapshot.json
+# describing the observed filesystem changes plus the reference's combined output. Uses only the
+# standard library.
 """Runs inside a disposable container to capture a reference's filesystem changes."""
 
 from __future__ import annotations
@@ -11,6 +16,13 @@ from pathlib import Path
 
 
 def filesystem_state(roots: list[Path], limit: int = 4000) -> dict:
+    # [FUNCTION DOC] Collect metadata for regular files under the given roots. Inputs: roots (list
+    # of Path; missing or non-directory roots are skipped); limit (int, default 4000, max number of
+    # files recorded). Walks without following symlinks, pruning .git, __pycache__, .venv and
+    # node_modules, in sorted order; skips symlinks and non-regular files; ignores files that raise
+    # OSError. Output: dict mapping absolute path string to {size, mode (permission bits), mtime_ns,
+    # prefix_sha256 (SHA-256 of the first 64 KiB)}; returns early once limit entries are recorded.
+    # Side effects: file reads.
     result = {}
     for root in roots:
         if not root.is_dir():
@@ -43,6 +55,9 @@ def filesystem_state(roots: list[Path], limit: int = 4000) -> dict:
 
 
 def changes(before: dict, after: dict) -> dict:
+    # [FUNCTION DOC] Diff two filesystem_state dicts. Inputs: before, after. Output: dict with lists
+    # "created" (paths only in after), "modified" (paths in both whose metadata dicts differ, so an
+    # mtime-only change counts), and "deleted" (paths only in before). Pure function.
     return {
         "created": [path for path in after if path not in before],
         "modified": [path for path in after if path in before and after[path] != before[path]],
@@ -51,6 +66,16 @@ def changes(before: dict, after: dict) -> dict:
 
 
 def main() -> None:
+    # [FUNCTION DOC] Capture entry point. Arguments: argv[1] = path of the reference bash script,
+    # argv[2] = timeout in seconds. Takes a before-snapshot, runs "bash <script>" with stdout and
+    # stderr merged into /tmp/reference-output.txt; on timeout records timed_out true and returncode
+    # 124. Takes an after-snapshot and diffs it. For up to 40 created/modified paths, stores the
+    # first 2048 bytes decoded as UTF-8 (or "<binary file>" if a NUL byte appears, "<unreadable or
+    # binary>" on OSError or decode error). Writes /tmp/recording-snapshot.json with returncode,
+    # timed_out, solution_stdout (first 16000 chars of output), changes, changed_contents,
+    # initial_files, final_files and the scan/prefix limits. Output: None. Raises:
+    # IndexError/ValueError on missing or bad argv. Side effects: subprocess and files in /tmp; the
+    # script's own exit status is 0 even if the reference fails.
     roots = [Path(path) for path in ("/workspace", "/app", "/home/user")]
     before = filesystem_state(roots)
     output = Path("/tmp/reference-output.txt")

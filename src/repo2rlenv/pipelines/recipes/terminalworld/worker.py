@@ -1,3 +1,6 @@
+# [MODULE DOC] Remote-worker module (run via execution.generation.run_generator) that builds a
+# TerminalWorld candidate environment with Docker and replays the reference inside a locked-down
+# container using capture.py, producing snapshot.json with the observed filesystem effects.
 """Remote Docker build and reference replay for recording-driven test synthesis."""
 
 from __future__ import annotations
@@ -16,6 +19,21 @@ from repo2rlenv.pipelines.recipes.terminal.draft import EnvironmentDefinition, d
 
 
 def capture(config: dict, destination: Path) -> dict:
+    # [FUNCTION DOC] Build the image and capture the reference's effects. Inputs: config (dict with
+    # "environment" (EnvironmentDefinition data), "solution_shell" (str) and "timeout_sec" (int));
+    # destination (Path, must not exist). Steps: validate the environment, write files into
+    # destination/environment with mode 755/644 and an owned Dockerfile (no agent user); docker
+    # build tagged "repo2rlenv-recording-" + 24 hex chars of SHA-256(config) with a 600 s timeout,
+    # logging to build.log. On build failure returns and saves {returncode, stage "build", last
+    # 18000 chars of log}. Otherwise writes reference.sh, creates a container (repo2rlenv labels, no
+    # network, 1 CPU, 2 GiB, 256 pids, all capabilities dropped, no-new-privileges, workdir
+    # /workspace) whose command is "python /tmp/capture.py /tmp/reference.sh <timeout>", copies
+    # reference.sh and capture.py into /tmp, then starts it attached (timeout = timeout_sec + 60)
+    # logging to replay.log. A nonzero container exit yields {returncode, stage "capture", log
+    # tail}; otherwise copies /tmp/recording-snapshot.json out and loads it. Adds image_digest
+    # (image ID) and saves snapshot.json. Always force-removes the container (the image is kept).
+    # Output: result dict. Raises: FileExistsError, ValidationError, CalledProcessError or
+    # TimeoutExpired from Docker steps (build timeout included).
     destination.mkdir(parents=True, exist_ok=False)
     environment = EnvironmentDefinition.model_validate(config["environment"])
     context = destination / "environment"
@@ -130,6 +148,8 @@ def capture(config: dict, destination: Path) -> dict:
 
 
 def main() -> None:
+    # [FUNCTION DOC] CLI: positional config (JSON path) and output (Path); loads the config and
+    # calls capture(). Output: None.
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("config", type=Path)
     parser.add_argument("output", type=Path)

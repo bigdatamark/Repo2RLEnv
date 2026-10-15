@@ -1,3 +1,8 @@
+# [MODULE DOC] Standalone deterministic grader copied into terminal tasks as /tests/grade.py and run
+# inside the verifier container (no dependency on repo2rlenv). It runs /tests/test_outputs.py under
+# pytest with a timeout from /tests/contract.json, parses the JUnit XML with the co-shipped
+# /tests/test_results.py, and writes a binary reward to /logs/verifier/reward.txt plus diagnostics
+# to result.json.
 """Standalone deterministic terminal-task reward; no runtime dependency on us."""
 
 from __future__ import annotations
@@ -12,6 +17,17 @@ from pathlib import Path
 
 
 def main() -> None:
+    # [FUNCTION DOC] Grade the task. Steps: create /logs/verifier, pre-write reward.txt as "0"; load
+    # contract.json; dynamically import /tests/test_results.py as module "test_results"; run
+    # isolated pytest on /tests/test_outputs.py (-q, short tracebacks, cache provider disabled,
+    # plugin autoload disabled, JUnit to /logs/verifier/results.xml) in a new process session with
+    # stdout/stderr captured to stdout.txt/stderr.txt; wait up to contract timeout_sec. On timeout
+    # writes result.json {passed: false, reason: timeout} and returns (reward stays 0). Always
+    # SIGKILLs the process group afterwards. Otherwise parses JUnit; passes only if the exit code is
+    # 0, the set of observed test base names (last "::" segment, parametrization stripped) equals
+    # contract test_names, and every reported test passed. Writes result.json (passed, returncode,
+    # statuses) or (passed false, reason) on OSError/ValueError, then reward "1" or "0". Output:
+    # None. Side effects: subprocess, filesystem.
     logs = Path("/logs/verifier")
     logs.mkdir(parents=True, exist_ok=True)
     reward = logs / "reward.txt"

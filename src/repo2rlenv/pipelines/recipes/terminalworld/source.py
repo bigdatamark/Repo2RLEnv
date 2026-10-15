@@ -1,3 +1,8 @@
+# [MODULE DOC] Acquire public asciinema text recordings and load the native recording-directory
+# layout (<dir>/<id>/{recording.txt, info.json}). Fetching honors robots.txt, caps response sizes
+# (_LIMIT = 160000 bytes for transcripts), uses a fixed research _USER_AGENT, sleeps 1 s per
+# recording, and keeps per-ID outcomes in retrieval.json plus an acquisition.json state receipt for
+# restartability. Loading screens transcripts with privacy.screen. Runnable as a CLI (main).
 """Acquire public text recordings and load the native recording-directory layout."""
 
 from __future__ import annotations
@@ -23,13 +28,21 @@ _LIMIT = 160000
 
 
 class MetadataParser(HTMLParser):
+    # [CLASS DOC] HTMLParser subclass that extracts og:title / og:description meta content into
+    # metadata (keys "title"/"description") and collects text inside the first div whose class list
+    # contains "description" (tracking nested div depth) into the description list.
     def __init__(self):
+        # [FUNCTION DOC] Initialize the parser with empty metadata dict, description list and
+        # nesting depth 0.
         super().__init__()
         self.metadata = {}
         self.description = []
         self._description_depth = 0
 
     def handle_starttag(self, tag, attrs):
+        # [FUNCTION DOC] Record og:title/og:description meta content; for div tags increment the
+        # depth when already inside the description div, or enter it (depth 1) when the class list
+        # contains "description". Output: None.
         attributes = dict(attrs)
         if tag == "meta" and attributes.get("property") in ("og:title", "og:description"):
             self.metadata[attributes["property"].removeprefix("og:")] = attributes.get(
@@ -42,15 +55,23 @@ class MetadataParser(HTMLParser):
                 self._description_depth = 1
 
     def handle_endtag(self, tag):
+        # [FUNCTION DOC] Decrement the description depth on a closing div while inside the
+        # description. Output: None.
         if tag == "div" and self._description_depth:
             self._description_depth -= 1
 
     def handle_data(self, data):
+        # [FUNCTION DOC] Append text data to description while inside the description div. Output:
+        # None.
         if self._description_depth:
             self.description.append(data)
 
 
 def _download(client, url: str, limit: int) -> str:
+    # [FUNCTION DOC] HELPER: Stream a GET request and return the body as text decoded as UTF-8 with
+    # replacement. Inputs: client (httpx.Client), url (str), limit (int max bytes). Raises:
+    # httpx.HTTPStatusError on non-2xx, other httpx.HTTPError on transport errors, ValueError when
+    # the body exceeds limit. Also used by discovery.py.
     with client.stream("GET", url) as response:
         response.raise_for_status()
         chunks = []
@@ -65,6 +86,12 @@ def _download(client, url: str, limit: int) -> str:
 
 @contextmanager
 def _acquisition(destination: Path, ids: list[str]):
+    # [FUNCTION DOC] HELPER: Context manager recording acquisition state in
+    # destination/acquisition.json. Writes a "running" record (started_at, SHA-256 of the requested
+    # ID list, count of unique IDs) on entry; on any exception (including KeyboardInterrupt)
+    # rewrites it as "interrupted" with the exception type and re-raises; on success writes
+    # "completed" with finished_at and the SHA-256 of retrieval.json. Inputs: destination (Path),
+    # ids (list of str). Yields None. Raises: OSError if retrieval.json is missing at completion.
     """Distinguish a complete input shard from a cache still being filled."""
     path = destination / "acquisition.json"
     record = {
@@ -94,6 +121,17 @@ def _acquisition(destination: Path, ids: list[str]):
 
 
 def fetch_recordings(ids: list[str], destination: Path) -> dict:
+    # [FUNCTION DOC] Fetch page metadata and the .txt transcript for each recording ID (never
+    # solutions). Inputs: ids (1-2000 numeric strings; ValueError otherwise), destination (Path).
+    # Loads existing retrieval.json results; within _acquisition and an httpx client, downloads
+    # robots.txt, then for each unique ID: cached results are skipped (ValueError if a recorded
+    # download's recording.txt is missing); otherwise checks robots for the page and .txt, parses
+    # the page (1 MiB cap) with MetadataParser, downloads the text (_LIMIT cap), rejects text
+    # shorter than 100 non-blank chars or starting with an HTML doctype, writes <id>/recording.txt
+    # and <id>/info.json (og metadata, id, url, description, transcript SHA-256). HTTP/ValueError
+    # failures are recorded as error_type (plus http_status). Saves retrieval.json after each ID and
+    # sleeps 1 s. Output: dict ID -> result {url, downloaded, transcript_sha256 or error info}. Side
+    # effects: network, filesystem, sleeping.
     """Fetch metadata and .txt only; retain per-input outcomes for restart."""
     if (
         not ids
@@ -157,6 +195,14 @@ def fetch_recordings(ids: list[str], destination: Path) -> dict:
 
 
 def load_recordings(path: Path) -> list[dict]:
+    # [FUNCTION DOC] Load recording seeds from a directory. Input: path - either a single recording
+    # folder (contains recording.txt) or a parent of recording folders (sorted subdirectories).
+    # Folders lacking either recording.txt or info.json are skipped. Output: list of seed dicts with
+    # source "asciinema_public_recording", id, title (fallback folder name), url (fallback asciinema
+    # URL from folder name), description, transcript (emptied when screening flags it),
+    # transcript_sha256 (of the original text) and filter_flags. Raises: ValueError if a transcript
+    # exceeds _LIMIT bytes or info.json exceeds 64000 bytes, or if no valid pairs are found; JSON/OS
+    # errors on bad files.
     folders = (
         [path]
         if (path / "recording.txt").is_file()
@@ -191,6 +237,9 @@ def load_recordings(path: Path) -> list[dict]:
 
 
 def main() -> None:
+    # [FUNCTION DOC] CLI: --ids-json (Path to a JSON list of IDs) and --out (Path), both required.
+    # Calls fetch_recordings and prints a console key/value panel with attempted and downloaded
+    # counts. Output: None.
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--ids-json", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)

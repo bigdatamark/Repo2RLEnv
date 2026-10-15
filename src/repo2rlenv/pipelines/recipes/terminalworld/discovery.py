@@ -1,3 +1,8 @@
+# [MODULE DOC] Bounded, restartable discovery of public asciinema recording IDs from explore feeds
+# (FEEDS: public, recent, featured, popular) and explicit public profiles, following TerminalWorld's
+# explore step. Respects robots.txt, sleeps 1 s between new page fetches, caps a run at 200 pages,
+# collects only numeric IDs, and caches each page's outcome as a JSON receipt so a restart reuses
+# completed reads. Runnable as a CLI (main).
 """Bounded public recording discovery, following TerminalWorld's explore feeds.
 
 Only numeric source IDs are collected. Each page's identity and outcome is
@@ -31,11 +36,18 @@ _ORIGIN = "https://asciinema.org"
 
 
 class RecordingLinks(HTMLParser):
+    # [CLASS DOC] HTMLParser subclass that collects unique recording IDs (in first-seen order) from
+    # anchor tags whose href is "/a/<1-12 digits>" with an optional trailing slash, optionally
+    # prefixed by https://asciinema.org. Attribute: ids (list of str).
     def __init__(self):
+        # [FUNCTION DOC] Initialize the parser and an empty ids list. No inputs besides self.
         super().__init__()
         self.ids: list[str] = []
 
     def handle_starttag(self, tag, attrs):
+        # [FUNCTION DOC] HTMLParser callback: for "a" tags, match the href against the recording-
+        # link pattern and append the numeric ID if not already present. Inputs: tag (str), attrs
+        # (list of name/value pairs). Output: None; mutates self.ids.
         if tag != "a":
             return
         href = dict(attrs).get("href") or ""
@@ -51,6 +63,20 @@ def discover_recordings(
     pages_per_feed: int = 5,
     profiles: list[str] | None = None,
 ) -> list[str]:
+    # [FUNCTION DOC] Crawl feed and profile index pages and return de-duplicated recording IDs.
+    # Inputs: destination (Path cache dir); keyword-only feeds (list of FEEDS keys), pages_per_feed
+    # (int, default 5, 1-50), profiles (optional list of "/~name" paths; de-duplicated preserving
+    # order). Validation: at least one feed or profile, all feeds known, profile paths match
+    # /~[A-Za-z0-9_.-]{1,80}, sources x pages <= 200; ValueError otherwise. Profiles get source
+    # names "profile-" + first 16 hex chars of their SHA-256. Behavior: downloads and saves
+    # robots.txt (64000-byte cap); for each source and page 1..N uses pages/<source>-<NNN>.json if
+    # present (ValueError if its url differs), otherwise checks robots, downloads the page (1 MiB
+    # cap), parses IDs, records ids and html_sha256, or records error_type (and http_status for
+    # status errors) on httpx.HTTPError/ValueError; saves the receipt and sleeps 1 s. Validates
+    # cached IDs are numeric strings (ValueError otherwise), appends new IDs, and stops a source
+    # when a page has no IDs or repeats an earlier page's ID list. Output: list of ID strings, also
+    # saved to ids.json. Side effects: network, filesystem, sleeping. Note: a failure while
+    # downloading robots.txt propagates.
     """Cache bounded, robots-permitted index pages; never fetch task solutions."""
     profiles = list(dict.fromkeys(profiles or []))
     if (not feeds and not profiles) or any(feed not in FEEDS for feed in feeds):
@@ -119,6 +145,11 @@ def discover_recordings(
 
 
 def main() -> None:
+    # [FUNCTION DOC] CLI: --out (required Path), --feeds (choices from FEEDS), --profiles-json (Path
+    # to a JSON list of profile paths), --pages-per-feed (default 5). Rejects a non-list or non-
+    # string profiles file via parser.error. Feeds default to all FEEDS unless profiles are given
+    # (then none). Calls discover_recordings and prints a console key/value panel with the ID count
+    # and ids.json path. Output: None.
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", required=True, type=Path)
     parser.add_argument("--feeds", nargs="+", choices=sorted(FEEDS))

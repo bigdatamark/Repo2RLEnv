@@ -1,3 +1,6 @@
+# [MODULE DOC] Seeded, bounded sampling of TMax task seeds from the retained legacy taxonomy
+# (taxonomy.json: SKILL_TAXONOMY, TASK_LANGUAGES with weights, TASK_COMPLEXITY, COMMAND_COMPLEXITY,
+# DOMAIN_SCENARIOS, REAL_SOFTWARE_ANCHORS, DOMAIN_MODULES) plus the domain-specific template prompt.
 """Seeded sampling from TMax's retained legacy taxonomy and complexity axes."""
 
 from __future__ import annotations
@@ -12,6 +15,9 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class SamplerInput(BaseModel):
+    # [CLASS DOC] Pydantic model (extra forbidden) for the sampler JSON file: corpus_kind (only
+    # "legacy"), count (1-1000, default 40), seed (int, default 24), domains and languages (optional
+    # allow-lists).
     model_config = ConfigDict(extra="forbid")
     corpus_kind: Literal["legacy"] = "legacy"
     count: int = Field(default=40, ge=1, le=1000)
@@ -21,6 +27,16 @@ class SamplerInput(BaseModel):
 
 
 def sample_inputs(path: Path) -> list[dict]:
+    # [FUNCTION DOC] Sample seed records. Input: path to a SamplerInput JSON. Validates that
+    # domain/language allow-lists, when given, are nonempty subsets of the taxonomy (ValueError
+    # otherwise). Using Random(seed), each draw picks a domain, a skill type, 3-5 skills from all of
+    # that domain's skills, a complexity from the first three TASK_COMPLEXITY entries, a command
+    # complexity, a scenario, a weighted language, and with probability 0.35 a real-software anchor
+    # if one exists. All random choices are made before filtering, so a draw's values do not depend
+    # on the filters. Draws outside the allow-lists are skipped. Output: list of exactly count dicts
+    # (source "tmax_legacy_taxonomy", title "<domain>: <skill_type> (<draw>)", sampled fields,
+    # corpus/fixture/verifier kinds, sampler_seed, draw). Raises: ValueError if count records are
+    # not found within count*100 draws; ValidationError on bad input JSON.
     settings = SamplerInput.model_validate_json(path.read_text())
     data = json.loads(files(__package__).joinpath("taxonomy.json").read_text())
     taxonomy = data["SKILL_TAXONOMY"]
@@ -76,6 +92,9 @@ def sample_inputs(path: Path) -> list[dict]:
 
 
 def template_prompt(seed: dict) -> str:
+    # [FUNCTION DOC] Return template_prompt.md with {{domain_label}} replaced by the title-cased
+    # domain (underscores to spaces), {{module}} by DOMAIN_MODULES[domain], and {{v2_block}}
+    # removed. Input: seed dict with "domain". Output: str. Raises: KeyError for an unknown domain.
     data = json.loads(files(__package__).joinpath("taxonomy.json").read_text(encoding="utf-8"))
     return (
         files(__package__)

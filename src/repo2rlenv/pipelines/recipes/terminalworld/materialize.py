@@ -1,3 +1,8 @@
+# [MODULE DOC] Materializer plugged into terminal.runner.run_synthesis for TerminalWorld: an LLM
+# reconstructs the recorded workflow's environment and reference script, the controller replays it
+# remotely (worker.py + capture.py) to observe real filesystem effects, and a second LLM call
+# authors pytest state tests from that snapshot. Returns TerminalDraft JSON for the shared verify
+# loop.
 """Build a recorded workflow, execute it, then author tests from its actual effects."""
 
 from __future__ import annotations
@@ -16,6 +21,9 @@ from repo2rlenv.pipelines.recipes.terminal.templates import TestProgram
 
 
 class EnvironmentBuild(EnvironmentDefinition):
+    # [CLASS DOC] Pydantic model extending EnvironmentDefinition (setup and environment files) with
+    # solution_shell (20-50000 chars bash reference) and self_review (20-8000 chars). Output schema
+    # of the environment reconstruction LLM call.
     solution_shell: str = Field(min_length=20, max_length=50000)
     self_review: str = Field(min_length=20, max_length=8000)
 
@@ -34,6 +42,25 @@ def materialize(
     operation_id,
     on_event,
 ) -> str:
+    # [FUNCTION DOC] Build, replay and test-author one TerminalWorld candidate. All inputs are
+    # keyword-only and match run_synthesis's materializer call: input (GenerationInput: llm,
+    # execution.resume), options (max_tokens, test_timeout_sec), ledger (BudgetLedger), worker,
+    # python (remote runtime interpreter), candidate (Path), design (RecordingDesign; uses
+    # draft_spec and model_dump), feedback (list of prior failures), attempt (int), operation_id
+    # (str), on_event (callable(stage, state, message)). Steps: (1) metered_complete with
+    # environment_prompt.md plus an owned adaptation, reservation $1.25, EnvironmentBuild schema,
+    # receipt builder-<attempt>.json; reference must begin with "#!/bin/bash" and a newline. (2)
+    # run_generator on the worker running module terminalworld.worker with the environment, solution
+    # and timeout, job id "recording-" + 24 hex chars of SHA-256(operation_id), output dir
+    # snapshot-<attempt>, 900 s timeout. (3) Load snapshot.json; require returncode 0 and at least
+    # one created/modified/deleted path. (4) metered_complete with test_author_prompt(), reservation
+    # $0.90, 7000 tokens, TestProgram schema, payload = instruction, solution and evidence (stdout,
+    # changes, changed contents, first 400 initial/final paths). Output: JSON string of a
+    # TerminalDraft combining the build, instruction = design.draft_spec, the tests, and equal
+    # weights over the top-level test_ functions. Raises: ValueError on missing shebang, failed
+    # replay job, nonzero replay/build returncode, no observed changes, or invalid model output
+    # (pydantic ValidationError is a ValueError); budget/LLM errors. Side effects: LLM spend, remote
+    # Docker work, files under candidate.
     on_event("environment", "started", "Reconstruct the recorded workflow and its inputs")
     response = metered_complete(
         input.llm,
@@ -133,6 +160,10 @@ def materialize(
 
 
 def test_author_prompt() -> str:
+    # [FUNCTION DOC] Return the native tests_prompt.md text (package resource) plus an owned
+    # adaptation requiring a TestProgram JSON of 5-10 top-level pytest tests that fail before and
+    # pass after the reference, grade observable outcomes, and keep expected values private. Used by
+    # generation and saved-state recovery. Output: str. Side effects: reads a package resource.
     """Shared native test-author instructions for generation and saved-state recovery."""
     return files(__package__).joinpath("tests_prompt.md").read_text() + (
         "\n\nOWNED RUNTIME ADAPTATION: return the requested TestProgram JSON. "

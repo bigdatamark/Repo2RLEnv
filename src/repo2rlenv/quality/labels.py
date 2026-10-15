@@ -1,3 +1,8 @@
+# [MODULE DOC] Advisory evaluation labels for Harbor tasks bound to immutable evidence. Reads labels
+# from task.toml [metadata.repo2env.evaluation], derives labels from saved quality-loop results
+# while independently re-checking every trial's raw evidence, and publishes labeled copies
+# atomically without editing the source task. No model calls, target imports, subprocesses or
+# provider operations.
 """Retain Harbor tasks with inspectable labels and immutable evidence bindings.
 
 No model calls, target imports, subprocesses, or provider operations occur here.
@@ -27,6 +32,8 @@ from repo2rlenv.quality.loop.models import LoopResult, TrialRecord
 
 
 def _digest(path: Path) -> str:
+    # [FUNCTION DOC] HELPER: Return the SHA-256 hex digest of a regular file. Input: path. Raises:
+    # ValueError if path is a symlink or not a regular file; OSError on read failure.
     if path.is_symlink() or not path.is_file():
         raise ValueError(f"Evidence must be a real file: {path}")
     with path.open("rb") as handle:
@@ -34,6 +41,8 @@ def _digest(path: Path) -> str:
 
 
 def _identity(task: Path) -> str:
+    # [FUNCTION DOC] HELPER: Return a task directory's bundle hash from inspect_bundle. Raises
+    # ValueError when the task carries a claimed hash that fails integrity checking.
     record = inspect_bundle(task)
     if record["claimed_hash"] is not None and not record["integrity_passed"]:
         raise ValueError("Task differs from its recorded bundle hash")
@@ -41,6 +50,10 @@ def _identity(task: Path) -> str:
 
 
 def read_evaluation(task: Path) -> EvaluationLabel:
+    # [FUNCTION DOC] Read the advisory evaluation label from task/task.toml. Input: task (Path).
+    # Output: EvaluationLabel; an unlabeled task yields a default (unverified) label bound to its
+    # bundle hash. Raises: ValueError if integrity fails or the label's subject_bundle_hash names
+    # another bundle; TOML/validation errors on malformed data.
     """Read an advisory label; unlabeled historical tasks remain unverified."""
     identity = _identity(task)
     configuration = tomllib.loads((task / "task.toml").read_text())
@@ -56,6 +69,22 @@ def read_evaluation(task: Path) -> EvaluationLabel:
 def _trial_evidence(
     trial: TrialRecord, parent_hash: str, original_task: Path | None = None
 ) -> EvidenceReference:
+    # [FUNCTION DOC] HELPER: Verify one TrialRecord against its raw Harbor result and return an
+    # EvidenceReference. Inputs: trial (TrialRecord), parent_hash (bundle hash of the labeled task),
+    # original_task (optional Path used when imported results only record sandbox paths). Checks:
+    # result file digest matches; reward, exception type, agent name (name or import_path or
+    # "unknown") and model match the raw JSON; role/agent consistency (baseline=nop,
+    # oracle/probe=oracle, rollout not nop/oracle/unknown); agent exit code matches agent/exit-
+    # code.txt (or None if absent). Non-probe trials must share parent_hash. Probe trials must have
+    # a probe.json manifest (located next to the recorded task path or under
+    # quality/probes/<key>/<task>) binding parent hash, probe bundle hash and probe definition, a
+    # matching probe task identity, an oracle.txt containing the completion marker and
+    # probe_installed true. Binding "receipt" requires trial.json two levels above (state completed,
+    # matching bundle hash and result digest); otherwise the source task (recorded path, or
+    # original_task for non-probe imports) must match the bundle hash and its Harbor checksum must
+    # equal task_checksum. Output: EvidenceReference(kind=role, resolved path, sha256, subject hash,
+    # Harbor checksum). Raises: ValueError on any mismatch; OSError/KeyError/IndexError on missing
+    # files or paths.
     path = Path(trial.result)
     if _digest(path) != trial.result_sha256:
         raise ValueError(f"Trial result changed after collection: {path}")
@@ -140,6 +169,12 @@ def _trial_evidence(
 
 
 def _verified_result(result: LoopResult, task: Path) -> None:
+    # [FUNCTION DOC] HELPER: Re-check that a "usable" LoopResult actually has acceptance proof: no
+    # control or probe failures (threshold 1.0), no reasons, a sound review with rollout verdict
+    # legitimate_success or legitimate_failure, probes of exactly kinds wrong_solution and
+    # valid_alternative, wrong_solution probes covering every required_probe_focus(task), at least
+    # one rollout, and the last rollout's exception being None or AgentTimeoutError. Inputs: result,
+    # task. Output: None. Raises: ValueError.
     from repo2rlenv.quality.loop.runner import (
         control_failures,
         probe_failures,
@@ -167,6 +202,19 @@ def _verified_result(result: LoopResult, task: Path) -> None:
 def label_from_quality(
     task: Path, result_path: Path, *, provenance: Provenance = "unknown"
 ) -> EvaluationLabel:
+    # [FUNCTION DOC] Translate a saved quality-loop result into an EvaluationLabel. Inputs: task
+    # (Path), result_path (Path to LoopResult JSON), provenance (keyword, default "unknown").
+    # Requires result.bundle_hash to equal the task identity. Maps status: usable ->
+    # verified/complete/quality_verified; reviewed -> unverified/review/validation_incomplete;
+    # needs_evidence -> unverified/review/evidence_missing; needs_repair ->
+    # needs_repair/repair/quality_defect; budget_exhausted -> blocked/review/ budget_exhausted.
+    # Evidence starts with the quality result's own digest; verified results also pass
+    # _verified_result. Each trial is verified with _trial_evidence (original = result.task_path if
+    # it is a directory, else task); for verified results any failure raises, otherwise failures add
+    # reason code evidence_unavailable and the message to reasons. Output: EvaluationLabel with
+    # detail = joined reasons or a success sentence and checked_at = evaluation_time(). Raises:
+    # ValueError (wrong bundle, unverifiable acceptance), KeyError for an unknown status, validation
+    # errors.
     """Translate a saved quality result, independently checking acceptance proof.
 
     Nonaccepted attempts survive missing trial files and retain that diagnosis.
@@ -223,6 +271,18 @@ def label_from_quality(
 
 
 def write_labeled_copy(task: Path, destination: Path, label: EvaluationLabel) -> Path:
+    # [FUNCTION DOC] Atomically publish a labeled copy of a task. Inputs: task (source dir),
+    # destination (new dir; must be outside the source and not exist), label (EvaluationLabel).
+    # Validates the label's bundle binding; a verified label must contain exactly one unchanged
+    # quality_result evidence and must be reproduced exactly by label_from_quality. Stamps the label
+    # with subject_bundle_hash, source_task_path and source_task_toml_sha256. Takes an exclusive
+    # lock file ".<name>.evaluation.lock" beside destination, copies the task (symlinks preserved)
+    # into a temporary directory in the same parent, checks the copy matches the source identity and
+    # task.toml digest, writes the label into task.toml [metadata.repo2env.evaluation], re-checks
+    # that the bundle identity is unchanged and that the source did not change, then renames into
+    # place. Output: destination Path. Raises: ValueError on any binding/consistency failure;
+    # FileExistsError if destination or the lock already exists. Side effects: filesystem writes;
+    # the lock file is removed in all cases once acquired.
     """Atomically publish a new labeled directory, never editing a historical task."""
     task, destination = task.absolute(), destination.absolute()
     if destination == task or destination.is_relative_to(task):

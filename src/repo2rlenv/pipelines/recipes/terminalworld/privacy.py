@@ -1,3 +1,10 @@
+# [MODULE DOC] Retained TerminalWorld transcript screening patterns (see provenance.md). Module-
+# level compiled regexes detect PII (emails, public IPv4 excluding loopback/private ranges,
+# international phone numbers), credentials (AWS key IDs, secrets, session tokens, private key
+# headers, GitHub, GitLab and Hugging Face tokens, JWTs, generic *_KEY/_TOKEN/_SECRET/_PASSWORD
+# assignments, password flags) and destructive or malicious commands (rm -rf on / or ~ or *, fork
+# bombs, dd to block devices, mkfs on block devices, curl/wget from a raw IP piped into a
+# shell/interpreter). _CHECKS pairs each pattern with a category label.
 """Retained TerminalWorld transcript-screening patterns; see provenance.md."""
 
 from __future__ import annotations
@@ -84,5 +91,8 @@ _CHECKS: list[tuple[str, re.Pattern]] = [
 
 
 def screen(text: str) -> list[str]:
+    # [FUNCTION DOC] Return the category labels from _CHECKS whose pattern matches anywhere in text,
+    # in _CHECKS order. Only labels are returned so matched personal or credential data is never
+    # logged. Input: text (str). Output: list of str (empty when clean). Pure function.
     """Return category names only; never log matched personal or credential data."""
     return [label for label, pattern in _CHECKS if pattern.search(text)]
