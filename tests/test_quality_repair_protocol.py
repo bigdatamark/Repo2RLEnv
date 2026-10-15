@@ -1,3 +1,7 @@
+# [MODULE DOC] Tests for QualityLoop._repair protocol: correction calls receive the rejected draft and actionable
+# feedback, contract list changes use append_expected_passes, protected paths are honored, wrong-
+# solution probes stay immutable, and provider errors are not retried. Uses a scripted fake Model;
+# no network.
 """Repair feedback stays actionable, bounded, and faithful to retained probes."""
 
 from __future__ import annotations
@@ -25,6 +29,8 @@ from repo2rlenv.quality.loop.runner import QualityLoop
 
 @pytest.fixture
 def task(tmp_path):
+    # [FUNCTION DOC] Pytest fixture: writes 'repair-protocol' task bundle with tests/test.sh '# weak check' and
+    # tests/contract.json expected_passes ['z','a']. Output: task Path.
     return write_bundle(
         TaskBundle(
             name="repair-protocol",
@@ -43,6 +49,8 @@ def task(tmp_path):
 
 
 def probes():
+    # [FUNCTION DOC] HELPER: Returns wrong-sum (wrong_solution) and valid-format (valid_alternative)
+    # SemanticProbes.
     return [
         SemanticProbe(
             name=name,
@@ -59,6 +67,8 @@ def probes():
 
 
 def review(category="verifier"):
+    # [FUNCTION DOC] HELPER: Returns a Review with passing assessments and one blocking Issue of the given category
+    # (default 'verifier') citing tests/test.sh.
     assessment = Assessment(
         status="pass",
         score=3,
@@ -86,6 +96,8 @@ def review(category="verifier"):
 
 
 def patch(*, old="weak check", replacements=()):
+    # [FUNCTION DOC] HELPER: Returns a Repair editing tests/test.sh old text (default 'weak check') to 'strong
+    # check', with optional probe_replacements.
     return Repair(
         explanation="Correct the check without weakening the arithmetic contract.",
         addressed_issues=["The existing check rejects a valid representation."],
@@ -95,10 +107,15 @@ def patch(*, old="weak check", replacements=()):
 
 
 class Model:
+    # [CLASS DOC] Scripted fake model returning queued Repair responses.
     def __init__(self, responses):
+        # [FUNCTION DOC] Inputs: responses (iterable of Repair, dict, or Exception). Initializes calls.
         self.responses, self.calls = iter(responses), []
 
     def ask(self, schema, model, system, user, key):
+        # [FUNCTION DOC] Asserts schema is Repair, records key plus JSON payload, then takes the next response:
+        # raises it if an Exception, else returns schema.model_validate of it (dumping Repair
+        # objects first).
         assert schema is Repair
         self.calls.append({"key": key, **json.loads(user)})
         response = next(self.responses)
@@ -110,6 +127,8 @@ class Model:
 
 
 def loop(tmp_path, model):
+    # [FUNCTION DOC] HELPER: Builds a QualityLoop with repair=True, quality dir tmp_path/quality, $10 BudgetLedger,
+    # given model.
     return QualityLoop(
         LoopOptions(repair=True),
         tmp_path / "quality",
@@ -119,6 +138,9 @@ def loop(tmp_path, model):
 
 
 def test_contract_list_correction_uses_append_without_reconstructing_existing_order(task, tmp_path):
+    # [FUNCTION DOC] Verifies an edit that reconstructs the contract list is rejected and the correction using
+    # append_expected_passes appends 'new' while preserving existing order; checks correction
+    # payload fields.
     rejected = Repair(
         explanation="Register a new test.",
         addressed_issues=["Missing case"],
@@ -151,6 +173,8 @@ def test_contract_list_correction_uses_append_without_reconstructing_existing_or
 
 @pytest.mark.parametrize("protected", ["tests/contract.json", "tests"])
 def test_contract_append_obeys_protected_inputs(task, tmp_path, protected):
+    # [FUNCTION DOC] Parametrized over protected paths; append_expected_passes against a protected contract raises
+    # 'immutable source or oracle' after two calls and writes no r1 revision.
     from pathlib import Path
 
     proposal = Repair(
@@ -169,6 +193,8 @@ def test_contract_append_obeys_protected_inputs(task, tmp_path, protected):
 
 
 def test_legacy_saved_repair_replay_accepts_absent_empty_append_field(task, tmp_path):
+    # [FUNCTION DOC] Verifies replaying a saved repair.json lacking append_expected_passes reuses the same
+    # destination without a new model call.
     model = Model([patch(), patch()])
     runner = loop(tmp_path, model)
     destination, _ = runner._repair(task, review(), runner._context(task, []), probes(), 0, [])
@@ -182,6 +208,9 @@ def test_legacy_saved_repair_replay_accepts_absent_empty_append_field(task, tmp_
 
 
 def test_verifier_repair_correction_retains_probes_and_receives_rejected_draft(task, tmp_path):
+    # [FUNCTION DOC] Verifies a verifier repair proposing a probe replacement is corrected: correction receives the
+    # rejected draft, empty allowed replacements, immutable wrong-sum; retained probes unchanged;
+    # only the destination copy is edited.
     retained = probes()
     rejected = patch(replacements=[retained[1]])
     corrected = patch()
@@ -207,6 +236,8 @@ def test_verifier_repair_correction_retains_probes_and_receives_rejected_draft(t
 
 
 def test_wrong_probe_replacement_stays_forbidden_even_with_probe_diagnosis(task, tmp_path):
+    # [FUNCTION DOC] Verifies wrong-solution probe replacement stays forbidden even with a probe diagnosis, raising
+    # after two calls; policy lists only valid-format and mentions no-op probe; no r1 written.
     retained = probes()
     invalid = patch().model_dump()
     invalid["probe_replacements"] = [retained[0].model_dump()]
@@ -230,6 +261,9 @@ def test_wrong_probe_replacement_stays_forbidden_even_with_probe_diagnosis(task,
 def test_excerpt_budget_failure_uses_existing_correction_without_inventing_source(
     task, tmp_path, monkeypatch, corrected
 ):
+    # [FUNCTION DOC] Parametrized: when reading excerpts fails (monkeypatched read_more raising), the correction
+    # call gets the feedback and same documents; a corrected patch applies, else 'old text must
+    # occur exactly once' is raised. Side effects: monkeypatches context.read_more.
     rejected = patch(old="missing source text")
     model = Model([rejected, patch() if corrected else rejected])
     runner = loop(tmp_path, model)
@@ -237,6 +271,8 @@ def test_excerpt_budget_failure_uses_existing_correction_without_inventing_sourc
     documents = dict(context.documents)
 
     def unavailable(requests):
+        # [FUNCTION DOC] HELPER: Stand-in for read_more that always raises ValueError('Requested excerpts exceed
+        # context limit').
         raise ValueError("Requested excerpts exceed context limit")
 
     monkeypatch.setattr(context, "read_more", unavailable)
@@ -259,6 +295,8 @@ def test_excerpt_budget_failure_uses_existing_correction_without_inventing_sourc
 
 
 def test_provider_uncertainty_never_triggers_protocol_redispatch(task, tmp_path):
+    # [FUNCTION DOC] Verifies a ModelRequestError from the provider propagates after one call without protocol re-
+    # dispatch and no revision is written.
     model = Model([ModelRequestError("Provider response uncertain")])
     runner = loop(tmp_path, model)
     with pytest.raises(ModelRequestError, match="uncertain"):

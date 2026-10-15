@@ -1,3 +1,6 @@
+# [MODULE DOC] Tests for quality.loop.publication.publish_label: labeled exports are idempotent, preserve the raw
+# result.json and source task, detect tampering, record failures, and content revisions discard
+# inherited evaluation labels.
 """Publication preserves evidence and detects stale or edited labeled exports."""
 
 from __future__ import annotations
@@ -16,6 +19,9 @@ from repo2rlenv.quality.loop.publication import publish_label
 
 @pytest.fixture
 def quality(tmp_path):
+    # [FUNCTION DOC] Pytest fixture: writes a 'publication' task bundle under tmp_path/source and a quality output
+    # dir containing result.json for a needs_repair LoopResult. Output: tuple (task Path, output
+    # Path).
     task = write_bundle(
         TaskBundle(
             name="publication",
@@ -53,6 +59,8 @@ def quality(tmp_path):
 
 
 def test_publication_is_idempotent_and_preserves_raw_result(quality):
+    # [FUNCTION DOC] Verifies publish_label completes with status needs_repair, is idempotent, does not modify
+    # result.json or the source task.toml, and the labeled copy has the same task identity.
     from pathlib import Path
 
     task, output = quality
@@ -65,6 +73,8 @@ def test_publication_is_idempotent_and_preserves_raw_result(quality):
 
 
 def test_existing_label_tampering_fails_without_overwriting_quality(quality):
+    # [FUNCTION DOC] Verifies editing the published label's evaluation detail makes a second publish_label return
+    # state 'failed' without touching result.json.
     from pathlib import Path
 
     _, output = quality
@@ -79,6 +89,8 @@ def test_existing_label_tampering_fails_without_overwriting_quality(quality):
 
 
 def test_missing_task_records_export_failure_and_keeps_completed_result(quality):
+    # [FUNCTION DOC] Verifies a missing instruction.md yields state 'failed', writes labeled-task.json with failed
+    # state, and leaves result.json unchanged.
     task, output = quality
     (task / "instruction.md").unlink()
     before = (output / "result.json").read_bytes()
@@ -88,6 +100,8 @@ def test_missing_task_records_export_failure_and_keeps_completed_result(quality)
 
 
 def test_content_revision_discards_inherited_evaluation(quality):
+    # [FUNCTION DOC] Verifies that editing instruction.md and refresh_identity makes read_evaluation return
+    # 'unverified' with reason task_changed, the new subject hash and no evidence.
     from pathlib import Path
 
     from repo2rlenv.quality.labels import read_evaluation

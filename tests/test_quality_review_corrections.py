@@ -1,3 +1,6 @@
+# [MODULE DOC] Tests for bounded review correction in QualityLoop._review: corrections receive the rejected draft
+# and grounding feedback, invalid priors are never accepted, escalation uses the latest local draft,
+# and unparsed responses keep the outer prior.
 """Bounded review corrections reuse drafts without trusting ungrounded claims."""
 
 from __future__ import annotations
@@ -15,6 +18,8 @@ from repo2rlenv.spec.input import LLMSpec
 
 @pytest.fixture
 def task(tmp_path):
+    # [FUNCTION DOC] Pytest fixture: writes 'review-correction' task bundle under tmp_path/tasks. Output: task
+    # Path.
     return write_bundle(
         TaskBundle(
             name="review-correction",
@@ -34,6 +39,9 @@ def task(tmp_path):
 
 
 def decision(summary, *, quote="sum of two integers", read=False):
+    # [FUNCTION DOC] HELPER: Builds a passing Review with the given summary; quote sets the citation text
+    # (ungrounded when not in instruction.md); read=True adds a ReadRequest for tests/test.sh lines
+    # 1-2.
     assessment = Assessment(
         status="pass",
         score=3,
@@ -55,10 +63,14 @@ def decision(summary, *, quote="sum of two integers", read=False):
 
 
 class ScriptedModel:
+    # [CLASS DOC] Fake model returning scripted Review replies.
     def __init__(self, replies):
+        # [FUNCTION DOC] Inputs: replies (iterable of Review or Exception). Initializes calls.
         self.replies, self.calls = iter(replies), []
 
     def ask(self, schema, model, system, user, key):
+        # [FUNCTION DOC] Asserts schema is Review, records key, model and payload, then raises the next reply if it
+        # is an Exception or returns a deep copy.
         assert schema is Review
         self.calls.append({"key": key, "model": model, "payload": json.loads(user)})
         reply = next(self.replies)
@@ -68,6 +80,8 @@ class ScriptedModel:
 
 
 def make_loop(tmp_path, model, **options):
+    # [FUNCTION DOC] HELPER: Builds a QualityLoop with given LoopOptions kwargs, quality dir tmp_path/quality and a
+    # $10 budget ledger.
     return QualityLoop(
         LoopOptions(**options),
         tmp_path / "quality",
@@ -77,6 +91,8 @@ def make_loop(tmp_path, model, **options):
 
 
 def test_citation_correction_receives_rejected_review_and_grounding_feedback(task, tmp_path):
+    # [FUNCTION DOC] Verifies an ungrounded citation triggers one correction with previous_review and 'not
+    # grounded' feedback, accepts the corrected review, and saves it to reviews/before.json.
     rejected = decision("A completed draft with one ungrounded quote", quote="invented outcome")
     corrected = decision("The same assessment with a grounded citation")
     model = ScriptedModel([rejected, corrected])
@@ -96,6 +112,8 @@ def test_citation_correction_receives_rejected_review_and_grounding_feedback(tas
 
 
 def test_invalid_prior_and_repeated_bad_drafts_are_never_accepted(task, tmp_path):
+    # [FUNCTION DOC] Verifies an invalid prior repeated twice raises 'within the call limit', the prior object is
+    # not mutated, and nothing is saved.
     prior = decision("Earlier ungrounded assessment", quote="invented outcome")
     original = prior.model_dump()
     model = ScriptedModel([prior, prior])
@@ -110,6 +128,8 @@ def test_invalid_prior_and_repeated_bad_drafts_are_never_accepted(task, tmp_path
 
 
 def test_escalation_receives_latest_local_read_draft_not_outer_prior(task, tmp_path):
+    # [FUNCTION DOC] Verifies escalation model receives the latest local draft (which requested reads) with
+    # requested file excerpts, and is the final third call.
     prior = decision("Review from the previous phase")
     rejected = decision("First local draft", quote="invented outcome")
     requesting = decision("Corrected local draft requesting verifier source", read=True)
@@ -131,6 +151,8 @@ def test_escalation_receives_latest_local_read_draft_not_outer_prior(task, tmp_p
 
 
 def test_unparsed_response_keeps_outer_prior_until_a_local_review_exists(task, tmp_path):
+    # [FUNCTION DOC] Verifies a ValueError from parsing keeps the outer prior as previous_review and passes the
+    # error text as feedback.
     prior = decision("Existing phase review")
     corrected = decision("First parsed local response")
     model = ScriptedModel([ValueError("Invalid JSON response"), corrected])

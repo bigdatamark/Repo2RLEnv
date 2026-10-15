@@ -1,3 +1,6 @@
+# [MODULE DOC] Tests for runner.required_probe_focus: lazy resource construction wording must not demand a
+# lazy_output probe, while generator/lazy output contracts and explicit task.toml
+# quality_requirements must.
 """Distinguish deferred resource construction from lazy generator outputs."""
 
 from pathlib import Path
@@ -8,6 +11,8 @@ from repo2rlenv.quality.loop.runner import required_probe_focus
 
 
 def requirement_task(tmp_path: Path, instruction: str, metadata: str = "") -> Path:
+    # [FUNCTION DOC] HELPER: Writes instruction.md and task.toml (metadata, default empty) into tmp_path and
+    # returns tmp_path as a task directory. Side effects: writes two files.
     (tmp_path / "instruction.md").write_text(instruction)
     (tmp_path / "task.toml").write_text(metadata)
     return tmp_path
@@ -25,6 +30,8 @@ def requirement_task(tmp_path: Path, instruction: str, metadata: str = "") -> Pa
     ],
 )
 def test_resource_laziness_does_not_require_generator_probe(tmp_path, instruction):
+    # [FUNCTION DOC] Parametrized over resource-laziness instructions; asserts required_probe_focus returns an
+    # empty set.
     assert required_probe_focus(requirement_task(tmp_path, instruction)) == set()
 
 
@@ -42,10 +49,14 @@ def test_resource_laziness_does_not_require_generator_probe(tmp_path, instructio
     ],
 )
 def test_generator_output_contract_keeps_required_probe(tmp_path, instruction):
+    # [FUNCTION DOC] Parametrized over lazy-output/generator instructions; asserts required_probe_focus returns
+    # {'lazy_output'}.
     assert required_probe_focus(requirement_task(tmp_path, instruction)) == {"lazy_output"}
 
 
 def test_explicit_requirements_survive_unrelated_lazy_wording(tmp_path):
+    # [FUNCTION DOC] Verifies explicit probe_focus metadata survives and numeric_tolerance is inferred from
+    # 'relative error bound' wording, giving the union of three focuses.
     task = requirement_task(
         tmp_path,
         "Create environments lazily with a relative error bound.",

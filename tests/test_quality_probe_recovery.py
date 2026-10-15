@@ -1,3 +1,7 @@
+# [MODULE DOC] Tests of probe recovery in the quality loop: a failed (no-op) probe installation can be diagnosed
+# and replaced within bounded call limits, but a completed counterexample (any earlier installed
+# wrong-solution probe) is permanent. Uses fake Trials and Model clients that write receipts to
+# tmp_path; never executes task code or calls providers.
 """A failed mutation is repairable; a completed counterexample is permanent."""
 
 from __future__ import annotations
@@ -34,6 +38,8 @@ from repo2rlenv.quality.loop.runner import QualityLoop
 
 @pytest.fixture
 def task(tmp_path):
+    # [FUNCTION DOC] Pytest fixture: writes the 'probe-recovery' task bundle (Dockerfile, solve.sh, test.sh with '#
+    # check arithmetic') under tmp_path/tasks. Output: task Path.
     return write_bundle(
         TaskBundle(
             name="probe-recovery",
@@ -51,6 +57,8 @@ def task(tmp_path):
 
 
 def probes():
+    # [FUNCTION DOC] HELPER: Returns two SemanticProbes: 'wrong-sum' (wrong_solution) and 'valid-sum'
+    # (valid_alternative), citing instruction.md.
     return [
         SemanticProbe(
             name=name,
@@ -67,6 +75,9 @@ def probes():
 
 
 def review(*, proposal=False, diagnosis=False, rollout=False, category="probe"):
+    # [FUNCTION DOC] HELPER: Builds a Review with passing assessments. Inputs: proposal (include probes()),
+    # diagnosis (include a blocking Issue of the given category citing the no-op oracle log),
+    # rollout (legitimate_success vs not_run), category (default 'probe'). Output: Review.
     assessment = Assessment(
         status="pass",
         score=3,
@@ -101,12 +112,20 @@ def review(*, proposal=False, diagnosis=False, rollout=False, category="probe"):
 
 
 class Trials:
+    # [CLASS DOC] Fake trial runner that materializes receipts only. Key 'r0-probe0' simulates a failed (no-op)
+    # probe installation with exit code 1.
     """Materialize receipts only; never execute task code or make provider calls."""
 
     def __init__(self, root):
+        # [FUNCTION DOC] Inputs: root directory for trial outputs. Initializes calls list.
         self.root, self.calls = root, []
 
     def run(self, task, role, key):
+        # [FUNCTION DOC] Records key, computes reward (0 for baseline and for successfully installed probe0 runs,
+        # else 1), picks agent name by role, writes result.json, agent exit-code (1 if failed),
+        # oracle.txt for probes (failure message or completed marker) and a trial.json receipt under
+        # root/key. Output: TrialRecord with probe_installed False only for the failed probe. Side
+        # effects: writes files.
         self.calls.append(key)
         failed = key == "r0-probe0"
         reward = float(
@@ -168,14 +187,23 @@ class Trials:
         )
 
     def close(self):
+        # [FUNCTION DOC] No-op close required by the trial runner interface.
         pass
 
 
 class Model:
+    # [CLASS DOC] Fake model client for reviews and repairs; reproduces a case where the first post-probe review
+    # overlooks the failed installation.
     def __init__(self, *, diagnose=True, invalid_patch=False):
+        # [FUNCTION DOC] Inputs: diagnose (whether later reviews add a probe diagnosis, default True),
+        # invalid_patch (repair returns the unchanged probe, default False). Initializes calls.
         self.calls, self.diagnose, self.invalid_patch = [], diagnose, invalid_patch
 
     def ask(self, schema, model, system, user, key):
+        # [FUNCTION DOC] Records (key, payload). For Repair schema returns a Repair replacing wrong-sum with a
+        # corrected script (or the unchanged one when invalid_patch). Otherwise returns review()
+        # with proposal when probe_limit>0, diagnosis only for r0-after-N keys with N not 0, and
+        # rollout when documents include a rollout result.
         payload = json.loads(user)
         self.calls.append((key, payload))
         if schema is Repair:
@@ -195,6 +223,9 @@ class Model:
 
 
 def loop(tmp_path, *, model=None, remote=None, **options):
+    # [FUNCTION DOC] HELPER: Builds a QualityLoop with repair=True, max_repairs=1, max_read_rounds=1 plus extra
+    # options, quality dir tmp_path/quality, a $10 BudgetLedger sqlite, the given or default Model
+    # and optional trial_runner.
     return QualityLoop(
         LoopOptions(repair=True, max_repairs=1, max_read_rounds=1, **options),
         tmp_path / "quality",
@@ -205,6 +236,9 @@ def loop(tmp_path, *, model=None, remote=None, **options):
 
 
 def test_ignored_noop_probe_gets_bounded_diagnosis_and_only_its_control_reruns(task, tmp_path):
+    # [FUNCTION DOC] End-to-end: an ignored no-op probe triggers one correction review, one repair; only the
+    # replaced probe control and rollout rerun in r1; replacement evidence records exit code 1;
+    # probe-attempt journal and probe manifest exist; valid-sum result is reused from r0.
     remote, model = Trials(tmp_path / "quality/trials"), Model()
     result = loop(tmp_path, remote=remote, model=model).run(task)
     assert result.status == "usable", result.reasons
@@ -238,6 +272,9 @@ def test_ignored_noop_probe_gets_bounded_diagnosis_and_only_its_control_reruns(t
 def test_unresolved_diagnosis_or_proposal_stops_with_existing_call_limits(
     task, tmp_path, diagnose, invalid_patch
 ):
+    # [FUNCTION DOC] Parametrized: without a diagnosis or with an invalid (unchanged) replacement the loop ends
+    # 'needs_evidence' within existing call limits, never runs r1 trials, and leaves the task hash
+    # unchanged.
     model, remote = (
         Model(diagnose=diagnose, invalid_patch=invalid_patch),
         Trials(tmp_path / "quality/trials"),
@@ -252,6 +289,9 @@ def test_unresolved_diagnosis_or_proposal_stops_with_existing_call_limits(
 
 
 def failed_attempt(task, tmp_path):
+    # [FUNCTION DOC] HELPER: Materializes a variant for wrong-sum and runs a failing 'r0-probe0' fake trial.
+    # Output: tuple (TrialRecord with probe set, attempt dict from capture_attempt). Side effects:
+    # writes under tmp_path.
     variant = probe_variant(task, probes()[0], tmp_path / "variants/current" / task.name)
     trial = Trials(tmp_path / "trials").run(variant, "probe", "r0-probe0")
     trial.probe = probes()[0]
@@ -259,6 +299,10 @@ def failed_attempt(task, tmp_path):
 
 
 def eligibility(task, tmp_path, trial, attempts, *, diagnosed=True, category="probe"):
+    # [FUNCTION DOC] HELPER: Computes replacement eligibility: builds a loop, a placeholder oracle trial list
+    # ending with the given trial, finds failed_installations, builds the evidence context and calls
+    # replacement_evidence with a review (diagnosed/category). Output: evidence dict or None.
+    # Raises: ValueError from context construction when evidence changed.
     runner = loop(tmp_path)
     # Prefix index 2 agrees with actual control -> probe ordering.
     placeholder = trial.model_copy(
@@ -294,6 +338,9 @@ def eligibility(task, tmp_path, trial, attempts, *, diagnosed=True, category="pr
     ],
 )
 def test_only_independently_bound_failed_installation_can_authorize(task, tmp_path, change):
+    # [FUNCTION DOC] Parametrized over tampering modes (missing receipt, edited result, summary/log/exit/manifest
+    # changes, wrong parent, no history, checksum-only binding, zero exit); only the untampered case
+    # authorizes replacement; an edited result raises 'changed since ingestion'.
     trial, attempt = failed_attempt(task, tmp_path)
     result = Path(trial.result)
     if change == "missing_receipt":
@@ -330,6 +377,8 @@ def test_only_independently_bound_failed_installation_can_authorize(task, tmp_pa
 def test_wrong_probe_correction_requires_its_grounded_probe_diagnosis(
     task, tmp_path, diagnosed, category
 ):
+    # [FUNCTION DOC] Parametrized: replacement requires a grounded probe-category diagnosis; undiagnosed or
+    # verifier-category review gives None.
     trial, attempt = failed_attempt(task, tmp_path)
     assert (
         eligibility(task, tmp_path, trial, [attempt], diagnosed=diagnosed, category=category)
@@ -341,6 +390,8 @@ def test_wrong_probe_correction_requires_its_grounded_probe_diagnosis(
 def test_any_earlier_completed_same_name_remains_immutable_after_later_failure(
     task, tmp_path, different_script, reward
 ):
+    # [FUNCTION DOC] Parametrized: an earlier installed (completed) attempt of the same probe name, with any reward
+    # or script, makes a later failed attempt ineligible for replacement.
     trial, failed = failed_attempt(task, tmp_path)
     old = (
         probes()[0].model_copy(update={"script": "# older script"})
@@ -365,6 +416,8 @@ def test_any_earlier_completed_same_name_remains_immutable_after_later_failure(
 
 
 def test_attempt_journal_refuses_rewritten_installation_on_resume(task, tmp_path):
+    # [FUNCTION DOC] Verifies record_attempt raises 'Preserved probe installation evidence changed' when the oracle
+    # log is rewritten after journaling.
     trial, _ = failed_attempt(task, tmp_path)
     record_attempt(tmp_path / "quality", "r0-probe0", task_identity(task), trial)
     (Path(trial.result).parent / "agent/oracle.txt").write_text("different failure\n")
@@ -374,8 +427,14 @@ def test_attempt_journal_refuses_rewritten_installation_on_resume(task, tmp_path
 
 @pytest.mark.parametrize("append_only", [False, True])
 def test_noop_probe_alone_cannot_authorize_task_edits(task, tmp_path, append_only):
+    # [FUNCTION DOC] Parametrized: a no-op probe diagnosis cannot justify task/verifier edits or expected-pass
+    # appends; the loop ends needs_evidence after two repair calls with the bundle unchanged.
     class TaskEditModel(Model):
+        # [CLASS DOC] Model subclass whose repairs additionally edit tests/test.sh or append expected passes.
         def ask(self, schema, *args):
+            # [FUNCTION DOC] Delegates to Model.ask, then for Repair sets edits (one test.sh Edit unless
+            # append_only) and append_expected_passes (['reject-no-op'] if append_only). Output: the
+            # modified response.
             response = super().ask(schema, *args)
             if schema is Repair:
                 response.edits = (
@@ -402,8 +461,14 @@ def test_noop_probe_alone_cannot_authorize_task_edits(task, tmp_path, append_onl
 
 
 def test_one_invalid_wrong_probe_proposal_can_use_the_existing_correction(task, tmp_path):
+    # [FUNCTION DOC] Verifies one invalid (unchanged) replacement proposal is corrected via the single existing
+    # correction call and the loop becomes usable; checks correction feedback text 'must change its
+    # script'.
     class CorrectingModel(Model):
+        # [CLASS DOC] Model subclass returning the unchanged wrong-sum probe on the first repair call only.
         def ask(self, schema, *args):
+            # [FUNCTION DOC] Delegates to Model.ask; for the first Repair call replaces probe_replacements with the
+            # original probe. Output: response.
             response = super().ask(schema, *args)
             if schema is Repair and len([key for key, _ in self.calls if "-repair" in key]) == 1:
                 response.probe_replacements = [probes()[0]]
@@ -419,8 +484,14 @@ def test_one_invalid_wrong_probe_proposal_can_use_the_existing_correction(task, 
 
 
 def test_evidence_changed_while_model_authors_patch_denies_authorization(task, tmp_path):
+    # [FUNCTION DOC] Verifies that if the failed-installation evidence changes while the model is authoring a
+    # repair, authorization is denied ('evidence changed during repair') and no r1 revision is
+    # written.
     class ChangedEvidenceModel(Model):
+        # [CLASS DOC] Model subclass that rewrites the journaled trial's oracle log during a Repair call.
         def ask(self, schema, *args):
+            # [FUNCTION DOC] Delegates to Model.ask; for Repair reads quality/probe-attempts/r0-probe0.json and
+            # overwrites that trial's agent/oracle.txt. Side effects: file write in tmp_path.
             response = super().ask(schema, *args)
             if schema is Repair:
                 trial = json.loads(
@@ -438,6 +509,8 @@ def test_evidence_changed_while_model_authors_patch_denies_authorization(task, t
 
 
 def test_completed_probe_in_different_task_revision_still_blocks_replacement(task, tmp_path):
+    # [FUNCTION DOC] Verifies a completed install of the same probe against a different (older) task revision still
+    # blocks replacement, and that parent hashes differ.
     from repo2rlenv.quality.loop.artifacts import apply_repair
 
     trial, failed = failed_attempt(task, tmp_path)
@@ -463,8 +536,14 @@ def test_completed_probe_in_different_task_revision_still_blocks_replacement(tas
 
 
 def test_resume_replays_original_authorization_before_later_completed_probe(task, tmp_path):
+    # [FUNCTION DOC] Verifies resume replays the original replacement authorization: a resumed run issues no new
+    # trial calls and leaves probe-attempt journals byte-identical.
     class CachedTrials(Trials):
+        # [CLASS DOC] Trials subclass that reads an existing receipt via RemoteTrials._read instead of
+        # rerunning.
         def run(self, task, role, key):
+            # [FUNCTION DOC] Returns the cached TrialRecord if root/key/trial.json exists, else delegates to
+            # Trials.run.
             if (self.root / key / "trial.json").exists():
                 return RemoteTrials._read(self.root / key, task, role)
             return super().run(task, role, key)
@@ -486,6 +565,8 @@ def test_resume_replays_original_authorization_before_later_completed_probe(task
 
 
 def test_imported_wrong_probe_cannot_lose_unknown_prior_counterexample_history(task, tmp_path):
+    # [FUNCTION DOC] Verifies imported wrong-solution probes (from a ProbeManifest) cannot be replaced because
+    # their prior counterexample history is unknown; ends needs_evidence and no r1 trials run.
     manifest = tmp_path / "known-probes.json"
     manifest.write_text(
         ProbeManifest(bundle_hash=task_identity(task), probes=probes()).model_dump_json()

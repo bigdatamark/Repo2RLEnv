@@ -1,3 +1,6 @@
+# [MODULE DOC] Tests for execution.read_retry.retry_read and github._run_gh: only transient read failures
+# (timeouts, Daytona connection timeouts, 429/5xx) are retried, and gh mutations are never retried.
+# Sleep and subprocess are monkeypatched.
 import subprocess
 from unittest.mock import Mock
 
@@ -8,6 +11,8 @@ from repo2rlenv.github import _run_gh
 
 
 def test_observation_retries_timeout_but_not_validation(monkeypatch):
+    # [FUNCTION DOC] Verifies a TimeoutError is retried once to success while a ValueError is raised immediately
+    # after one call.
     monkeypatch.setattr("repo2rlenv.execution.read_retry.time.sleep", lambda _: None)
     operation = Mock(side_effect=[TimeoutError(), "completed"])
     assert retry_read(operation) == "completed"
@@ -19,6 +24,7 @@ def test_observation_retries_timeout_but_not_validation(monkeypatch):
 
 
 def test_daytona_connection_timeout_retries_observation(monkeypatch):
+    # [FUNCTION DOC] Verifies an exception class named DaytonaConnectionTimeoutError is treated as retryable.
     monkeypatch.setattr("repo2rlenv.execution.read_retry.time.sleep", lambda _: None)
     error = type("DaytonaConnectionTimeoutError", (Exception,), {})()
     operation = Mock(side_effect=[error, "completed"])
@@ -28,6 +34,8 @@ def test_daytona_connection_timeout_retries_observation(monkeypatch):
 
 @pytest.mark.parametrize("status,attempts", [(503, 3), (429, 3), (401, 1), (404, 1)])
 def test_read_retries_transient_http_status_only(monkeypatch, status, attempts):
+    # [FUNCTION DOC] Parametrized over HTTP status: 503/429 retried to 3 attempts, 401/404 attempted once;
+    # RuntimeError propagates.
     monkeypatch.setattr("repo2rlenv.execution.read_retry.time.sleep", lambda _: None)
     error = RuntimeError("Provider response")
     error.status_code = status
@@ -51,6 +59,8 @@ def test_read_retries_transient_http_status_only(monkeypatch, status, attempts):
     ],
 )
 def test_github_only_retries_read_timeouts(monkeypatch, args, retries):
+    # [FUNCTION DOC] Parametrized over gh args: read API calls are retried 3 times on TimeoutExpired, any
+    # method/field/input mutation flags only once.
     monkeypatch.setattr("repo2rlenv.github.shutil.which", lambda _: "/usr/bin/gh")
     monkeypatch.setattr("repo2rlenv.github.time.sleep", lambda _: None)
     run = Mock(side_effect=subprocess.TimeoutExpired("gh", 60))

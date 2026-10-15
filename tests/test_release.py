@@ -1,3 +1,7 @@
+# [MODULE DOC] Tests for campaigns.release (stage_release, verify_release, publish_release, recover_empty_upload,
+# ReleaseTask): archive roundtrip, path safety, label normalization, tamper detection, idempotent
+# and uncertain HF Hub uploads (mocked HfApi), bounded commits, dataset card, and evidence document
+# rules.
 from __future__ import annotations
 
 import json
@@ -14,6 +18,8 @@ from repo2rlenv.emitter.bundle import TaskBundle, TaskFile, inspect_bundle, writ
 
 @pytest.fixture
 def selection(tmp_path):
+    # [FUNCTION DOC] Pytest fixture: writes an 'example' task bundle under tmp_path/generated and returns a
+    # ReleasePlan for repo org/example selecting it with its bundle hash.
     task = write_bundle(
         TaskBundle(
             name="example",
@@ -45,6 +51,8 @@ def selection(tmp_path):
 
 
 def test_release_archive_roundtrip_preserves_modes_identity_and_labels(selection, tmp_path):
+    # [FUNCTION DOC] Verifies staged tasks.tar.gz extracts to an identical bundle with executable modes preserved
+    # and manifest quality counts unverified/exported.
     stage = tmp_path / "stage"
     stage_release(selection, stage)
     verify_release(stage)
@@ -63,6 +71,8 @@ def test_release_archive_roundtrip_preserves_modes_identity_and_labels(selection
 def test_release_from_current_task_directory_has_valid_manifest_paths(
     selection, tmp_path, monkeypatch
 ):
+    # [FUNCTION DOC] Verifies staging from a relative '.' task path (chdir into task) yields valid manifest paths.
+    # Side effects: changes cwd via monkeypatch.
     monkeypatch.chdir(selection.tasks[0].path)
     selection.tasks[0].path = Path(".")
     stage = tmp_path / "stage"
@@ -74,6 +84,8 @@ def test_release_from_current_task_directory_has_valid_manifest_paths(
 
 
 def test_release_cannot_stage_inside_a_selected_task(selection, monkeypatch):
+    # [FUNCTION DOC] Verifies staging inside a selected task raises 'inside a selected task' before any copytree
+    # (mocked) and leaves the task unchanged.
     source = selection.tasks[0].path
     original = inspect_bundle(source)
     copy = Mock(side_effect=AssertionError("Would recursively copy the staging directory"))
@@ -89,6 +101,8 @@ def test_release_cannot_stage_inside_a_selected_task(selection, monkeypatch):
 def test_legacy_label_normalization_preserves_original_and_executable_identity(
     selection, tmp_path, normalize
 ):
+    # [FUNCTION DOC] Parametrized normalize: missing evaluation is normalized to an unverified label in the staged
+    # copy only when requested; source and other files remain byte-identical.
     import tomllib
 
     import tomli_w
@@ -125,6 +139,8 @@ def test_legacy_label_normalization_preserves_original_and_executable_identity(
 
 
 def test_no_publication_for_changed_staging(selection, tmp_path):
+    # [FUNCTION DOC] Verifies publish_release refuses a modified staging ('Staged release changed') with no API
+    # calls.
     stage = tmp_path / "stage"
     stage_release(selection, stage)
     (stage / "tasks/example/tests/test.sh").write_text("changed")
@@ -135,6 +151,7 @@ def test_no_publication_for_changed_staging(selection, tmp_path):
 
 
 def test_normalization_preserves_existing_diagnosis(selection, tmp_path):
+    # [FUNCTION DOC] Verifies normalization keeps an existing needs_repair diagnosis unchanged.
     import tomllib
 
     import tomli_w
@@ -156,6 +173,8 @@ def test_normalization_preserves_existing_diagnosis(selection, tmp_path):
 
 
 def test_nested_delivery_task_keeps_package_identity_when_released(selection, tmp_path):
+    # [FUNCTION DOC] Verifies a nested task directory is staged under its package name, and a mismatched task_id
+    # raises 'must match the Harbor package name'.
     selected = selection.tasks[0]
     nested = tmp_path / "delivery" / "task"
     nested.parent.mkdir()
@@ -172,6 +191,8 @@ def test_nested_delivery_task_keeps_package_identity_when_released(selection, tm
 
 
 def test_release_rejects_evaluation_from_another_task_revision(selection, tmp_path):
+    # [FUNCTION DOC] Verifies an evaluation label with a different subject hash is rejected by stage_release though
+    # integrity passes.
     import tomllib
 
     import tomli_w
@@ -188,6 +209,8 @@ def test_release_rejects_evaluation_from_another_task_revision(selection, tmp_pa
 
 
 def test_changed_source_or_duplicate_selection_cannot_be_staged(selection, tmp_path):
+    # [FUNCTION DOC] Verifies duplicate selections raise 'duplicate' and changed source content raises 'Task
+    # content changed' without creating staging.
     duplicate = selection.model_copy(update={"tasks": selection.tasks * 2})
     with pytest.raises(ValueError, match="duplicate"):
         stage_release(duplicate, tmp_path / "duplicate")
@@ -198,6 +221,8 @@ def test_changed_source_or_duplicate_selection_cannot_be_staged(selection, tmp_p
 
 
 def test_uncertain_upload_is_not_replayed(selection, tmp_path):
+    # [FUNCTION DOC] Verifies an upload TimeoutError leaves the receipt uncertain so a retry raises 'needs
+    # reconciliation' without re-uploading.
     stage = tmp_path / "stage"
     stage_release(selection, stage)
     api = Mock()
@@ -211,6 +236,8 @@ def test_uncertain_upload_is_not_replayed(selection, tmp_path):
 
 
 def test_publication_pins_registry_and_records_collection(selection, tmp_path):
+    # [FUNCTION DOC] Verifies publication pins registry git_commit_id to the upload oid, adds the collection item,
+    # and is idempotent.
     stage = tmp_path / "stage"
     stage_release(selection, stage)
     api = Mock()
@@ -227,6 +254,8 @@ def test_publication_pins_registry_and_records_collection(selection, tmp_path):
 
 
 def test_dataset_card_links_to_complete_harbor_bundles(selection, tmp_path):
+    # [FUNCTION DOC] Verifies the README dataset card metadata (license link, viewer False, no configs) and links
+    # to visualiser and task files.
     import yaml
 
     stage = tmp_path / "stage"
@@ -246,6 +275,8 @@ def test_dataset_card_links_to_complete_harbor_bundles(selection, tmp_path):
 
 
 def test_incomplete_task_cannot_be_advertised_in_registry_or_collection(selection, tmp_path):
+    # [FUNCTION DOC] Verifies a remote listing missing a file raises 'missing 1 release files' and skips registry
+    # upload and collection.
     stage = tmp_path / "stage"
     stage_release(selection, stage)
     api = Mock()
@@ -263,6 +294,8 @@ def test_incomplete_task_cannot_be_advertised_in_registry_or_collection(selectio
 
 
 def test_empty_upload_recovery_refuses_existing_remote_artifacts(selection, tmp_path):
+    # [FUNCTION DOC] Verifies recover_empty_upload refuses when remote artifacts exist beyond .gitattributes,
+    # without committing.
     from repo2rlenv.campaigns.release import recover_empty_upload
 
     stage = tmp_path / "stage"
@@ -280,6 +313,8 @@ def test_empty_upload_recovery_refuses_existing_remote_artifacts(selection, tmp_
 
 
 def test_empty_upload_recovery_pins_each_parent_and_finishes_registry(selection, tmp_path):
+    # [FUNCTION DOC] Verifies recover_empty_upload commits in chained batches pinned to each previous parent and
+    # completes.
     from repo2rlenv.campaigns.release import recover_empty_upload
 
     stage = tmp_path / "stage"
@@ -298,6 +333,8 @@ def test_empty_upload_recovery_pins_each_parent_and_finishes_registry(selection,
     commits = []
 
     def commit(**kwargs):
+        # [FUNCTION DOC] HELPER: Fake create_commit asserting parent_commit equals the previous chunk (or 'empty'),
+        # returning a new oid. Side effects: appends to commits.
         assert kwargs["parent_commit"] == (commits[-1] if commits else "empty")
         value = "chunk" + str(len(commits))
         commits.append(value)
@@ -311,6 +348,8 @@ def test_empty_upload_recovery_pins_each_parent_and_finishes_registry(selection,
 
 
 def test_new_large_release_uses_bounded_commits_and_publishes_card_last(selection, tmp_path):
+    # [FUNCTION DOC] Verifies a new release on an empty repo uses create_commit batches of at most 5 operations
+    # with README.md and release-files.json last.
     stage = tmp_path / "stage"
     stage_release(selection, stage)
     api = Mock()
@@ -331,6 +370,8 @@ def test_new_large_release_uses_bounded_commits_and_publishes_card_last(selectio
 
 
 def test_portable_evidence_is_separate_from_unchanged_task(selection, tmp_path):
+    # [FUNCTION DOC] Verifies evidence_documents are staged separately with recorded sha256, task bundle unchanged,
+    # and tampering fails verify_release.
     import hashlib
 
     from repo2rlenv.campaigns.release import ReleaseTask
@@ -367,6 +408,7 @@ def test_portable_evidence_is_separate_from_unchanged_task(selection, tmp_path):
     "name", ["../outside.json", "/tmp/outside.json", "sub/path.json", "a\\b.json", "report.txt"]
 )
 def test_evidence_names_cannot_escape_release_directory(selection, name):
+    # [FUNCTION DOC] Parametrized over unsafe names; ReleaseTask raises 'JSON basenames'.
     from repo2rlenv.campaigns.release import ReleaseTask
 
     with pytest.raises(ValueError, match="JSON basenames"):
@@ -376,6 +418,7 @@ def test_evidence_names_cannot_escape_release_directory(selection, name):
 
 
 def test_evidence_names_reject_case_collisions(selection):
+    # [FUNCTION DOC] Verifies case-colliding evidence names raise 'distinct'.
     from repo2rlenv.campaigns.release import ReleaseTask
 
     with pytest.raises(ValueError, match="distinct"):

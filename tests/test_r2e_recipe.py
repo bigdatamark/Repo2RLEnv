@@ -1,3 +1,6 @@
+# [MODULE DOC] Tests for the owned R2E recipe helpers: dependency slicing and stubbing, branch coverage evidence,
+# private verifier file generation, option parsing, source file selection excluding tests, and the
+# coverage driver plugin.
 from __future__ import annotations
 
 import ast
@@ -11,6 +14,8 @@ from repo2rlenv.spec.recipe_options import R2EOptions
 
 
 def test_dependency_slice_follows_helpers_and_constants_without_unrelated_code():
+    # [FUNCTION DOC] Verifies dependency_slice keeps imports, constants and helpers needed by target while dropping
+    # unrelated code, and stub leaves target ending in a raise while keeping helpers.
     source = "import math\nSCALE = 2\nUNRELATED = 999\ndef helper(x):\n    return math.ceil(x) * SCALE\ndef target(x):\n    return helper(x)\ndef unrelated():\n    return UNRELATED\n"
     result = dependency_slice(source, "target")
     assert "def helper" in result and "SCALE = 2" in result and "import math" in result
@@ -26,6 +31,8 @@ def test_dependency_slice_follows_helpers_and_constants_without_unrelated_code()
 
 
 def test_branch_feedback_is_scoped_to_target_and_absence_is_not_full_coverage():
+    # [FUNCTION DOC] Verifies branch_evidence counts only branches within the candidate line range (coverage 0.5)
+    # and reports 0 when the file is absent.
     candidate = {"path": "library.py", "line": 10, "end_line": 20}
     report = {
         "files": {
@@ -43,6 +50,9 @@ def test_branch_feedback_is_scoped_to_target_and_absence_is_not_full_coverage():
 
 
 def test_r2e_private_helpers_preserve_future_imports_and_native_options_stay_native():
+    # [FUNCTION DOC] Verifies verifier_files emits fut_module.py, .r2e_reference.py and the generated test keeping
+    # the future import first, referencing library._r2e_reference; and parse_options returns native
+    # vs R2E option types by recipe.
     code = "from __future__ import annotations\nimport unittest\nfrom fut_module import value, reference_value\nclass TestValue(unittest.TestCase):\n    def test_value(self):\n        self.assertEqual(value(3), reference_value(3))\n"
     private = verifier_files(
         {"module": "library.values", "function_name": "value"},
@@ -65,6 +75,8 @@ def test_r2e_private_helpers_preserve_future_imports_and_native_options_stay_nat
 
 
 def test_private_generated_test_uses_the_configured_nested_test_directory():
+    # [FUNCTION DOC] Verifies a configured generated_test_path places the private test there instead of the default
+    # tests/ path.
     private = verifier_files(
         {
             "module": "toolz.itertoolz",
@@ -80,6 +92,8 @@ def test_private_generated_test_uses_the_configured_nested_test_directory():
 
 
 def test_nested_tests_are_excluded_before_source_candidate_generation(tmp_path):
+    # [FUNCTION DOC] Verifies repository_source_files excludes configured test dirs/files and returns only
+    # lib/core.py and lib/tests_api.py. Side effects: writes files in tmp_path.
     for name in ("lib/core.py", "lib/tests/test_core.py", "lib/test_entry.py", "lib/tests_api.py"):
         path = tmp_path / name
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -93,6 +107,8 @@ def test_nested_tests_are_excluded_before_source_candidate_generation(tmp_path):
 
 
 def test_coverage_measures_only_the_configured_generated_tests(monkeypatch):
+    # [FUNCTION DOC] Loads coverage_driver.py with a fake coverage module (monkeypatched sys.modules) and verifies
+    # GeneratedTestCoverage starts/stops recording only for the configured generated test node.
     import importlib.util
     import sys
     from importlib.resources import files

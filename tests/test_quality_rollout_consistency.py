@@ -1,3 +1,5 @@
+# [MODULE DOC] Tests that reviewer rollout labels cannot contradict the supplied solver reward/exception
+# evidence; contradictions use the existing bounded correction and optional escalation.
 """Reviewer outcome labels cannot contradict the supplied solver execution."""
 
 from __future__ import annotations
@@ -16,6 +18,8 @@ from repo2rlenv.spec.input import LLMSpec
 
 @pytest.fixture
 def task(tmp_path):
+    # [FUNCTION DOC] Pytest fixture: writes 'rollout-consistency' task bundle under tmp_path/tasks. Output: task
+    # Path.
     return write_bundle(
         TaskBundle(
             name="rollout-consistency",
@@ -33,6 +37,9 @@ def task(tmp_path):
 
 
 def trial(task, tmp_path, reward, *, exception=None, key="solver", agent_exit_code=None):
+    # [FUNCTION DOC] HELPER: Writes tmp_path/key/result.json with the reward and optional exception and returns a
+    # rollout TrialRecord bound to it. Inputs: task, tmp_path, reward (float or None), exception,
+    # key (default 'solver'), agent_exit_code. Side effects: file write.
     path = tmp_path / key / "result.json"
     path.parent.mkdir()
     path.write_text(
@@ -59,10 +66,14 @@ def trial(task, tmp_path, reward, *, exception=None, key="solver", agent_exit_co
 
 
 class Model:
+    # [CLASS DOC] Fake model returning reviews with scripted rollout outcomes.
     def __init__(self, outcomes):
+        # [FUNCTION DOC] Inputs: outcomes (iterable of rollout labels). Initializes calls.
         self.outcomes, self.calls = iter(outcomes), []
 
     def ask(self, schema, model, system, user, key):
+        # [FUNCTION DOC] Asserts schema is Review, records key, model.qualified_name and payload, returns a passing
+        # Review with rollout set to the next outcome.
         assert schema is Review
         self.calls.append({"key": key, "model": model.qualified_name, **json.loads(user)})
         assessment = Assessment(
@@ -84,6 +95,7 @@ class Model:
 
 
 def loop(tmp_path, model, **options):
+    # [FUNCTION DOC] HELPER: Builds a QualityLoop with max_read_rounds=1 plus options and a $10 budget ledger.
     return QualityLoop(
         LoopOptions(max_read_rounds=1, **options),
         tmp_path / "quality",
@@ -103,6 +115,8 @@ def loop(tmp_path, model, **options):
 def test_reward_contradiction_uses_existing_review_correction(
     task, tmp_path, reward, claimed, corrected, success
 ):
+    # [FUNCTION DOC] Parametrized: a label contradicting reward vs success_reward is corrected on the second call;
+    # feedback cites the reward and evidence path; the corrected review is saved.
     model = Model([claimed, corrected])
     result, _ = loop(tmp_path, model, success_reward=success)._review(
         task,
@@ -122,6 +136,8 @@ def test_reward_contradiction_uses_existing_review_correction(
 
 
 def test_repeated_reward_contradiction_exhausts_existing_limit(task, tmp_path):
+    # [FUNCTION DOC] Verifies a repeated contradiction raises 'within the call limit' with reward detail and saves
+    # nothing.
     model = Model(["legitimate_success", "legitimate_success"])
     with pytest.raises(ValueError, match=r"within the call limit.*reward=0\.0"):
         loop(tmp_path, model)._review(task, [trial(task, tmp_path, 0.0)], "r0-after", probe_limit=0)
@@ -130,6 +146,7 @@ def test_repeated_reward_contradiction_exhausts_existing_limit(task, tmp_path):
 
 
 def test_reward_contradiction_can_use_only_configured_escalation(task, tmp_path):
+    # [FUNCTION DOC] Verifies a configured escalation model gets a third call that resolves the contradiction.
     model = Model(["legitimate_success", "legitimate_success", "legitimate_failure"])
     reviewer = loop(
         tmp_path, model, escalation_model=LLMSpec(provider="anthropic", model="claude-opus-4-6")
@@ -142,6 +159,8 @@ def test_reward_contradiction_can_use_only_configured_escalation(task, tmp_path)
 
 @pytest.mark.parametrize("claimed", ["legitimate_success", "legitimate_failure"])
 def test_no_rollout_cannot_support_a_legitimate_label(task, tmp_path, claimed):
+    # [FUNCTION DOC] Parametrized: with no rollout trial, legitimate labels are corrected to not_run with 'no
+    # supplied rollout evidence' feedback.
     model = Model([claimed, "not_run"])
     result, _ = loop(tmp_path, model)._review(task, [], "r0-before", probe_limit=0)
     assert result.rollout == "not_run"
@@ -159,6 +178,8 @@ def test_no_rollout_cannot_support_a_legitimate_label(task, tmp_path, claimed):
 def test_missing_reward_or_infrastructure_cannot_infer_legitimacy(
     task, tmp_path, reward, exception, claimed, diagnosis
 ):
+    # [FUNCTION DOC] Parametrized: missing reward or infrastructure exceptions cannot support legitimate labels;
+    # corrected to a diagnosis with 'is unsupported' feedback.
     model = Model([claimed, diagnosis])
     result, _ = loop(tmp_path, model)._review(
         task,
@@ -172,6 +193,8 @@ def test_missing_reward_or_infrastructure_cannot_infer_legitimacy(
 
 @pytest.mark.parametrize("exception", [None, "AgentTimeoutError"])
 def test_existing_bounded_solver_failure_semantics_are_preserved(task, tmp_path, exception):
+    # [FUNCTION DOC] Parametrized: legitimate_failure with exit code 1 (optionally agent timeout) is accepted on
+    # the first call.
     model = Model(["legitimate_failure"])
     result, _ = loop(tmp_path, model)._review(
         task,
@@ -187,6 +210,7 @@ def test_existing_bounded_solver_failure_semantics_are_preserved(task, tmp_path,
     "outcome", ["reward_hack", "task_defect", "incomplete", "insufficient_evidence"]
 )
 def test_diagnostic_categories_remain_model_judgments(task, tmp_path, outcome):
+    # [FUNCTION DOC] Parametrized: diagnostic outcomes are accepted as model judgments without correction.
     model = Model([outcome])
     result, _ = loop(tmp_path, model)._review(
         task,
@@ -198,6 +222,7 @@ def test_diagnostic_categories_remain_model_judgments(task, tmp_path, outcome):
 
 
 def test_latest_supplied_rollout_controls_consistency(task, tmp_path):
+    # [FUNCTION DOC] Verifies the latest supplied rollout (index 1) governs consistency and is cited in feedback.
     model = Model(["legitimate_failure", "legitimate_success"])
     trials = [trial(task, tmp_path, 0.0, key="earlier"), trial(task, tmp_path, 1.0, key="latest")]
     result, _ = loop(tmp_path, model)._review(task, trials, "r0-after", probe_limit=0)

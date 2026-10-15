@@ -1,3 +1,7 @@
+# [MODULE DOC] Tests for execution.artifacts.unpack_evidence, execution.harbor.read_trial and
+# execution.runtime_install.install: unsafe or oversized archives rejected before publication,
+# exceptions are not completed trials, concurrent installs share one environment, and hash
+# mismatches never install.
 from __future__ import annotations
 
 import hashlib
@@ -21,6 +25,8 @@ from repo2rlenv.execution.harbor import read_trial
     ],
 )
 def test_remote_evidence_rejects_unsafe_archives_before_publishing(tmp_path, name, kind):
+    # [FUNCTION DOC] Parametrized over traversal, symlink, absolute and FIFO members; unpack_evidence raises
+    # 'unsafe' and creates no output.
     archive = tmp_path / "evidence.tar.gz"
     with tarfile.open(archive, "w:gz") as stream:
         member = tarfile.TarInfo(name)
@@ -33,6 +39,7 @@ def test_remote_evidence_rejects_unsafe_archives_before_publishing(tmp_path, nam
 
 
 def test_archive_size_limit_is_checked_before_extraction(tmp_path):
+    # [FUNCTION DOC] Verifies max_bytes is enforced before extraction ('limits').
     archive = tmp_path / "evidence.tar.gz"
     with tarfile.open(archive, "w:gz") as stream:
         member = tarfile.TarInfo("job/binary")
@@ -44,6 +51,8 @@ def test_archive_size_limit_is_checked_before_extraction(tmp_path):
 
 
 def test_trial_exception_cannot_be_reported_as_valid_contrast(tmp_path):
+    # [FUNCTION DOC] Verifies read_trial marks exception trials incomplete, clean ones complete, and raises
+    # 'exactly one' with two trial dirs.
     (tmp_path / "trial").mkdir()
     path = tmp_path / "trial/result.json"
     path.write_text(
@@ -66,6 +75,9 @@ def test_trial_exception_cannot_be_reported_as_valid_contrast(tmp_path):
 
 
 def test_parallel_runtime_installs_share_one_complete_environment(tmp_path, monkeypatch):
+    # [FUNCTION DOC] Verifies two concurrent installs of the same content-addressed wheel run venv and pip once,
+    # write the installed marker, and remove upload dirs. Side effects: monkeypatched
+    # subprocess.run, threads.
     from concurrent.futures import ThreadPoolExecutor
     from pathlib import Path
     from threading import Event
@@ -82,6 +94,8 @@ def test_parallel_runtime_installs_share_one_complete_environment(tmp_path, monk
     installing, release = Event(), Event()
 
     def run(argv, **kwargs):
+        # [FUNCTION DOC] HELPER: Fake subprocess.run recording argv; for venv creates bin/python, otherwise signals
+        # installing and waits for release.
         calls.append(argv)
         if argv[1] == "venv":
             python = Path(argv[-1]) / "bin/python"
@@ -106,6 +120,8 @@ def test_parallel_runtime_installs_share_one_complete_environment(tmp_path, monk
 
 
 def test_runtime_hash_mismatch_never_runs_installation(tmp_path, monkeypatch):
+    # [FUNCTION DOC] Verifies a wheel whose sha256 mismatches the root name raises 'content address' without
+    # running subprocess.
     from repo2rlenv.execution.runtime_install import install
 
     root = tmp_path / ("a" * 64)

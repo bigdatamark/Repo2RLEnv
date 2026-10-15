@@ -1,3 +1,6 @@
+# [MODULE DOC] Tests for quality.loop.requirements (task_probe_focus, with_probe_requirements) and tasksmith
+# Options.required_probe_focus: strict metadata validation, hashing of requirements, non-destructive
+# annotated copies, resume/subset behavior and source-change detection.
 from __future__ import annotations
 
 import hashlib
@@ -15,6 +18,7 @@ from repo2rlenv.tasksmith.models import Options
 
 @pytest.fixture
 def task(tmp_path):
+    # [FUNCTION DOC] Pytest fixture: writes 'compiled-example' task bundle under tmp_path/tasks. Output: task Path.
     return write_bundle(
         TaskBundle(
             name="compiled-example",
@@ -32,6 +36,8 @@ def task(tmp_path):
 
 
 def contents(task):
+    # [FUNCTION DOC] HELPER: Maps each file under task (relative path string) to (sha256 hex, permission bits).
+    # Used to assert content immutability.
     return {
         str(path.relative_to(task)): (
             hashlib.sha256(path.read_bytes()).hexdigest(),
@@ -43,6 +49,8 @@ def contents(task):
 
 
 def set_requirement(task, value):
+    # [FUNCTION DOC] HELPER: Sets metadata.repo2env.quality_requirements in task.toml to value and rewrites it
+    # (without refreshing identity). Side effects: file write.
     path = task / "task.toml"
     config = tomllib.loads(path.read_text())
     config["metadata"]["repo2env"]["quality_requirements"] = value
@@ -50,6 +58,8 @@ def set_requirement(task, value):
 
 
 def test_legacy_task_has_no_implicit_compilation_requirement(task, tmp_path):
+    # [FUNCTION DOC] Verifies a legacy task has no focus and with_probe_requirements with no focus returns the
+    # original task without creating the destination.
     before = contents(task)
     destination = tmp_path / "unused"
     assert task_probe_focus(task) == set()
@@ -70,12 +80,15 @@ def test_legacy_task_has_no_implicit_compilation_requirement(task, tmp_path):
     ],
 )
 def test_task_requirement_metadata_is_strict(task, value):
+    # [FUNCTION DOC] Parametrized over malformed requirement values; task_probe_focus raises ValueError.
     set_requirement(task, value)
     with pytest.raises(ValueError):
         task_probe_focus(task)
 
 
 def test_requirement_is_hashed_while_evaluation_is_advisory(task):
+    # [FUNCTION DOC] Verifies requirements are part of the bundle hash (stale hash raises until refresh_identity)
+    # while evaluation detail edits do not change identity.
     original = task_identity(task)
     set_requirement(task, {"probe_focus": ["compiled_execution"]})
     with pytest.raises(ValueError, match="recorded bundle hash"):
@@ -91,6 +104,9 @@ def test_requirement_is_hashed_while_evaluation_is_advisory(task):
 
 
 def test_annotated_copy_preserves_source_files_and_clears_prior_evaluation(task, tmp_path):
+    # [FUNCTION DOC] Verifies with_probe_requirements writes an annotated copy with new identity and focus,
+    # identical non-toml files, and an evaluation reset to unverified/task_changed; the source is
+    # unchanged.
     config = tomllib.loads((task / "task.toml").read_text())
     config["metadata"]["repo2env"]["evaluation"]["status"] = "verified"
     (task / "task.toml").write_text(tomli_w.dumps(config))
@@ -113,6 +129,8 @@ def test_annotated_copy_preserves_source_files_and_clears_prior_evaluation(task,
 
 
 def test_annotated_input_resumes_and_requirement_subset_returns_original(task, tmp_path):
+    # [FUNCTION DOC] Verifies repeated annotation (any order) resumes to the same copy, a subset request returns
+    # the input unchanged, and extension unions focuses without touching the earlier copy.
     destination = tmp_path / "review-input" / task.name
     result = with_probe_requirements(task, destination, ["compiled_execution", "numeric_tolerance"])
     before = contents(result)
@@ -130,6 +148,8 @@ def test_annotated_input_resumes_and_requirement_subset_returns_original(task, t
 
 
 def test_conflicting_destination_is_not_overwritten(task, tmp_path):
+    # [FUNCTION DOC] Verifies a destination holding different requirements raises 'different task content or
+    # requirements' and is left unchanged.
     destination = with_probe_requirements(task, tmp_path / "destination", ["numeric_tolerance"])
     before = contents(destination)
     with pytest.raises(ValueError, match="different task content or requirements"):
@@ -138,6 +158,7 @@ def test_conflicting_destination_is_not_overwritten(task, tmp_path):
 
 
 def test_annotated_destination_cannot_modify_source(task):
+    # [FUNCTION DOC] Verifies destinations equal to or inside the source raise 'outside the original task'.
     before = contents(task)
     for destination in [task, task / "nested"]:
         with pytest.raises(ValueError, match="outside the original task"):
@@ -146,6 +167,7 @@ def test_annotated_destination_cannot_modify_source(task):
 
 
 def test_unknown_requested_focus_fails_before_copy(task, tmp_path):
+    # [FUNCTION DOC] Verifies an unknown focus raises ValueError before any copy is made.
     destination = tmp_path / "destination"
     before = contents(task)
     with pytest.raises(ValueError):
@@ -158,6 +180,9 @@ def test_unknown_requested_focus_fails_before_copy(task, tmp_path):
 def test_source_change_during_annotation_prevents_publish_or_replay(
     task, tmp_path, monkeypatch, resume
 ):
+    # [FUNCTION DOC] Parametrized on resume: if the source changes during annotation (monkeypatched
+    # refresh_identity), a ValueError('recorded bundle hash') is raised and the destination is not
+    # created or modified.
     from repo2rlenv.quality.loop import requirements
 
     destination = tmp_path / "destination"
@@ -167,6 +192,8 @@ def test_source_change_during_annotation_prevents_publish_or_replay(
     original_refresh = requirements.refresh_identity
 
     def source_changed(copied):
+        # [FUNCTION DOC] HELPER: Wraps the original refresh_identity, then mutates the source instruction.md to
+        # simulate a concurrent change. Output: identity from the copy.
         identity = original_refresh(copied)
         (task / "instruction.md").write_text("The original changed during the copy.\n")
         return identity
@@ -181,6 +208,8 @@ def test_source_change_during_annotation_prevents_publish_or_replay(
 
 
 def test_explicit_options_validate_focus_and_preserve_default():
+    # [FUNCTION DOC] Verifies Options defaults required_probe_focus to [], sorts provided values, and rejects
+    # unknown or duplicate entries.
     assert Options().required_probe_focus == []
     assert Options(
         required_probe_focus=["numeric_tolerance", "compiled_execution"]

@@ -1,3 +1,6 @@
+# [MODULE DOC] Tests for quality.loop.rollout_evidence.rollout_documents: review documents include a complete
+# tool-call index and an actual source diff from captured artifacts; failed collection is not
+# reported as deletion and escaping manifest destinations are rejected.
 """Review summaries use captured artifacts, including edits in middle turns."""
 
 import json
@@ -8,6 +11,9 @@ from repo2rlenv.quality.loop.rollout_evidence import rollout_documents
 
 
 def test_complete_command_index_and_actual_added_modified_deleted_source(tmp_path):
+    # [FUNCTION DOC] Builds a task source tree and trial artifacts (30-step trajectory, manifest) and verifies
+    # tool-calls.jsonl lists all steps, submission-index lists added/modified/deleted files, and the
+    # diff contains the expected lines.
     task, trial = tmp_path / "task", tmp_path / "trial"
     for parent, name, text in [
         (task, "environment/source/lib/a.py", "old\n"),
@@ -64,6 +70,8 @@ def test_complete_command_index_and_actual_added_modified_deleted_source(tmp_pat
 
 
 def test_failed_collection_is_not_described_as_source_deletion(tmp_path):
+    # [FUNCTION DOC] Verifies a failed manifest entry yields collection_failed and a '[No captured' diff, and a
+    # destination escaping the trial dir raises ValueError('escapes').
     (tmp_path / "artifacts").mkdir()
     manifest = tmp_path / "artifacts/manifest.json"
     entry = {
