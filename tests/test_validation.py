@@ -1,3 +1,8 @@
+# [MODULE DOC] Tests for repo2rlenv.validation.validate_task and the CLI "validate --deep"
+# / "--oracle" flags: static task-asset, Harbor layout, verifier-asset, reproducibility-metadata and
+# oracle checks. Fixtures are built with the real emitter and pipeline builders so emitted tasks
+# must
+# produce no findings.
 """`repo2rlenv validate --deep` / `--oracle` — task-aware static checks.
 
 Fixtures are built with the real emitter + pipeline builders, so "no findings
@@ -41,6 +46,10 @@ P2P = ["tests/test_x.py::test_other"]
 
 
 def _task(pipeline: str, **kwargs) -> HarborTask:
+    # [FUNCTION DOC] HELPER: Builds a HarborTask named demo__repo-<pipeline> with a fixed
+    # instruction, oracle diff and repo2env metadata (pipeline, repo, merged with any repo2env
+    # kwarg);
+    # other kwargs pass through. Output: HarborTask.
     return HarborTask(
         name=f"demo__repo-{pipeline}",
         org="myorg",
@@ -53,10 +62,14 @@ def _task(pipeline: str, **kwargs) -> HarborTask:
 
 
 def _pr_diff_lite(tmp_path: Path) -> Path:
+    # [FUNCTION DOC] HELPER: Writes a text-only pr_diff task (no environment) under tmp_path
+    # and returns its directory.
     return write_harbor_task(_task("pr_diff"), tmp_path)
 
 
 def _pr_diff_env(tmp_path: Path) -> Path:
+    # [FUNCTION DOC] HELPER: Writes a pr_diff task with the Docker environment, eval script and
+    # aux files from the pr_diff builders. Output: task directory.
     task = _task(
         "pr_diff",
         environment_dockerfile=build_pr_diff_environment_dockerfile(
@@ -70,6 +83,10 @@ def _pr_diff_env(tmp_path: Path) -> Path:
 
 
 def _pr_runtime_graded(tmp_path: Path) -> Path:
+    # [FUNCTION DOC] HELPER: Writes a graded pr_runtime task with F2P/P2P metadata,
+    # bootstrap Dockerfile, eval script, runtime verifier aux files and the egress-guard compose
+    # file.
+    # Output: task directory.
     task = _task(
         "pr_runtime",
         repo2env={
@@ -89,6 +106,8 @@ def _pr_runtime_graded(tmp_path: Path) -> Path:
 
 
 def _code_instruct(tmp_path: Path) -> Path:
+    # [FUNCTION DOC] HELPER: Writes a code_instruct task with its Dockerfile, a pytest test
+    # script and tests/test_task_module.py. Output: task directory.
     task = _task(
         "code_instruct",
         repo2env={
@@ -103,10 +122,13 @@ def _code_instruct(tmp_path: Path) -> Path:
 
 
 def _load(task_dir: Path) -> dict:
+    # [FUNCTION DOC] HELPER: Parses task_dir/task.toml as UTF-8 TOML. Output: dict.
     return tomllib.loads((task_dir / "task.toml").read_text(encoding="utf-8"))
 
 
 def _rewrite(task_dir: Path, mutate) -> dict:
+    # [FUNCTION DOC] HELPER: Loads task.toml, applies the mutate callback in place, writes it back
+    # with tomli_w. Output: the mutated dict. Side effects: overwrites task.toml.
     data = _load(task_dir)
     mutate(data)
     (task_dir / "task.toml").write_text(tomli_w.dumps(data), encoding="utf-8")
@@ -114,10 +136,12 @@ def _rewrite(task_dir: Path, mutate) -> dict:
 
 
 def _errors(findings: list[Finding]) -> set[str]:
+    # [FUNCTION DOC] HELPER: Returns the set of paths of findings with severity "error".
     return {f.path for f in findings if f.severity == "error"}
 
 
 def _warnings(findings: list[Finding]) -> set[str]:
+    # [FUNCTION DOC] HELPER: Returns the set of paths of findings with severity "warning".
     return {f.path for f in findings if f.severity == "warning"}
 
 
@@ -125,6 +149,8 @@ def _warnings(findings: list[Finding]) -> set[str]:
     "pipeline,recipe", [("terminal_synth", "tmax"), ("equivalence_tests", "r2e")]
 )
 def test_recipe_oracle_can_be_a_script_without_a_patch(tmp_path, pipeline, recipe):
+    # [FUNCTION DOC] Parametrized recipe pipelines: with
+    # oracle checks, a recipe task needs solve.sh but not patch.diff; removing solve.sh is an error.
     task_dir = _pr_runtime_graded(tmp_path)
     data = _rewrite(
         task_dir,
@@ -140,6 +166,8 @@ def test_recipe_oracle_can_be_a_script_without_a_patch(tmp_path, pipeline, recip
 
 
 def test_recipe_oracle_still_checks_a_supplied_patch(tmp_path):
+    # [FUNCTION DOC] A recipe task's invalid patch.diff is
+    # still reported under oracle checks.
     task_dir = _pr_runtime_graded(tmp_path)
     data = _rewrite(task_dir, lambda d: d["metadata"]["repo2env"].update(recipe="swe-gen"))
     (task_dir / "solution/patch.diff").write_text("not a patch")
@@ -153,11 +181,15 @@ def test_recipe_oracle_still_checks_a_supplied_patch(tmp_path):
 
 @pytest.mark.parametrize("build", [_pr_diff_lite, _pr_diff_env, _pr_runtime_graded, _code_instruct])
 def test_emitted_tasks_have_no_findings(tmp_path: Path, build):
+    # [FUNCTION DOC] Parametrized builders: every emitted fixture
+    # validates with oracle checks and no findings.
     task_dir = build(tmp_path)
     assert validate_task(task_dir, _load(task_dir), oracle=True) == []
 
 
 def test_emitted_tasks_pass_without_exec_bits(tmp_path: Path):
+    # [FUNCTION DOC] Scripts with mode 0644 still validate
+    # cleanly.
     """Harbor runs `chmod +x` itself — mode 0644 scripts must not fail."""
     task_dir = _pr_runtime_graded(tmp_path)
     for script in ("tests/test.sh", "solution/solve.sh"):
@@ -166,6 +198,8 @@ def test_emitted_tasks_pass_without_exec_bits(tmp_path: Path):
 
 
 def test_repro_modes_track_registry_literal():
+    # [FUNCTION DOC] REPRO_MODES equals the members of the
+    # registry ReproMode literal.
     assert frozenset(get_args(ReproMode)) == REPRO_MODES
 
 
@@ -188,6 +222,9 @@ mode = "nonsense"
 
 
 def test_issue_100_reproduction_reports_every_problem(tmp_path: Path):
+    # [FUNCTION DOC] The issue #100 task.toml reports
+    # errors for instruction.md, tests/test.sh, environment and task.toml, including an invalid mode
+    # message.
     (tmp_path / "task.toml").write_text(ISSUE_100_TOML, encoding="utf-8")
     findings = validate_task(tmp_path, tomllib.loads(ISSUE_100_TOML))
     assert _errors(findings) == {"instruction.md", "tests/test.sh", "environment", "task.toml"}
@@ -195,16 +232,23 @@ def test_issue_100_reproduction_reports_every_problem(tmp_path: Path):
 
 
 def test_cli_default_validate_is_unchanged(tmp_path: Path):
+    # [FUNCTION DOC] Plain "validate" on the issue #100 task exits
+    # 0.
     (tmp_path / "task.toml").write_text(ISSUE_100_TOML, encoding="utf-8")
     assert main(["validate", str(tmp_path)]) == 0
 
 
 def test_cli_deep_fails_issue_100_reproduction(tmp_path: Path):
+    # [FUNCTION DOC] "validate --deep" on it exits 1.
     (tmp_path / "task.toml").write_text(ISSUE_100_TOML, encoding="utf-8")
     assert main(["validate", str(tmp_path), "--deep"]) == 1
 
 
 def test_cli_deep_output_keeps_toml_table_names(tmp_path: Path, monkeypatch):
+    # [FUNCTION DOC] Deep output, captured via a patched Rich
+    # console, keeps bracketed TOML table names unescaped-in-text and prefixes findings with the
+    # task
+    # name.
     """`[environment]` etc. are Rich markup tags — they must be escaped, not eaten."""
     buf = io.StringIO()
     monkeypatch.setattr(console, "console", Console(file=buf, width=300, no_color=True))
@@ -217,11 +261,14 @@ def test_cli_deep_output_keeps_toml_table_names(tmp_path: Path, monkeypatch):
 
 
 def test_cli_oracle_implies_deep(tmp_path: Path):
+    # [FUNCTION DOC] "validate --oracle" exits 1 on the issue #100 task.
     (tmp_path / "task.toml").write_text(ISSUE_100_TOML, encoding="utf-8")
     assert main(["validate", str(tmp_path), "--oracle"]) == 1
 
 
 def test_cli_oracle_passes_emitted_dataset(tmp_path: Path):
+    # [FUNCTION DOC] A dataset of all four emitted fixtures passes
+    # "validate --oracle" with exit 0.
     for build in (_pr_diff_lite, _pr_diff_env, _pr_runtime_graded, _code_instruct):
         build(tmp_path / build.__name__)  # both pr_diff fixtures share a task name
     assert main(["validate", str(tmp_path), "--oracle"]) == 0
@@ -233,18 +280,25 @@ def test_cli_oracle_passes_emitted_dataset(tmp_path: Path):
 
 
 def test_blank_instruction_is_an_error(tmp_path: Path):
+    # [FUNCTION DOC] A whitespace-only instruction.md is an error.
     task_dir = _pr_diff_lite(tmp_path)
     (task_dir / "instruction.md").write_text("  \n", encoding="utf-8")
     assert _errors(validate_task(task_dir, _load(task_dir))) == {"instruction.md"}
 
 
 def test_text_only_pr_diff_needs_patch_even_without_oracle(tmp_path: Path):
+    # [FUNCTION DOC] A text-only pr_diff task
+    # without patch.diff errors even without oracle checks.
     task_dir = _pr_diff_lite(tmp_path)
     (task_dir / "solution" / "patch.diff").unlink()
     assert _errors(validate_task(task_dir, _load(task_dir))) == {"solution/patch.diff"}
 
 
 def test_legacy_multi_component_reward_kind_is_diff_similarity(tmp_path: Path):
+    # [FUNCTION DOC] The legacy
+    # diff_similarity_multi_component reward kind is accepted and treated like diff_similarity
+    # (patch
+    # required).
     """Published v0.8.3 pr_diff datasets carry the pre-rename kind."""
     task_dir = _pr_diff_lite(tmp_path)
     data = _rewrite(
@@ -259,6 +313,8 @@ def test_legacy_multi_component_reward_kind_is_diff_similarity(tmp_path: Path):
 
 
 def test_prebuilt_docker_image_satisfies_environment(tmp_path: Path):
+    # [FUNCTION DOC] environment.docker_image substitutes
+    # for a missing Dockerfile.
     task_dir = _code_instruct(tmp_path)
     (task_dir / "environment" / "Dockerfile").unlink()
     data = _rewrite(task_dir, lambda d: d.update(environment={"docker_image": "python:3.12"}))
@@ -266,6 +322,8 @@ def test_prebuilt_docker_image_satisfies_environment(tmp_path: Path):
 
 
 def test_compose_only_environment_is_accepted(tmp_path: Path):
+    # [FUNCTION DOC] A docker-compose.yaml alone satisfies the
+    # environment requirement.
     task_dir = _code_instruct(tmp_path)
     (task_dir / "environment" / "Dockerfile").unlink()
     (task_dir / "environment" / "docker-compose.yaml").write_text("services: {}\n")
@@ -273,18 +331,24 @@ def test_compose_only_environment_is_accepted(tmp_path: Path):
 
 
 def test_missing_environment_definition_on_runtime_task(tmp_path: Path):
+    # [FUNCTION DOC] A runtime task with no Dockerfile
+    # reports an environment error.
     task_dir = _code_instruct(tmp_path)
     (task_dir / "environment" / "Dockerfile").unlink()
     assert _errors(validate_task(task_dir, _load(task_dir))) == {"environment"}
 
 
 def test_empty_environment_dir_makes_lite_task_runnable(tmp_path: Path):
+    # [FUNCTION DOC] Adding an empty environment dir to
+    # a lite task makes it runnable, so missing environment definition and test.sh are errors.
     task_dir = _pr_diff_lite(tmp_path)
     (task_dir / "environment").mkdir()
     assert _errors(validate_task(task_dir, _load(task_dir))) == {"environment", "tests/test.sh"}
 
 
 def test_windows_task_uses_bat_scripts(tmp_path: Path):
+    # [FUNCTION DOC] With environment.os windows, .bat test and solution
+    # scripts validate.
     task_dir = _code_instruct(tmp_path)
     (task_dir / "tests" / "test.sh").rename(task_dir / "tests" / "test.bat")
     (task_dir / "solution" / "solve.sh").rename(task_dir / "solution" / "solve.bat")
@@ -293,12 +357,16 @@ def test_windows_task_uses_bat_scripts(tmp_path: Path):
 
 
 def test_linux_task_does_not_accept_bat_test_script(tmp_path: Path):
+    # [FUNCTION DOC] On Linux a test.bat does not satisfy
+    # tests/test.sh.
     task_dir = _code_instruct(tmp_path)
     (task_dir / "tests" / "test.sh").rename(task_dir / "tests" / "test.bat")
     assert _errors(validate_task(task_dir, _load(task_dir))) == {"tests/test.sh"}
 
 
 def test_non_r2e_task_only_checks_what_exists(tmp_path: Path):
+    # [FUNCTION DOC] A non-repo2env task validates with only an
+    # instruction; once environment/ and tests/ exist, their definitions are required.
     (tmp_path / "instruction.md").write_text("do the thing", encoding="utf-8")
     data = {"version": "1.0", "task": {"name": "org/plain"}}
     assert validate_task(tmp_path, data, oracle=True) == []
@@ -309,6 +377,8 @@ def test_non_r2e_task_only_checks_what_exists(tmp_path: Path):
 
 
 def test_multi_step_task_skips_layout_checks(tmp_path: Path):
+    # [FUNCTION DOC] A task with steps produces only a task.toml
+    # warning.
     data = {"version": "1.0", "task": {"name": "org/steps"}, "steps": [{"name": "one"}]}
     findings = validate_task(tmp_path, data)
     assert _errors(findings) == set()
@@ -316,9 +386,13 @@ def test_multi_step_task_skips_layout_checks(tmp_path: Path):
 
 
 def test_unknown_pipeline_and_reward_kind_warn(tmp_path: Path):
+    # [FUNCTION DOC] An unknown pipeline and reward kind yield
+    # two warnings and no errors.
     task_dir = _pr_diff_lite(tmp_path)
 
     def mutate(d):
+        # [FUNCTION DOC] HELPER: Sets an unregistered
+        # pipeline and adds an unknown llm_judge reward kind.
         d["metadata"]["repo2env"]["pipeline"] = "unregistered_example_pipeline"
         d["metadata"]["repo2env"]["reward_kinds"] = ["diff_similarity", "llm_judge"]
 
@@ -344,12 +418,16 @@ def test_unknown_pipeline_and_reward_kind_warn(tmp_path: Path):
     ],
 )
 def test_graded_verifier_assets_must_parse(tmp_path: Path, rel: str, content: str):
+    # [FUNCTION DOC] Parametrized malformed f2p/p2p JSON or broken /
+    # empty verifier.py each produce an error for that file.
     task_dir = _pr_runtime_graded(tmp_path)
     (task_dir / rel).write_text(content, encoding="utf-8")
     assert _errors(validate_task(task_dir, _load(task_dir))) == {rel}
 
 
 def test_graded_verifier_assets_must_exist(tmp_path: Path):
+    # [FUNCTION DOC] Deleting all three verifier assets reports each
+    # as an error.
     task_dir = _pr_runtime_graded(tmp_path)
     for name in ("verifier.py", "f2p.json", "p2p.json"):
         (task_dir / "tests" / name).unlink()
@@ -361,6 +439,8 @@ def test_graded_verifier_assets_must_exist(tmp_path: Path):
 
 
 def test_binary_reward_runtime_task_needs_no_verifier_assets(tmp_path: Path):
+    # [FUNCTION DOC] Without fail_to_pass
+    # metadata, no verifier assets are required.
     """No F2P oracle (e.g. --skip-validation) → exit-code reward, no aux files."""
     task_dir = _pr_runtime_graded(tmp_path)
     for name in ("verifier.py", "f2p.json", "p2p.json"):
@@ -370,6 +450,8 @@ def test_binary_reward_runtime_task_needs_no_verifier_assets(tmp_path: Path):
 
 
 def test_f2p_mismatch_with_metadata_warns(tmp_path: Path):
+    # [FUNCTION DOC] f2p.json disagreeing with metadata is a warning
+    # only.
     task_dir = _pr_runtime_graded(tmp_path)
     (task_dir / "tests" / "f2p.json").write_text(json.dumps(["other::test"]), encoding="utf-8")
     findings = validate_task(task_dir, _load(task_dir))
@@ -378,12 +460,16 @@ def test_f2p_mismatch_with_metadata_warns(tmp_path: Path):
 
 
 def test_code_instruct_test_file_must_exist(tmp_path: Path):
+    # [FUNCTION DOC] A missing code_instruct test file is an
+    # error.
     task_dir = _code_instruct(tmp_path)
     (task_dir / "tests" / "test_task_module.py").unlink()
     assert _errors(validate_task(task_dir, _load(task_dir))) == {"tests/test_task_module.py"}
 
 
 def test_code_instruct_test_filename_cannot_escape_tests_dir(tmp_path: Path):
+    # [FUNCTION DOC] A test_filename escaping
+    # tests/ is reported as a task.toml error.
     task_dir = _code_instruct(tmp_path)
     data = _rewrite(
         task_dir,
@@ -398,13 +484,19 @@ def test_code_instruct_test_filename_cannot_escape_tests_dir(tmp_path: Path):
 
 
 def _set_repro(task_dir: Path, repro: dict) -> dict:
+    # [FUNCTION DOC] HELPER: Rewrites task.toml's reproducibility table to the given dict.
+    # Output: the updated data.
     return _rewrite(task_dir, lambda d: d["metadata"]["repo2env"].update(reproducibility=repro))
 
 
 def test_legacy_task_without_reproducibility_is_valid(tmp_path: Path):
+    # [FUNCTION DOC] A spec 0.1.0 task without
+    # reproducibility is valid.
     task_dir = _code_instruct(tmp_path)
 
     def mutate(d):
+        # [FUNCTION DOC] HELPER: Removes
+        # reproducibility and sets spec_version 0.1.0.
         d["metadata"]["repo2env"].pop("reproducibility")
         d["metadata"]["repo2env"]["spec_version"] = "0.1.0"
 
@@ -412,6 +504,8 @@ def test_legacy_task_without_reproducibility_is_valid(tmp_path: Path):
 
 
 def test_v020_sandbox_task_without_reproducibility_warns(tmp_path: Path):
+    # [FUNCTION DOC] A current sandbox task without
+    # reproducibility gets a task.toml warning only.
     task_dir = _code_instruct(tmp_path)
     data = _rewrite(task_dir, lambda d: d["metadata"]["repo2env"].pop("reproducibility"))
     findings = validate_task(task_dir, data)
@@ -436,11 +530,17 @@ def test_v020_sandbox_task_without_reproducibility_warns(tmp_path: Path):
     ],
 )
 def test_invalid_reproducibility_metadata(tmp_path: Path, repro: dict):
+    # [FUNCTION DOC] Parametrized invalid reproducibility tables
+    # (bad/unhashable mode, missing or blank image_ref, bad visibility, bad inline fields) each give
+    # a
+    # task.toml error.
     task_dir = _code_instruct(tmp_path)
     assert _errors(validate_task(task_dir, _set_repro(task_dir, repro))) == {"task.toml"}
 
 
 def test_valid_registry_and_inline_modes(tmp_path: Path):
+    # [FUNCTION DOC] A complete registry mode matching the Dockerfile
+    # FROM digest and a complete inline_dockerfile mode both validate cleanly.
     task_dir = _code_instruct(tmp_path)
     digest = "ghcr.io/demo/r2e-bootstrap-demo@sha256:" + "b" * 64
     dockerfile = task_dir / "environment" / "Dockerfile"
@@ -469,6 +569,8 @@ def test_valid_registry_and_inline_modes(tmp_path: Path):
 
 
 def test_registry_from_line_mismatch_warns(tmp_path: Path):
+    # [FUNCTION DOC] A registry image_ref not matching the
+    # Dockerfile FROM gives a Dockerfile warning.
     task_dir = _code_instruct(tmp_path)
     findings = validate_task(
         task_dir, _set_repro(task_dir, {"mode": "registry", "image_ref": "ghcr.io/x/y@sha256:1"})
@@ -478,6 +580,8 @@ def test_registry_from_line_mismatch_warns(tmp_path: Path):
 
 
 def test_inline_mode_requires_dockerfile(tmp_path: Path):
+    # [FUNCTION DOC] inline_dockerfile mode with only a compose file
+    # is an environment/Dockerfile error.
     task_dir = _code_instruct(tmp_path)
     (task_dir / "environment" / "Dockerfile").unlink()
     (task_dir / "environment" / "docker-compose.yaml").write_text("services: {}\n")
@@ -491,6 +595,8 @@ def test_inline_mode_requires_dockerfile(tmp_path: Path):
 
 
 def test_oracle_checks_are_opt_in(tmp_path: Path):
+    # [FUNCTION DOC] Missing solution files are only reported when oracle
+    # checks are enabled.
     task_dir = _code_instruct(tmp_path)
     for rel in ("solution/patch.diff", "solution/solve.sh"):
         (task_dir / rel).unlink()
@@ -502,12 +608,15 @@ def test_oracle_checks_are_opt_in(tmp_path: Path):
 
 
 def test_oracle_patch_must_look_like_a_diff(tmp_path: Path):
+    # [FUNCTION DOC] A prose patch.diff is an oracle error.
     task_dir = _code_instruct(tmp_path)
     (task_dir / "solution" / "patch.diff").write_text("just prose\n", encoding="utf-8")
     assert _errors(validate_task(task_dir, _load(task_dir), oracle=True)) == {"solution/patch.diff"}
 
 
 def test_oracle_search_replace_patch_skips_diff_header_check(tmp_path: Path):
+    # [FUNCTION DOC] With diff_format
+    # search_replace, a SEARCH/REPLACE patch passes oracle checks.
     task_dir = _pr_diff_lite(tmp_path)
     (task_dir / "solution" / "patch.diff").write_text(
         "x.py\n<<<<<<< SEARCH\nx = 1\n=======\nx = 2\n>>>>>>> REPLACE\n", encoding="utf-8"

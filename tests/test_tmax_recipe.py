@@ -1,3 +1,7 @@
+# [MODULE DOC] Tests for the tmax recipe: deterministic taxonomy sampling of task seeds and
+# emission of a non-root terminal task whose verifier runs as root with private files kept out of
+# the
+# image.
 from __future__ import annotations
 
 import json
@@ -12,6 +16,12 @@ from repo2rlenv.pipelines.recipes.tmax.sampler import sample_inputs, template_pr
 
 
 def test_taxonomy_sampling_is_repeatable_and_preserves_legacy_axes(tmp_path):
+    # [FUNCTION DOC] sample_inputs on a
+    # seeded config is repeatable, yields 20 distinct items in the chosen domain with 3-5 primitive
+    # skills
+    # and legacy fixture/verifier kinds, template_prompt fills placeholders, and unknown domains
+    # raise
+    # ValueError.
     source = tmp_path / "sampler.json"
     source.write_text(
         json.dumps(
@@ -38,6 +48,10 @@ def test_taxonomy_sampling_is_repeatable_and_preserves_legacy_axes(tmp_path):
 
 
 def test_nonroot_terminal_profile_keeps_verifier_root_and_private_files_outside_image(tmp_path):
+    # [FUNCTION DOC] Emitting
+    # with agent_user="user" sets agent user to user and verifier user to root, keeps test files out
+    # of
+    # environment/, and chowns the workspace in the Dockerfile.
     draft = TerminalDraft(
         instruction="Create /workspace/output.txt from the supplied input file.",
         environment_setup="",

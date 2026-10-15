@@ -1,3 +1,7 @@
+# [MODULE DOC] Tests for Tasksmith private verifier selection in worker.construct and the
+# Design upstream_test_policy ("retain" vs "replace"), plus the strict submission contract exported
+# for modified-only CPU tasks. Repository test execution and export are mocked except the final
+# real export test.
 """Private verifier selection contracts; repository execution is mocked."""
 
 import hashlib
@@ -13,6 +17,11 @@ from repo2rlenv.tasksmith.models import Design, Profile
 
 
 def design(**overrides):
+    # [FUNCTION DOC] HELPER: Builds a valid Design with fixed instruction, one requirement,
+    # rationale
+    # and solution ideas, updated with keyword overrides. Output: Design; raises ValidationError on
+    # bad
+    # overrides.
     return Design(
         **{
             "instruction": "Implement the requested public feature while preserving existing behavior. "
@@ -34,6 +43,10 @@ def design(**overrides):
 
 @pytest.mark.parametrize("text", ["", " \n\t"])
 def test_replacement_cannot_remove_every_grading_test(text):
+    # [FUNCTION DOC] Parametrized blank texts: policy
+    # "replace" with empty additional_tests raises ValidationError ("requires private tests"); the
+    # default
+    # policy is "retain".
     with pytest.raises(ValidationError, match="requires private tests"):
         design(upstream_test_policy="replace", additional_tests=text)
     assert design().upstream_test_policy == "retain"
@@ -41,6 +54,14 @@ def test_replacement_cannot_remove_every_grading_test(text):
 
 @pytest.mark.parametrize("policy", ["retain", "replace"])
 def test_selection_preserves_readiness_and_routes_both_controls(monkeypatch, tmp_path, policy):
+    # [FUNCTION DOC] Parametrized policy:
+    # construct runs the healthy and defective controls on the verified image with selectors equal
+    # to
+    # the upstream ones (retain) or none (replace) plus the private behavior file, does not mutate
+    # the
+    # profile, records the policy and verifier source in exported metadata, and derives F2P/P2P
+    # contrast
+    # from the two runs.
     base = tmp_path / "base"
     (base / "lib").mkdir(parents=True)
     (base / "tests").mkdir()
@@ -62,6 +83,10 @@ def test_selection_preserves_readiness_and_routes_both_controls(monkeypatch, tmp
     observed = []
 
     def test_image(image, options, output, *, replacements, removals=()):
+        # [FUNCTION DOC] HELPER: Fake
+        # test runner asserting image, selectors, test paths and replacements, recording the output
+        # name and
+        # returning TestResults where "feature" fails only on the defective control.
         assert image == "the-verified-merged-image"
         assert options.test_selectors == expected
         assert options.test_paths == ["checks", "tests"]
@@ -78,6 +103,8 @@ def test_selection_preserves_readiness_and_routes_both_controls(monkeypatch, tmp
     exported = {}
 
     def export(**kwargs):
+        # [FUNCTION DOC] HELPER: Fake
+        # export_repository_task recording its kwargs and returning destination/name.
         exported.update(kwargs)
         return kwargs["destination"] / kwargs["name"]
 
@@ -114,6 +141,13 @@ def test_selection_preserves_readiness_and_routes_both_controls(monkeypatch, tmp
 
 
 def test_modified_only_cpu_task_collects_directories_with_strict_contract(monkeypatch, tmp_path):
+    # [FUNCTION DOC] Runs real export
+    # for a modification-only source: the Harbor task collects /workspace/lib as one artifact with
+    # cache
+    # excludes; tests/contract.json lists submitted roots/files, no optional files and the hash of
+    # the
+    # non-Python asset; the workspace holds the defective source without tests; validate_submission
+    # accepts new Python helpers but rejects a changed immutable asset. Requires harbor.
     from harbor.models.task.task import Task
 
     from repo2rlenv.pipelines.recipes.swe_smith.grade import validate_submission
@@ -152,6 +186,8 @@ def test_modified_only_cpu_task_collects_directories_with_strict_contract(monkey
     }
 
     def test_image(image, options, output, **kwargs):
+        # [FUNCTION DOC] HELPER:
+        # Fake test runner where "feature" fails only for the defective control.
         broken = output.name == "defective"
         return TestResults(
             {"feature": "failed" if broken else "passed", "adjacent": "passed"},

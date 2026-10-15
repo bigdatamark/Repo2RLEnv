@@ -1,3 +1,8 @@
+# [MODULE DOC] Tests for quality.loop.verifier_policy.check_behavioral_verifier and its
+# enforcement in Design validation and apply_repair: Tasksmith behavioral verifiers must not grade
+# by
+# reading implementation source (open/read of module __file__, inspect.getsource...), while public
+# API checks and fixture reads beside a module are allowed. Code is analysed statically only.
 """Catch observed source-blacklist grading without executing target code."""
 
 from __future__ import annotations
@@ -25,6 +30,8 @@ from repo2rlenv.tasksmith.models import Design
     ],
 )
 def test_known_implementation_source_grading_is_rejected(source):
+    # [FUNCTION DOC] Parametrized source-reading
+    # snippets each raise ValueError ("reads implementation source at line").
     with pytest.raises(ValueError, match="reads implementation source at line"):
         check_behavioral_verifier(source)
 
@@ -43,10 +50,16 @@ def test_known_implementation_source_grading_is_rejected(source):
     ],
 )
 def test_behavior_public_api_and_fixture_reads_are_allowed(source):
+    # [FUNCTION DOC] Parametrized benign snippets
+    # (empty, comments, inspect.signature, sibling fixture files, string literals) pass the check.
     check_behavioral_verifier(source)
 
 
 def test_design_rejects_bad_source_through_bounded_artifact_validation():
+    # [FUNCTION DOC] Design with
+    # additional_tests that read source or have a syntax error raises ValueError mentioning the
+    # Tasksmith
+    # behavioral verifier.
     fields = {
         "instruction": "Implement reusable environments and preserve observable behavior. " * 2,
         "requirements": [
@@ -67,6 +80,11 @@ def test_design_rejects_bad_source_through_bounded_artifact_validation():
 
 @pytest.mark.parametrize("recipe", ["tasksmith", "other-recipe"])
 def test_repair_guard_is_transactional_and_scoped_to_tasksmith(tmp_path, recipe):
+    # [FUNCTION DOC] Parametrized recipe: for
+    # tasksmith a repair introducing source reading raises and writes no destination or repair.json;
+    # for
+    # other recipes the repair applies. In both cases the original task bytes and hash are
+    # unchanged.
     old = "def test_reuse():\n    assert trainer.generate() == ['expected']\n"
     new = "with open(trainer.__file__) as f:\n    assert 'known wrong' not in f.read()\n"
     task = write_bundle(

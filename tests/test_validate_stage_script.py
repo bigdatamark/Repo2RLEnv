@@ -1,3 +1,7 @@
+# [MODULE DOC] Tests for pr_runtime_validate._build_stage_script and _slice_test_output:
+# the generated validation script must wrap test commands in a brace group redirecting stderr into
+# stdout between R2E start/end markers with tracing disabled, so runners like jest that report on
+# stderr are parsed. Some tests execute the block with real bash (skipped without bash).
 """Validation must see runners that report on stderr, not just stdout."""
 
 from __future__ import annotations
@@ -31,6 +35,8 @@ _JEST_STDERR = (
 
 
 def test_test_block_redirects_stderr_into_the_markers():
+    # [FUNCTION DOC] The command sits on its own line
+    # inside the braces closed by "} 2>&1", and set +x / set -x bracket the markers.
     script = _build_stage_script(
         _BASE, apply_patch=None, apply_test_patch=None, test_cmds=["npx jest --verbose"]
     )
@@ -47,6 +53,8 @@ def test_test_block_redirects_stderr_into_the_markers():
 
 
 def test_multiple_test_cmds_share_one_redirect():
+    # [FUNCTION DOC] Multiple commands are joined with && in one
+    # group with a single redirect.
     script = _build_stage_script(
         _BASE,
         apply_patch=None,
@@ -59,12 +67,16 @@ def test_multiple_test_cmds_share_one_redirect():
 
 
 def test_empty_test_cmds_still_produce_a_block():
+    # [FUNCTION DOC] No commands yields a placeholder echo
+    # inside the block.
     script = _build_stage_script(_BASE, apply_patch=None, apply_test_patch=None, test_cmds=[])
     lines = script.splitlines()
     assert lines[lines.index("{") + 1] == "echo 'no test_cmds'"
 
 
 def test_redirected_output_survives_the_slice_and_parses():
+    # [FUNCTION DOC] Jest output between markers is
+    # kept by the slice (setup trace dropped) and parsed into passed/failed test ids.
     # What `truncated()` builds once the block redirects: the runner's output
     # sits between the markers on stdout, and only the shell trace is left in
     # the stderr section that follows.
@@ -85,6 +97,8 @@ def test_redirected_output_survives_the_slice_and_parses():
 
 
 def test_unredirected_stderr_would_be_sliced_away():
+    # [FUNCTION DOC] Output after the end marker is excluded,
+    # showing why redirection is needed.
     # The shape before this change: the runner's output landed after the end
     # marker, so the slice was empty and F2P detection saw nothing.
     combined = "R2E_START_TEST_OUTPUT\nR2E_END_TEST_OUTPUT\n\n--- stderr ---\n" + _JEST_STDERR
@@ -106,6 +120,12 @@ _SHELL_CASES = {
 
 
 def _run_test_block(test_cmds: list[str]) -> tuple[str, int]:
+    # [FUNCTION DOC] HELPER: Builds the stage script, extracts lines from the start marker to
+    # the end marker, runs them with bash under set -uxo pipefail, appends stderr after a separator
+    # as the
+    # validator does, and slices. Inputs: test_cmds list. Output: (sliced text, bash return code).
+    # Side
+    # effects: runs a bash subprocess.
     """Execute only the marker block of the generated script, as bash sees it."""
     script = _build_stage_script(
         _BASE, apply_patch=None, apply_test_patch=None, test_cmds=test_cmds
@@ -124,6 +144,8 @@ def _run_test_block(test_cmds: list[str]) -> tuple[str, int]:
 @needs_bash
 @pytest.mark.parametrize("label", sorted(_SHELL_CASES))
 def test_generated_script_is_valid_bash(label):
+    # [FUNCTION DOC] Parametrized shell cases (comments, semicolons,
+    # heredocs, pipelines, quoting, empty): the full script passes bash -n.
     script = _build_stage_script(
         _BASE, apply_patch=None, apply_test_patch=None, test_cmds=_SHELL_CASES[label]
     )
@@ -133,18 +155,24 @@ def test_generated_script_is_valid_bash(label):
 
 @needs_bash
 def test_heredoc_output_lands_inside_the_markers():
+    # [FUNCTION DOC] Heredoc command output appears in the
+    # slice.
     sliced, _ = _run_test_block(["python3 - <<'PY'\nprint('from heredoc')\nPY"])
     assert sliced.strip() == "from heredoc"
 
 
 @needs_bash
 def test_stderr_of_the_test_command_is_captured():
+    # [FUNCTION DOC] Text written to stderr by the command is in
+    # the slice.
     sliced, _ = _run_test_block(["python3 -c \"import sys; print('to stderr', file=sys.stderr)\""])
     assert "to stderr" in sliced
 
 
 @needs_bash
 def test_shell_trace_stays_out_of_the_sliced_block():
+    # [FUNCTION DOC] Only the command output, not the xtrace
+    # line, is in the slice.
     sliced, _ = _run_test_block(["echo hello"])
     assert sliced.strip() == "hello"
     assert "+ echo" not in sliced
@@ -152,6 +180,8 @@ def test_shell_trace_stays_out_of_the_sliced_block():
 
 @needs_bash
 def test_nonzero_test_exit_still_closes_the_block():
+    # [FUNCTION DOC] A failing command still reaches the end
+    # marker and the block exits 0.
     # `set -uxo pipefail` has no -e, so a failing suite must not abort the
     # script before the end marker is printed.
     sliced, returncode = _run_test_block(["python3 -c \"import sys; print('ran'); sys.exit(1)\""])
@@ -161,5 +191,7 @@ def test_nonzero_test_exit_still_closes_the_block():
 
 @needs_bash
 def test_trailing_comment_and_semicolon_still_run():
+    # [FUNCTION DOC] Commands ending with a comment or a
+    # semicolon run and produce output.
     assert _run_test_block(["echo ok # trailing comment"])[0].strip() == "ok"
     assert _run_test_block(["echo ok;"])[0].strip() == "ok"

@@ -1,3 +1,6 @@
+# [MODULE DOC] Tests for the terminalworld recipe pieces: EnvironmentBuild validation,
+# recording loading with PII screening, the HTML MetadataParser, resumable recording acquisition
+# receipts, and filesystem snapshot diffing.
 from __future__ import annotations
 
 import hashlib
@@ -10,6 +13,9 @@ from repo2rlenv.pipelines.recipes.terminalworld.source import MetadataParser, lo
 
 
 def test_recording_environment_can_start_without_extra_fixture_files():
+    # [FUNCTION DOC] EnvironmentBuild
+    # accepts an empty file list, but a setup that switches USER raises ValueError ("cannot
+    # replace").
     from repo2rlenv.pipelines.recipes.terminalworld.materialize import EnvironmentBuild
 
     environment = EnvironmentBuild(
@@ -24,6 +30,10 @@ def test_recording_environment_can_start_without_extra_fixture_files():
 
 
 def test_recording_screen_excludes_flagged_text_from_author_input(tmp_path):
+    # [FUNCTION DOC] A recording containing a
+    # public IPv4 address is flagged pii_public_ipv4, its transcript is blanked, and a 64-char hash
+    # is
+    # still recorded.
     first = tmp_path / "123"
     first.mkdir()
     (first / "info.json").write_text(json.dumps({"title": "An input recording", "id": "123"}))
@@ -35,6 +45,8 @@ def test_recording_screen_excludes_flagged_text_from_author_input(tmp_path):
 
 
 def test_metadata_reads_description_and_ignores_unrelated_secrets():
+    # [FUNCTION DOC] The parser keeps the
+    # og:title, ignores the csrf meta, and collects nested description text only.
     parser = MetadataParser()
     parser.feed(
         '<meta name="csrf-token" content="ignore-me"><meta property="og:title" content="Task title"><div class="description">Workflow <div>details</div> follow.</div><div>unrelated</div>'
@@ -44,9 +56,15 @@ def test_metadata_reads_description_and_ignores_unrelated_secrets():
 
 
 def test_acquisition_marks_partial_inputs_and_binds_completion_to_cache(tmp_path, monkeypatch):
+    # [FUNCTION DOC] fetch_recordings
+    # writes acquisition.json as "running" during downloads, "interrupted" when a download raises,
+    # and
+    # "completed" with the SHA-256 of retrieval.json on success.
     from repo2rlenv.pipelines.recipes.terminalworld import source
 
     def interrupted(client, url, limit):
+        # [FUNCTION DOC] HELPER:
+        # Fake download asserting state "running" then raising RuntimeError.
         assert json.loads((tmp_path / "acquisition.json").read_text())["state"] == "running"
         raise RuntimeError("Disconnected before the input shard finished")
 
@@ -56,6 +74,9 @@ def test_acquisition_marks_partial_inputs_and_binds_completion_to_cache(tmp_path
     assert json.loads((tmp_path / "acquisition.json").read_text())["state"] == "interrupted"
 
     def download(client, url, limit):
+        # [FUNCTION DOC] HELPER:
+        # Fake download asserting state "running" and serving robots, a transcript or a metadata
+        # page.
         assert json.loads((tmp_path / "acquisition.json").read_text())["state"] == "running"
         if url.endswith("robots.txt"):
             return "User-agent: *\nAllow: /\n"
@@ -77,6 +98,8 @@ def test_acquisition_marks_partial_inputs_and_binds_completion_to_cache(tmp_path
 
 
 def test_snapshot_detects_new_modified_and_deleted_files(tmp_path):
+    # [FUNCTION DOC] changes(before, after) between two
+    # filesystem_state snapshots reports created, modified and deleted paths.
     edited = tmp_path / "edited.txt"
     edited.write_text("before")
     removed = tmp_path / "removed.txt"

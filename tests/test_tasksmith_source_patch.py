@@ -1,3 +1,7 @@
+# [MODULE DOC] Tests for tasksmith.worker.reverse_source using real git fixtures: reversing
+# a frozen PR source diff to produce the defective workspace, including the CRLF fallback (exact
+# byte preservation, blob-identity checks, fallback receipt) and refusal to mask real mismatches.
+# No target code is imported or executed.
 """Real Git fixture checks; no target imports, tests or images are executed."""
 
 import hashlib
@@ -10,10 +14,20 @@ from repo2rlenv.tasksmith.worker import reverse_source
 
 
 def blob(content):
+    # [FUNCTION DOC] HELPER: Computes the git blob SHA-1 of bytes content (header "blob <len>\0").
+    # Output: hex string.
     return hashlib.sha1(b"blob " + str(len(content)).encode() + b"\0" + content).hexdigest()
 
 
 def setup(tmp_path, files):
+    # [FUNCTION DOC] HELPER: Creates a git repo under tmp_path/git, writes each file's "before"
+    # bytes
+    # (skipping None for added files), stages them, writes "after" bytes, intent-to-add stages new
+    # files
+    # and captures a binary full-index git diff (CRLF normalized to LF, as GitHub serves). Inputs:
+    # tmp_path; files mapping name to (before or None, after). Output: (checkout, empty output dir,
+    # source dict with source_diff, source_files and changed_files statuses). Side effects: git
+    # subprocesses, filesystem writes.
     checkout = tmp_path / "git"
     checkout.mkdir()
     subprocess.run(["git", "init", "-q", str(checkout)], check=True)
@@ -55,6 +69,11 @@ def setup(tmp_path, files):
 
 @pytest.mark.parametrize("last_line", [b"tail\r\n", b"tail"])
 def test_crlf_reverse_preserves_exact_pinned_bytes_and_untouched_files(tmp_path, last_line):
+    # [FUNCTION DOC] Parametrized over
+    # terminated/unterminated last line: reversal of CRLF, LF and binary-ish files restores exact
+    # before-bytes in the defective copy, leaves the checkout untouched, writes source.diff
+    # verbatim, and
+    # records only the CRLF file with pre/post blob ids in source-crlf-fallback.json.
     files = {
         "lib/windows.py": (b"before\r\n" + last_line, b"after\r\n" + last_line),
         "lib/unix.py": (b"old\n", b"new\n"),
@@ -78,6 +97,8 @@ def test_crlf_reverse_preserves_exact_pinned_bytes_and_untouched_files(tmp_path,
 
 
 def test_added_crlf_file_is_removed_without_changing_other_sources(tmp_path):
+    # [FUNCTION DOC] An added CRLF file is
+    # reported as removed and absent from the defective copy while the checkout keeps it.
     files = {"lib/added.py": (None, b"new\r\nmodule\r\n"), "lib/base.py": (b"same\n", b"same\n")}
     checkout, output, source = setup(tmp_path, files)
     defective, removed = reverse_source(source, checkout, output)
@@ -87,6 +108,8 @@ def test_added_crlf_file_is_removed_without_changing_other_sources(tmp_path):
 
 
 def test_lf_patch_uses_normal_path_without_recovery_artifacts(tmp_path):
+    # [FUNCTION DOC] A pure LF patch reverses
+    # normally and writes no fallback receipt.
     checkout, output, source = setup(tmp_path, {"source.py": (b"old\n", b"new\n")})
     defective, _ = reverse_source(source, checkout, output)
     assert (defective / "source.py").read_bytes() == b"old\n"
@@ -97,6 +120,11 @@ def test_lf_patch_uses_normal_path_without_recovery_artifacts(tmp_path):
     "change", ["content", "missing_blob", "wrong_preimage", "line_ending_change"]
 )
 def test_fallback_never_masks_a_true_source_or_identity_mismatch(tmp_path, change):
+    # [FUNCTION DOC] Parametrized over
+    # modified content, stripped index lines, a wrong preimage blob, or a line-ending change:
+    # reversal
+    # raises ValueError about a frozen blob mismatch, the defective copy equals the checkout, and no
+    # receipt is written.
     before = b"old\n" if change == "line_ending_change" else b"old\r\n"
     checkout, output, source = setup(tmp_path, {"source.py": (before, b"new\r\n")})
     if change == "content":
@@ -116,6 +144,8 @@ def test_fallback_never_masks_a_true_source_or_identity_mismatch(tmp_path, chang
 
 
 def test_changed_unterminated_line_preserves_absent_final_newline(tmp_path):
+    # [FUNCTION DOC] A change on a final line
+    # without newline reverses to the exact original bytes.
     before, after = b"prefix\r\nbefore", b"prefix\r\nafter"
     checkout, output, source = setup(tmp_path, {"source.py": (before, after)})
     defective, _ = reverse_source(source, checkout, output)
@@ -124,6 +154,10 @@ def test_changed_unterminated_line_preserves_absent_final_newline(tmp_path):
 
 
 def test_failed_fallback_does_not_publish_other_successful_patch_hunks(tmp_path):
+    # [FUNCTION DOC] If the CRLF fallback
+    # cannot apply exactly (invented added line), ValueError is raised and neither the defective
+    # copy
+    # nor the checkout receives partial hunks.
     files = {"a.py": (b"old\n", b"new\n"), "z.py": (b"old\r\n", b"new\r\n")}
     checkout, output, source = setup(tmp_path, files)
     source["source_diff"] = "+invented\n".join(source["source_diff"].rsplit("+new\n", 1))
@@ -137,6 +171,10 @@ def test_failed_fallback_does_not_publish_other_successful_patch_hunks(tmp_path)
 
 @pytest.mark.parametrize("suffix", [b"mixed\n", b"binary\0\r\n", b"invalid\xff\r\n"])
 def test_mixed_ending_or_binary_content_is_not_normalized(tmp_path, suffix):
+    # [FUNCTION DOC] Parametrized: extra mixed-ending,
+    # NUL or invalid-UTF-8 bytes in the file make git apply fail ("Command git failed"); content is
+    # not
+    # normalized and no receipt is written.
     # A textual unified diff can describe a file whose untouched bytes contain
     # binary/invalid content; the fallback must still refuse to normalize it.
     checkout, output, source = setup(tmp_path, {"source.py": (b"old\r\n", b"new\r\n")})

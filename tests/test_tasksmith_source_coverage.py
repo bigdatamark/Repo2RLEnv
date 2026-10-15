@@ -1,3 +1,5 @@
+# [MODULE DOC] Tests for tasksmith.runner._validate_profile_source_coverage: a Profile's
+# source_paths must cover every PR source change and public_exclude may not hide one.
 """Actionable profile feedback preserves the complete PR source contract."""
 
 import pytest
@@ -8,6 +10,12 @@ from repo2rlenv.tasksmith.runner import _validate_profile_source_coverage
 
 
 def test_coverage_feedback_lists_all_missing_roots_without_expanding_tests():
+    # [FUNCTION DOC] Asserts the
+    # error lists every uncovered changed file and clarifies they need not be tests, that validation
+    # does
+    # not mutate the profile, passes once source_paths cover them (selectors unchanged), and fails
+    # again
+    # ("Profile hides PR source change") when public_exclude hides one.
     profile = Profile(
         reasoning="Inspected repository dependency metadata and the complete PR diff.",
         resource="cpu",

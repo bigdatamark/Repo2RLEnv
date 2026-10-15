@@ -1,3 +1,7 @@
+# [MODULE DOC] Tests for the terminal recipe draft model (TerminalDraft), its emitter
+# (emit_draft) and the seed loader (load_seeds): emitted bundles keep tests and reference solution
+# out of the Docker build context and run with no network; inconsistent drafts are rejected before
+# any spend.
 from __future__ import annotations
 
 import json
@@ -14,6 +18,10 @@ from repo2rlenv.pipelines.recipes.terminal.runner import load_seeds
 
 @pytest.fixture
 def draft_data():
+    # [FUNCTION DOC] Fixture: returns a valid TerminalDraft input dict (instruction, a RUN setup
+    # line, one executable script file, five trivial tests with weights 0.2 each, a solution script
+    # and a
+    # self review).
     return {
         "instruction": "Repair the report generator and preserve its documented output behavior.",
         "environment_setup": "RUN chmod +x /workspace/script.sh",
@@ -33,6 +41,12 @@ def draft_data():
 def test_terminal_bundle_keeps_reference_and_tests_out_of_build_context(
     draft_data, tmp_path, recipe_id, version
 ):
+    # [FUNCTION DOC] Parametrized over
+    # recipes seta_seed2synth (v1) and dataarc (v2): the emitted bundle passes integrity, records
+    # the
+    # recipe version, has only Dockerfile and script.sh in environment/, includes tests/grade.py,
+    # and
+    # (if harbor is installed) configures no-network mode.
     draft = TerminalDraft.model_validate(draft_data)
     task = emit_draft(
         draft,
@@ -61,6 +75,10 @@ def test_terminal_bundle_keeps_reference_and_tests_out_of_build_context(
     "change", ["traversal", "duplicate", "weight", "empty_collection", "base_override"]
 )
 def test_inconsistent_drafts_are_rejected_before_cloud_spend(draft_data, change):
+    # [FUNCTION DOC] Parametrized: path traversal,
+    # duplicate files, weights not summing to 1, no collectable tests, or a FROM override in setup
+    # each
+    # raise ValidationError.
     if change == "traversal":
         draft_data["environment_files"][0]["path"] = "../solution/secret"
     elif change == "duplicate":
@@ -76,6 +94,8 @@ def test_inconsistent_drafts_are_rejected_before_cloud_spend(draft_data, change)
 
 
 def test_seed_loader_preserves_input_and_deduplicates_exact_records(tmp_path):
+    # [FUNCTION DOC] A JSONL file with the
+    # same seed twice loads as a single unchanged record.
     seed = {
         "source": "unix_linux_se",
         "title": "Shell quoting",

@@ -1,3 +1,8 @@
+# [MODULE DOC] Tests for swe_smith grade.validate_submission's handling of editor backup
+# files (*.bak, *~): private copies of such backups are discarded so they cannot suppress tests,
+# while unknown non-Python additions, symlinks, special or oversized files, declared immutable
+# assets
+# and explicit submissions keep their strict checks.
 """Inert editor files must not suppress behavioral tests or bypass source guards."""
 
 import hashlib
@@ -12,6 +17,8 @@ from repo2rlenv.pipelines.recipes.swe_smith.grade import validate_submission
 
 @pytest.fixture
 def submission(tmp_path, monkeypatch):
+    # [FUNCTION DOC] Fixture: creates a private workspace with src/model.py, patches os.chown to
+    # a no-op, and returns (workspace, contract with submitted_files and submitted_roots).
     workspace = tmp_path / "private"
     (workspace / "src").mkdir(parents=True)
     (workspace / "src/model.py").write_text("value = 1\n")
@@ -22,6 +29,9 @@ def submission(tmp_path, monkeypatch):
 
 
 def test_removes_only_private_copy_backups_and_keeps_python_sources(submission, tmp_path):
+    # [FUNCTION DOC] .bak and ~ backups are
+    # removed from the workspace while Python sources (including a new helper) are untouched, the
+    # archived copy keeps the backups, and a second validation still passes.
     workspace, contract = submission
     for name in ("model.py.bak", "model.py~"):
         (workspace / "src" / name).write_text("value = 0\n")
@@ -41,6 +51,9 @@ def test_removes_only_private_copy_backups_and_keeps_python_sources(submission, 
 
 @pytest.mark.parametrize("name", ["model.bak", "model.py.orig", "model.py.bak.json", "config.json"])
 def test_unknown_non_python_additions_still_reject_without_cleaning(submission, name):
+    # [FUNCTION DOC] Parametrized
+    # unrecognized names raise ValueError ("Only Python source files") and the known backup is not
+    # deleted.
     workspace, contract = submission
     backup = workspace / "src/model.py.bak"
     backup.write_text("previous\n")
@@ -65,6 +78,9 @@ def test_unknown_non_python_additions_still_reject_without_cleaning(submission, 
     ],
 )
 def test_backup_paths_keep_regular_file_and_symlink_guards(submission, tmp_path, kind):
+    # [FUNCTION DOC] Parametrized symlink, dangling
+    # symlink, oversized (>8 MiB) or FIFO backups raise ValueError and are not deleted; the symlink
+    # target is untouched. FIFO case skipped on Windows.
     workspace, contract = submission
     backup = workspace / "src/model.py.bak"
     outside = tmp_path / "outside.py"
@@ -83,6 +99,8 @@ def test_backup_paths_keep_regular_file_and_symlink_guards(submission, tmp_path,
 
 
 def test_backup_does_not_substitute_for_a_required_source_file(submission):
+    # [FUNCTION DOC] Renaming the required
+    # source to a backup raises ValueError ("bounded regular file") and keeps the backup.
     workspace, contract = submission
     source = workspace / "src/model.py"
     backup = source.with_suffix(".py.bak")
@@ -93,6 +111,8 @@ def test_backup_does_not_substitute_for_a_required_source_file(submission):
 
 
 def test_declared_immutable_backup_is_preserved_and_checked(submission):
+    # [FUNCTION DOC] A backup declared as an
+    # immutable asset is kept and validated by hash; changing it raises ValueError.
     workspace, contract = submission
     backup = workspace / "src/model.py.bak"
     backup.write_text("shipped asset\n")
@@ -108,6 +128,8 @@ def test_declared_immutable_backup_is_preserved_and_checked(submission):
 
 
 def test_explicit_submission_is_not_reclassified_as_a_discardable_backup(submission):
+    # [FUNCTION DOC] A backup listed
+    # in submitted_files raises ValueError ("Only Python source files") and is not deleted.
     workspace, contract = submission
     backup = workspace / "src/model.py.bak"
     backup.write_text("declared\n")
@@ -118,6 +140,8 @@ def test_explicit_submission_is_not_reclassified_as_a_discardable_backup(submiss
 
 
 def test_linked_root_parent_cannot_delete_external_backup(submission, tmp_path):
+    # [FUNCTION DOC] A submitted root reached via a
+    # symlinked parent raises ValueError ("symlink") and the external backup survives.
     workspace, contract = submission
     outside = tmp_path / "external"
     (outside / "src").mkdir(parents=True)

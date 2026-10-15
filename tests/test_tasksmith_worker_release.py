@@ -1,3 +1,9 @@
+# [MODULE DOC] Tests for Tasksmith author-worker release at the native (GPU) quality
+# boundary: before native Modal trials are dispatched the runner must terminate its author worker,
+# record the termination, settle the budget reservation with a Modal cost proof, and clear handles;
+# failures must keep budget holds and never re-terminate. Providers, QualityLoop and native trials
+# are
+# faked; budgets use real BudgetLedger sqlite files.
 """Author-worker lifecycle at the native quality boundary; no provider calls."""
 
 from __future__ import annotations
@@ -20,6 +26,8 @@ from repo2rlenv.tasksmith.models import Options
 
 @pytest.fixture
 def runner(tmp_path):
+    # [FUNCTION DOC] Fixture: creates a $100 campaign ledger and a GPU Tasksmith with candidate cap
+    # $14, worker reservation $3, quality cap $9 and solver reservation $1.50. Output: Tasksmith.
     campaign = tmp_path / "campaign"
     BudgetLedger(campaign / "budget.sqlite3", limit_usd="100")
     options = Options(gpus=1, max_spend_usd="14", worker_reservation_usd="3")
@@ -29,6 +37,15 @@ def runner(tmp_path):
 
 
 def install_worker(runner, monkeypatch, *, provider="modal", terminate_error=None):
+    # [FUNCTION DOC] HELPER: Simulates a running author worker: reserves $3 under
+    # "worker:<provider>:<prefix>-w0", saves a "running" receipt (ledger path, worker id, start
+    # time,
+    # WorkerSpec 4 CPU/8192 MB), attaches a fake worker/receipt/python to the runner, and patches
+    # lifecycle.connect_worker and lifecycle.now (fixed time, 10 minutes after start). Inputs:
+    # runner,
+    # monkeypatch, provider (default "modal"), terminate_error (exception raised by terminate,
+    # default
+    # None). Output: (receipt path, operation id, list of terminate calls).
     name = runner.prefix + "-w0"
     operation = f"worker:{provider}:{name}"
     runner.budget.reserve(operation, "3", "Author worker")
@@ -47,9 +64,12 @@ def install_worker(runner, monkeypatch, *, provider="modal", terminate_error=Non
     calls = []
 
     class Worker:
+        # [CLASS DOC] HELPER: Fake provider worker with id "fake-worker".
         id = "fake-worker"
 
         def terminate(self):
+            # [FUNCTION DOC] HELPER: Records "terminate" and raises terminate_error
+            # if one was configured.
             calls.append("terminate")
             if terminate_error:
                 raise terminate_error
@@ -58,6 +78,8 @@ def install_worker(runner, monkeypatch, *, provider="modal", terminate_error=Non
     runner.worker, runner.receipt, runner.python = worker, receipt, "remote-python"
 
     def connect(selected_provider, worker_id):
+        # [FUNCTION DOC] HELPER: Fake connect_worker asserting the expected provider and
+        # worker id and returning the fake worker.
         assert (selected_provider, worker_id) == (provider, worker.id)
         return worker
 
@@ -68,6 +90,8 @@ def install_worker(runner, monkeypatch, *, provider="modal", terminate_error=Non
 
 @pytest.fixture
 def task(tmp_path):
+    # [FUNCTION DOC] Fixture: writes a minimal tasksmith TaskBundle under tmp_path/constructed and
+    # returns its path.
     return write_bundle(
         TaskBundle(
             name="fixture",
@@ -89,20 +113,31 @@ def task(tmp_path):
 
 
 def fake_quality(monkeypatch, *, on_run=None):
+    # [FUNCTION DOC] HELPER: Patches native.NativeModalTrials and runner_module.QualityLoop
+    # with fakes that append "native_ready" and "quality_run" to an events list; on_run (optional
+    # callback
+    # receiving the loop) is invoked inside run. Output: events list.
     from repo2rlenv.quality.loop import native
 
     events = []
 
     class Native:
+        # [CLASS DOC] HELPER: Fake native trial backend recording construction.
         def __init__(self, directory, budget, options):
+            # [FUNCTION DOC] HELPER: Records "native_ready" and stores the budget.
             events.append("native_ready")
             self.budget = budget
 
     class Loop:
+        # [CLASS DOC] HELPER: Fake QualityLoop.
         def __init__(self, *args, **kwargs):
+            # [FUNCTION DOC] HELPER: Stores the budget keyword argument (KeyError if
+            # absent).
             self.budget = kwargs["budget"]
 
         def run(self, *args, **kwargs):
+            # [FUNCTION DOC] HELPER: Records "quality_run", calls on_run if set, and returns a
+            # reviewed namespace.
             events.append("quality_run")
             if on_run:
                 on_run(self)
@@ -116,6 +151,8 @@ def fake_quality(monkeypatch, *, on_run=None):
 
 
 def review(runner, task):
+    # [FUNCTION DOC] HELPER: Invokes runner.review_candidate for runner.directory/candidate with a
+    # fixed source id and a constructed record pointing at the task. Output: review result.
     return runner.review_candidate(
         runner.directory / "candidate",
         {"id": "abcdefgh1234"},
@@ -124,10 +161,17 @@ def review(runner, task):
 
 
 def test_gpu_releases_confirmed_worker_before_native_dispatch(runner, task, monkeypatch):
+    # [FUNCTION DOC] Asserts that, by the time the
+    # quality loop runs, handles are cleared, terminate ran once, the receipt is "terminated" and
+    # the
+    # operation settled; a cost proof file exists and accounted spend is 1.253248 with nothing
+    # reserved.
     receipt, operation, calls = install_worker(runner, monkeypatch)
     events = fake_quality(monkeypatch, on_run=lambda loop: assert_released())
 
     def assert_released():
+        # [FUNCTION DOC] HELPER:
+        # Checks the released state described above; called from inside the fake quality run.
         assert runner.worker is runner.receipt is runner.python is None
         assert calls == ["terminate"]
         assert json.loads(receipt.read_text())["state"] == "terminated"
@@ -141,6 +185,10 @@ def test_gpu_releases_confirmed_worker_before_native_dispatch(runner, task, monk
 
 
 def test_release_restores_candidate_headroom_without_changing_caps(runner, monkeypatch):
+    # [FUNCTION DOC] With prior author and
+    # quality spend, a native reservation first exceeds the candidate cap (BudgetExceeded) but fits
+    # after
+    # release_author_worker settles the $3 hold to actual cost; caps stay 14 and 9.
     install_worker(runner, monkeypatch)
     author = runner.prefix + ":author"
     runner.budget.reserve(author, "3.50", "Completed author/build stages")
@@ -160,6 +208,10 @@ def test_release_restores_candidate_headroom_without_changing_caps(runner, monke
 
 
 def test_failed_termination_preserves_hold_and_prevents_native_dispatch(runner, task, monkeypatch):
+    # [FUNCTION DOC] If terminate
+    # raises, review propagates the error, quality never runs, handles remain, the receipt is
+    # "termination_uncertain", the operation stays reserved as uncertain and no cost proof is
+    # written.
     receipt, operation, calls = install_worker(
         runner, monkeypatch, terminate_error=RuntimeError("Provider termination not confirmed")
     )
@@ -177,10 +229,16 @@ def test_failed_termination_preserves_hold_and_prevents_native_dispatch(runner, 
 def test_settlement_failure_retains_proof_and_hold_but_clears_dead_handles(
     runner, task, monkeypatch
 ):
+    # [FUNCTION DOC] If budget.settle
+    # raises, review fails, handles except the receipt are cleared, the receipt is "terminated", the
+    # cost
+    # proof is kept, and the operation is uncertain with its $3 reservation held.
     receipt, operation, calls = install_worker(runner, monkeypatch)
     events = fake_quality(monkeypatch)
 
     def failed_settlement(*args, **kwargs):
+        # [FUNCTION DOC] HELPER:
+        # Stand-in settle that raises RuntimeError("Ledger unavailable").
         raise RuntimeError("Ledger unavailable")
 
     monkeypatch.setattr(runner.budget, "settle", failed_settlement)
@@ -197,6 +255,9 @@ def test_settlement_failure_retains_proof_and_hold_but_clears_dead_handles(
 
 @pytest.mark.parametrize("already_stopped", [False, True])
 def test_resumed_gpu_quality_replays_author_receipt(runner, task, monkeypatch, already_stopped):
+    # [FUNCTION DOC] Parametrized already_stopped: a resumed
+    # Tasksmith on the same directory replays the saved receipt, terminating at most once and ending
+    # fully settled before native dispatch.
     receipt, _, calls = install_worker(runner, monkeypatch)
     if already_stopped:
         lifecycle.stop_worker(receipt, runner.budget)
@@ -210,10 +271,15 @@ def test_resumed_gpu_quality_replays_author_receipt(runner, task, monkeypatch, a
 
 
 def test_settlement_retry_preserves_receipt_and_never_reterminates(runner, task, monkeypatch):
+    # [FUNCTION DOC] After a first review
+    # fails at settlement, a retry settles from the existing cost proof (bytes unchanged) without
+    # terminating again, then runs quality and clears handles.
     receipt, _, calls = install_worker(runner, monkeypatch)
     events = fake_quality(monkeypatch)
 
     def failed_settlement(*args, **kwargs):
+        # [FUNCTION DOC] HELPER:
+        # Stand-in settle that raises RuntimeError("Ledger unavailable").
         raise RuntimeError("Ledger unavailable")
 
     with monkeypatch.context() as fault:
@@ -230,10 +296,15 @@ def test_settlement_retry_preserves_receipt_and_never_reterminates(runner, task,
 
 
 def test_cleanup_ledger_failure_clears_confirmed_dead_handles(runner, task, monkeypatch):
+    # [FUNCTION DOC] If budget.mark_uncertain
+    # raises during cleanup, review fails but worker/python handles are cleared, the receipt is
+    # "terminated" and the $3 hold remains.
     receipt, _, calls = install_worker(runner, monkeypatch)
     events = fake_quality(monkeypatch)
 
     def failed_update(*args, **kwargs):
+        # [FUNCTION DOC] HELPER: Stand-in
+        # that raises RuntimeError("Ledger unavailable").
         raise RuntimeError("Ledger unavailable")
 
     monkeypatch.setattr(runner.budget, "mark_uncertain", failed_update)
@@ -246,6 +317,8 @@ def test_cleanup_ledger_failure_clears_confirmed_dead_handles(runner, task, monk
 
 
 def test_cpu_keeps_reusable_author_worker(runner, task, monkeypatch):
+    # [FUNCTION DOC] With gpus=0 the worker is kept and ready_worker is
+    # called; no termination, no native backend, and the $3 hold stays reserved.
     runner.options.gpus = 0
     receipt, _, calls = install_worker(runner, monkeypatch)
     ready = []
@@ -258,7 +331,11 @@ def test_cpu_keeps_reusable_author_worker(runner, task, monkeypatch):
 
 
 def test_prepared_gpu_task_does_not_create_a_worker(runner, task, monkeypatch):
+    # [FUNCTION DOC] A GPU review with no worker never calls
+    # ready_worker and records no ledger operations.
     def unexpected():
+        # [FUNCTION DOC] HELPER: Raises
+        # AssertionError if a worker would be created.
         raise AssertionError("Prepared GPU quality does not need an author worker")
 
     monkeypatch.setattr(runner, "ready_worker", unexpected)
@@ -269,6 +346,10 @@ def test_prepared_gpu_task_does_not_create_a_worker(runner, task, monkeypatch):
 
 
 def test_invalid_local_bundle_does_not_destroy_author_checkout(runner, task, monkeypatch):
+    # [FUNCTION DOC] A task edited after
+    # construction raises ValueError ("recorded bundle hash") before terminating the worker or
+    # running
+    # quality.
     receipt, _, calls = install_worker(runner, monkeypatch)
     events = fake_quality(monkeypatch)
     (task / "instruction.md").write_text("Changed after construction.")
@@ -278,6 +359,8 @@ def test_invalid_local_bundle_does_not_destroy_author_checkout(runner, task, mon
 
 
 def test_nonmodal_termination_does_not_guess_modal_pricing(runner, monkeypatch):
+    # [FUNCTION DOC] For a daytona worker,
+    # release terminates it but writes no cost proof and keeps the $3 reservation unsettled.
     receipt, _, calls = install_worker(runner, monkeypatch, provider="daytona")
     runner.release_author_worker()
     assert calls == ["terminate"] and json.loads(receipt.read_text())["state"] == "terminated"
@@ -286,6 +369,11 @@ def test_nonmodal_termination_does_not_guess_modal_pricing(runner, monkeypatch):
 
 
 def test_batch_final_reconciliation_does_not_settle_released_worker_twice(tmp_path, monkeypatch):
+    # [FUNCTION DOC] Runs
+    # batch._run_candidate with a Tasksmith subclass that installs and releases a worker; final
+    # reconciliation must run exactly once and the reported budget is settled at 1.253248 with
+    # nothing
+    # reserved. Patches batch identity, wheel check and outcome helpers.
     from repo2rlenv.tasksmith import batch
 
     RealTasksmith = runner_module.Tasksmith
@@ -293,11 +381,17 @@ def test_batch_final_reconciliation_does_not_settle_released_worker_twice(tmp_pa
     reconcile = matrix_runner.reconcile_worker
 
     def counted_reconcile(receipt, budget):
+        # [FUNCTION DOC] HELPER:
+        # Wraps matrix_runner.reconcile_worker, recording each receipt before delegating.
         reconciliations.append(receipt)
         return reconcile(receipt, budget)
 
     class Child(RealTasksmith):
+        # [CLASS DOC] HELPER:
+        # Tasksmith subclass whose run only installs and then releases a fake author worker.
         def run(self, *args, **kwargs):
+            # [FUNCTION DOC] HELPER:
+            # Installs a fake worker on self and calls release_author_worker; returns None.
             install_worker(self, monkeypatch)
             self.release_author_worker()
 
