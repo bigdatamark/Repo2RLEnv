@@ -1,3 +1,9 @@
+# [MODULE DOC] Trusted standalone verifier copied into each separate verifier image (also used by
+# the shared repository exporter). Validates the collected submission, runs the configured pytest
+# selection through test_driver.py as unprivileged uid/gid 1001 with a scrubbed environment and
+# timeout, parses the JUnit report via the bundled test_results module, and writes
+# /logs/verifier/reward.txt (1 only if every expected test passed and exit code is 0) and
+# result.json.
 """Standalone trusted entry point; copied into each separate verifier image.
 
 No Repo2RLEnv installation is needed to grade an exported task. Submitted Python
@@ -19,6 +25,11 @@ from pathlib import Path
 
 
 def child_environment(temporary: str) -> dict[str, str]:
+    # [FUNCTION DOC] Build the env for the untrusted test process: copies only selected GPU/ NCCL/HF
+    # cache and offline variables if present, sets PATH (interpreter dir + system bins),
+    # HOME=temporary, and disables bytecode writing and pytest plugin autoload. Input: temporary
+    # dir.
+    # Output: dict.
     """Preserve prepared runtime assets without inheriting controller credentials."""
     return {
         **{
@@ -46,6 +57,14 @@ def child_environment(temporary: str) -> dict[str, str]:
 
 
 def validate_submission(workspace: Path, contract: dict) -> None:
+    # [FUNCTION DOC] Validate and lock down submitted files before tests import them.
+    # Inputs: workspace (Path), contract (submitted_files, optional optional_files, submitted_roots,
+    # immutable_assets). Required files must exist; optional ones are included only if present; all
+    # files under submitted roots must be .py, immutable assets, or (if not themselves submitted)
+    # .py.bak/.py~ backups to delete. Every path and its parents must not be symlinks; each must be
+    # a regular file <=8 MiB; immutable assets must match their sha256. Non-backup files are chowned
+    # to root (non-Windows) and set to mode 644; backups are then deleted. Raises ValueError on any
+    # violation (OSError may propagate). Side effects: chown/chmod/unlink in workspace.
     """Validate private staging and remove inert backups before importing Python."""
     submitted = set(contract["submitted_files"])
     backups: set[str] = set()
@@ -111,6 +130,16 @@ def validate_submission(workspace: Path, contract: dict) -> None:
 
 
 def main() -> None:
+    # [FUNCTION DOC] Verifier entry. Loads /tests/test_results.py as a module, reads contract.json,
+    # prepares /logs/verifier with reward 0. Validation failures write result.json with the reason.
+    # Runs the test driver with test_paths, pytest_args, quiet/short tracebacks, no cacheprovider
+    # and a JUnit report in a 0700 temp dir owned by uid 1001, under uid/gid 1001 in a new session;
+    # after waiting (timeout_sec) kills the whole process group. Rejects symlinked/missing/over-16
+    # MiB reports, copies the XML to logs, parses it; passes iff exit code 0, expected set non-empty
+    # and the parsed passed set equals expected_passes exactly. Writes result.json and reward 1/0.
+    # KNOWN ISSUE: if the test run exceeds timeout_sec, process.wait raises TimeoutExpired which is
+    # not caught; the process group is killed but main then crashes without writing result.json
+    # (reward stays 0).
     directory = Path("/tests")
     parser_spec = importlib.util.spec_from_file_location(
         "test_results", directory / "test_results.py"

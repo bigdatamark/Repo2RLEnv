@@ -1,3 +1,9 @@
+# [MODULE DOC] Shared local controller for owned recipes that generate candidates on a remote
+# worker. It claims a run receipt under the campaign directory (hash-pinned to the configuration and
+# runtime wheel), installs the runtime on an already-running worker, launches the recipe's worker
+# module as a remote job, downloads and unpacks the evidence, then calls the subclass's
+# author_export for each candidate until the target count, recording exported bundle hashes for
+# resumability.
 """Shared controller for remote repository generators and owned task authors."""
 
 from __future__ import annotations
@@ -27,6 +33,11 @@ from repo2rlenv.spec.input import GenerationInput, RepositorySource
 
 
 class RemoteGenerationPipeline:
+    # [CLASS DOC] Base class for remote-generation recipes (implements the Pipeline protocol). Class
+    # attributes: recipe_id and worker_module (set by subclasses), requires_bootstrap False
+    # (bootstrap happens in the worker), supported_languages {PYTHON}, experimental True,
+    # native_supported False. Subclasses implement author_export and may override
+    # worker_configuration and source_identity.
     recipe_id: str
     worker_module: str
     requires_bootstrap = False  # The existing bootstrap runs inside the worker.
@@ -35,6 +46,10 @@ class RemoteGenerationPipeline:
     native_supported = False
 
     def __init__(self, input: GenerationInput, options, bootstrap=None):
+        # [FUNCTION DOC] Validate the input and store it.
+        # Inputs: input (GenerationInput), options (recipe options model), bootstrap (ignored).
+        # Raises ValueError if input.pipeline.recipe differs from recipe_id or input.execution is
+        # None. Sets self.input, self.options and a no-op on_event callback.
         if input.pipeline.recipe != self.recipe_id:
             raise ValueError(f"This pipeline requires --recipe {self.recipe_id}")
         if input.execution is None:
@@ -43,9 +58,13 @@ class RemoteGenerationPipeline:
         self.on_event: Callable[[ProgressEvent], None] = lambda event: None
 
     def set_event_callback(self, callback: Callable[[ProgressEvent], None]) -> None:
+        # [FUNCTION DOC] Replace the progress callback (receives ProgressEvent objects). Input:
+        # callback. Output: None.
         self.on_event = callback
 
     def event(self, stage: str, state: str, message: str, **metrics) -> None:
+        # [FUNCTION DOC] Emit a ProgressEvent tagged with recipe_id through on_event.
+        # Inputs: stage, state, message (str), **metrics (attached as metrics). Output: None.
         self.on_event(
             ProgressEvent(
                 recipe=self.recipe_id, stage=stage, state=state, message=message, metrics=metrics
@@ -53,15 +72,39 @@ class RemoteGenerationPipeline:
         )
 
     def worker_configuration(self, run: Path) -> dict:
+        # [FUNCTION DOC] Build the JSON config uploaded to the worker.
+        # Input: run (Path, unused here). Output: dict with repo and options dumped in JSON mode.
         return {
             "repo": self.input.repo.model_dump(mode="json"),
             "options": self.options.model_dump(mode="json"),
         }
 
     def source_identity(self) -> dict:
+        # [FUNCTION DOC] Extra identity folded into the run configuration hash (e.g. input file
+        # digests). Default: empty dict.
         return {}
 
     def run(self, out_dir: Path) -> PipelineResult:
+        # [FUNCTION DOC] Execute or resume the full remote run; return a PipelineResult.
+        # Input: out_dir (Path for exported tasks).
+        # Behavior: run dir is campaign_dir/runs/run_id with receipt run.json. Configuration hash =
+        # sha256 of the input dump (minus execution.resume) plus runtime wheel sha256 and
+        # source_identity. Existing receipt requires execution.resume and a matching hash; otherwise
+        # the receipt is created exclusively in state "claimed". Unless already downloaded, requires
+        # the worker receipt to be "running" on the same campaign budget ledger and (if dispatched)
+        # the same worker id, and at least 60s left in the worker window (timeout = min(execution
+        # timeout, remaining-15)). On "claimed": installs the runtime, creates remote dirs, uploads
+        # worker-config.json, records state "remote_dispatched", and launches python -m
+        # worker_module config output. Then observes the job (forwarding events), saves remote-
+        # job.json, downloads stderr and raises RuntimeError on failure, tars and downloads
+        # evidence, unpacks it, sets state "downloaded". Then (state "exporting") iterates
+        # candidates until options.target exports: previously exported tasks are re-verified by
+        # bundle hash (ValueError if changed); author_export ValueErrors count as skip
+        # "task_materialization". Records each export's path and bundle hash, finally state
+        # "completed" with skip counts.
+        # Output: PipelineResult(candidates=attempted, emitted, skipped, out_dir, skip_reasons).
+        # Raises: FileExistsError, ValueError, RuntimeError as above. Side effects: filesystem
+        # receipts, remote worker commands, uploads/downloads, progress events.
         execution = self.input.execution
         run = execution.campaign_dir / "runs" / execution.run_id
         receipt = run / "run.json"
@@ -221,13 +264,21 @@ class RemoteGenerationPipeline:
         )
 
     def author_export(self, generation, candidate, ledger, run, out_dir) -> Path:
+        # [FUNCTION DOC] Abstract hook: author and export one candidate to out_dir and return the
+        # task directory. Inputs: generation (unpacked evidence dir), candidate (dict), ledger
+        # (BudgetLedger), run (run dir), out_dir. Raises NotImplementedError here.
         raise NotImplementedError
 
 
 class RepositoryGenerationPipeline(RemoteGenerationPipeline):
+    # [CLASS DOC] RemoteGenerationPipeline restricted to public GitHub repository sources and
+    # requiring an LLM for issue/instruction writing.
     """Repository-specific input and model contract over the shared remote lifecycle."""
 
     def __init__(self, input: GenerationInput, options, bootstrap=None):
+        # [FUNCTION DOC] Run base validation, then require a RepositorySource whose repo URL starts
+        # with https://github.com/ and whose access is not private, and a non-None input.llm. Raises
+        # ValueError otherwise.
         super().__init__(input, options, bootstrap)
         if (
             not isinstance(input.source, RepositorySource)

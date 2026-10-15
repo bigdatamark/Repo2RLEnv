@@ -1,3 +1,6 @@
+# [MODULE DOC] Two-stage LLM authoring for SWE-Flow: first docstrings for every scheduled function,
+# then a Markdown specification reconciled with test evidence. Calls go through validated_complete
+# with schema and custom validation.
 """The upstream's separate docstring and test-based specification stages."""
 
 from __future__ import annotations
@@ -12,22 +15,37 @@ from repo2rlenv.campaigns.structured import validated_complete
 
 
 class FunctionDocstring(BaseModel):
+    # [CLASS DOC] Pydantic model (extra forbidden): node_id (scheduled function key) and docstring
+    # (20-6000 chars).
     model_config = ConfigDict(extra="forbid")
     node_id: str
     docstring: str = Field(min_length=20, max_length=6000)
 
 
 class Docstrings(BaseModel):
+    # [CLASS DOC] Pydantic model (extra forbidden): functions, a non-empty list of
+    # FunctionDocstring.
     model_config = ConfigDict(extra="forbid")
     functions: list[FunctionDocstring] = Field(min_length=1)
 
 
 class Specification(BaseModel):
+    # [CLASS DOC] Pydantic model (extra forbidden): markdown (100-20000 chars).
     model_config = ConfigDict(extra="forbid")
     markdown: str = Field(min_length=100, max_length=20000)
 
 
 def author(candidate, model, ledger, directory, *, operation_prefix, resume):
+    # [FUNCTION DOC] Author docstrings and a specification for one candidate.
+    # Inputs: candidate (dict with functions: node_id -> info, test_evidence), model, ledger,
+    # directory (receipts docstring.json / specification.json), keyword operation_prefix, resume.
+    # For each stage loads <stage>_prompt.md and the first two <stage>_demonstrations.json examples,
+    # adds owned adaptation guidance, and (for specification) builds context from test evidence, the
+    # docstring result and scheduled functions. Raises ValueError if the context JSON exceeds 100000
+    # chars.
+    # Calls validated_complete (0.75 USD, 6000 tokens) with a stage validator.
+    # Output: (node_id -> docstring dict, specification markdown). Raises ValueError if docstrings
+    # do not match scheduled ids exactly once. Side effects: LLM calls, receipts.
     models = {}
     for stage, schema, context in (
         ("docstring", Docstrings, candidate["functions"]),
@@ -67,6 +85,11 @@ def author(candidate, model, ledger, directory, *, operation_prefix, resume):
             raise ValueError("Reconstruction authoring exceeds the supported context bound")
 
         def validate(value, *, stage=stage):
+            # [FUNCTION DOC] HELPER: Stage-specific validator (stage bound by default argument).
+            # docstring: returned node_ids must equal the scheduled ids with no duplicates;
+            # specification: rejects markdown mentioning "fixture", "in tests" or "observed test
+            # behaviors" (case-insensitive).
+            # Raises ValueError; returns None.
             if stage == "docstring":
                 keys = [item.node_id for item in value.functions]
                 if set(keys) != candidate["functions"].keys() or len(keys) != len(set(keys)):

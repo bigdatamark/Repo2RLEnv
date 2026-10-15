@@ -1,3 +1,6 @@
+# [MODULE DOC] Build a Harbor bundle for one concrete SCALER instance: the learner writes a boxed
+# answer to /workspace/answer.txt; a separate offline verifier image with math-verify runs grade.py
+# against the private reference answer and writes a reward in {-1, +1}.
 """Concrete reasoning instances with a private reference answer and native reward scale."""
 
 from __future__ import annotations
@@ -10,6 +13,17 @@ from repo2rlenv.pipelines.recipes.catalog import get_recipe
 
 
 def export_task(candidate, destination, org, *, resume=False):
+    # [FUNCTION DOC] Write the task bundle for a generated candidate and return its path.
+    # Inputs: candidate (dict from the worker: id, instruction, reference_answer, answer_contract,
+    # family, difficulty, actual_seed and hash fields), destination (Path), org (str), resume (bool,
+    # default False, forwarded to write_bundle).
+    # Files: environment Dockerfile (python:3.12-slim, tmux, learner uid 1000, empty answer.txt),
+    # tests Dockerfile (pins math-verify 0.8.0, copies grade.py, reference.json, answer-
+    # contract.json, test.sh, upstream license/notice), test.sh, solution answer.txt and solve.sh.
+    # Metadata records recipe/version "2", pipeline and upstream commit from the catalog, reward
+    # kind answer_equivalence with range [-1, 1], domain and identity hashes. No network for agent
+    # or verifier (1 CPU, 2048 MB), artifact /workspace/answer.txt, 60s verifier timeout.
+    # Output: Path. Raises KeyError on missing candidate fields. Side effects: writes files.
     recipe = get_recipe("scaler")
     bundle = TaskBundle(
         name="scaler-" + candidate["id"],

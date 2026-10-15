@@ -1,3 +1,7 @@
+# [MODULE DOC] Remote-only SCALER worker. Builds a python:3.12-slim + g++ image, then for sampled
+# (family, difficulty, sample) choices runs the family generator and native reference programs in
+# locked-down, network-less containers to produce concrete instances with reference answers. Refuses
+# to run unless REPO2RLENV_REMOTE_WORKER=1.
 """Execute supplied family generators and reference programs in remote offline containers."""
 
 from __future__ import annotations
@@ -30,6 +34,17 @@ from repo2rlenv.ui import console
 def execute(
     image: str, code: str, language: int, stdin: str, directory: Path, timeout: int
 ) -> dict:
+    # [FUNCTION DOC] Run one program in a fresh Docker container and record its result.
+    # Inputs: image (id), code (source), language (3 = Python, otherwise compiled as C++17), stdin,
+    # directory (created; must not exist), timeout (seconds for the run).
+    # Behavior: writes code/main.py or main.cpp and code/input, docker create with labels, no
+    # network, 1 CPU, 1 GiB, 128 pids, user 1000:1000; copies the code dir in, runs with docker
+    # start -a, inspects exit code and OOM flag, and always force-removes the container.
+    # Output: record dict (returncode, oom, stdout capped at 256 KiB, last 16000 chars of stderr,
+    # output_truncated, language, code_sha256), also saved to directory/result.json.
+    # Raises: CalledProcessError on create/cp failure, TimeoutExpired.
+    # KNOWN ISSUE: the first command assignment's Python branch is dead code; it is always
+    # overwritten by the later language == 3 assignment (harmless redundancy).
     directory.mkdir(parents=True)
     source = directory / "code"
     source.mkdir()
@@ -105,6 +120,22 @@ def execute(
 
 
 def generate(config: dict, destination: Path) -> dict:
+    # [FUNCTION DOC] Generate SCALER instances. Input: config (families, source_sha256, options as
+    # ScalerOptions JSON), destination (Path; must not exist).
+    # Behavior: builds the runtime image (ValueError on failure, logs written under runtime/).
+    # Builds all (family, difficulty, sample) choices for difficulties present in difficulty_dict,
+    # shuffles with Random(seed), iterates up to max_candidates, stopping at target. For each:
+    # computes params and seed (seed + index*max_generator_attempts), a 20-hex identity key;
+    # prepares generator code (imports + newline repair), and for each attempt runs it with a
+    # __main__ wrapper seeding random and printing generate_testcase(params); bad runs or unparsable
+    # output retry. Runs each Python/C++ reference (languages 2/3) on the stdin until one succeeds
+    # with nonempty output. Rejects duplicate instances (hash over family/detail/stdin, seeded with
+    # exclude_instance_hashes). The answer is the stripped stdout; string outputs keep the first
+    # token, array outputs become a bracketed list after checking each value is a finite Decimal.
+    # Saves instance.json with reference_answer wrapped in a boxed marker, answer_contract,
+    # actual_seed (seed+attempt), etc. ValueError/CalledProcessError/ TimeoutExpired become rejected
+    # entries (reason family_execution). generation.json is rewritten after every choice.
+    # Output: {candidates, rejected, attempted}. Side effects: Docker builds/runs, file writes.
     options = ScalerOptions.model_validate(config["options"])
     families = config["families"]
     destination.mkdir(parents=True, exist_ok=False)
@@ -254,6 +285,8 @@ def generate(config: dict, destination: Path) -> dict:
 
 
 def main() -> None:
+    # [FUNCTION DOC] CLI entry. Raises RuntimeError unless env REPO2RLENV_REMOTE_WORKER is "1";
+    # parses config and output paths, runs generate and prints generated/rejected counts as JSON.
     if os.environ.get("REPO2RLENV_REMOTE_WORKER") != "1":
         raise RuntimeError("SCALER generator and reference execution is remote only")
     parser = argparse.ArgumentParser(description=__doc__)

@@ -1,3 +1,5 @@
+# [MODULE DOC] SETA evolution stages: load complete parent Harbor tasks, ask an LLM (metered) to
+# design an evolved variant per curriculum strategy, and expose the builder prompt.
 """Explicit curriculum strategies over complete parent Harbor tasks."""
 
 from __future__ import annotations
@@ -13,6 +15,9 @@ from repo2rlenv.emitter.bundle import inspect_bundle
 
 
 class EvolutionDesign(BaseModel):
+    # [CLASS DOC] Pydantic model (extra fields forbidden) for the LLM design response:
+    # core_capabilities (<=15 strings), draft_spec (<=24000 chars), filtered_reason (str or None;
+    # set when the strategy cannot produce a coherent variant).
     model_config = ConfigDict(extra="forbid")
     core_capabilities: list[str] = Field(max_length=15)
     draft_spec: str = Field(max_length=24000)
@@ -20,12 +25,21 @@ class EvolutionDesign(BaseModel):
 
     @model_validator(mode="after")
     def supported_design(self):
+        # [FUNCTION DOC] After-validator: when filtered_reason is empty, requires draft_spec of at
+        # least 100 chars and at least one capability; raises ValueError otherwise. Returns self.
         if not self.filtered_reason and (len(self.draft_spec) < 100 or not self.core_capabilities):
             raise ValueError("An unfiltered evolution requires a complete design and capabilities")
         return self
 
 
 def load_parents(path: Path, options) -> list[dict]:
+    # [FUNCTION DOC] Expand parent tasks into evolution seeds.
+    # Inputs: path (a task dir containing task.toml, or a dir of such tasks), options
+    # (variants_per_parent, strategies). Each parent must pass inspect_bundle integrity; all files
+    # are read as text (total <=150000 bytes). For each variant, the strategy is chosen round-robin
+    # by (parent index + variant). Output: list of seed dicts (source, title, parent_bundle_hash,
+    # evolution_strategy, variant number, parent_files). Raises ValueError on no tasks, failed
+    # integrity, oversize, or non-UTF-8 files.
     paths = (
         [path]
         if (path / "task.toml").is_file()
@@ -68,6 +82,12 @@ def load_parents(path: Path, options) -> list[dict]:
 def design(
     seed: dict, *, model, ledger, receipt, operation_id: str, resume: bool
 ) -> EvolutionDesign:
+    # [FUNCTION DOC] Ask the model for an EvolutionDesign for one seed.
+    # Inputs: seed (from load_parents), keyword model, ledger, receipt, operation_id, resume.
+    # System prompt = evolution_prompt.md + strategies/<strategy>_adapter.md + an owned runtime
+    # adaptation paragraph; user = seed JSON. Uses metered_complete (reservation 0.90 USD, 9000 max
+    # tokens, JSON schema). Output: validated EvolutionDesign. Raises pydantic ValidationError /
+    # FileNotFoundError for unknown strategy files. Side effects: LLM call, budget ledger/receipt.
     strategy = seed["evolution_strategy"]
     prompt = files(__package__).joinpath("evolution_prompt.md").read_text()
     prompt += (
@@ -104,4 +124,5 @@ def design(
 
 
 def builder_prompt() -> str:
+    # [FUNCTION DOC] Return the packaged builder_prompt.md text.
     return files(__package__).joinpath("builder_prompt.md").read_text()

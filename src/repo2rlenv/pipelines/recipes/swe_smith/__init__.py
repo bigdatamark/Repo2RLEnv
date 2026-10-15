@@ -1,3 +1,6 @@
+# [PACKAGE DOC] Package for the owned SWE-smith recipe (repo_mutate / swe_smith): deterministic
+# single-site procedural mutations validated against healthy tests, issue text generation, and
+# export with a separate Harbor verifier. No code at package level.
 """SWE-smith-inspired procedural defects, validated against healthy repository tests.
 
 Acknowledgment: SWE-bench/SWE-smith (MIT), revision

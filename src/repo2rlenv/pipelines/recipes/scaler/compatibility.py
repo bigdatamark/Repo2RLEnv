@@ -1,9 +1,21 @@
+# [MODULE DOC] Helpers retained verbatim (in behavior) from upstream SCALER to prepare family
+# generator code before execution: repairing raw newlines inside string literals and prepending a
+# broad set of standard-library imports.
 """Retained SCALER generator preparation helpers; see provenance.md."""
 
 from __future__ import annotations
 
 
 def fix_newlines_in_python_strings(code: str) -> str:
+    # [FUNCTION DOC] Replace literal line breaks inside quoted string literals with the two-
+    # character escape backslash-n (upstream docstring in Chinese says the same).
+    # Input: code (str). Single-character scan tracking whether inside a single- or double-quoted
+    # string and whether the previous char was a backslash; inside strings CRLF, lone CR and LF each
+    # become one escaped newline, other characters are copied. Outside strings everything is copied.
+    # Output: repaired code, guaranteed to end with a newline. Side effects: none.
+    # KNOWN ISSUE: comments are not recognized, so an apostrophe or quote inside a comment (e.g. "#
+    # don't") opens a fake string and the following real code newlines get escaped, corrupting the
+    # code.
     """
     将 Python 源码中【字符串内部】的真实换行符替换为字面量 '\\n'，
     以修复像 print("Hello\nWorld") 被错误写成 print("Hello
@@ -75,6 +87,10 @@ def fix_newlines_in_python_strings(code: str) -> str:
 
 
 def import_needed_module_for_python(code_str):
+    # [FUNCTION DOC] Wrap generator code with many star-imports and plain imports of standard
+    # modules (traceback, string, re, datetime, collections, heapq, bisect, copy, math, random,
+    # statistics, itertools, functools, operator, io, sys, json, builtins, typing) so upstream
+    # snippets that assume these names run. Input: code_str. Output: the combined source.
     wrapped_code = f"""
 import traceback
 from string import *

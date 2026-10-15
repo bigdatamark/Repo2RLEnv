@@ -1,3 +1,7 @@
+# [MODULE DOC] Standalone verifier script copied into SCALER task test images. Reads
+# /workspace/answer.txt, compares it with /tests/reference.json either by a typed contract
+# (string/number/array with Decimal tolerances) or by math-verify, and writes
+# /logs/verifier/reward.txt (+1 or -1) and result.json. Requires math_verify only in main().
 """Standalone answer-file adapter for SCALER's active math-verify reward route."""
 
 from __future__ import annotations
@@ -10,6 +14,10 @@ from pathlib import Path
 
 
 def unbox(text: str) -> str:
+    # [FUNCTION DOC] Return the content of the last boxed answer, or the stripped text if none.
+    # Tracks brace depth from the final occurrence of the boxed marker. Raises ValueError if
+    # anything other than whitespace or dollar signs follows the closing brace, or if the box is
+    # unclosed.
     """Extract the final boxed answer without treating strings as numbers."""
     text = text.strip()
     start = text.rfind(r"\boxed{")
@@ -27,6 +35,12 @@ def unbox(text: str) -> str:
 
 
 def numeric_equal(expected: str, actual: str, contract: dict) -> bool:
+    # [FUNCTION DOC] Compare two decimal strings under the contract's tolerances.
+    # Inputs: expected, actual (str), contract (absolute_tolerance/relative_tolerance, default 0).
+    # Returns False unless both match a plain decimal/scientific regex and all values are finite;
+    # uses high-precision Decimal arithmetic. True when |gold-pred| <= max(absolute,
+    # relative*|gold|).
+    # Raises ValueError on negative tolerances.
     """Compare finite decimal outputs under explicitly declared tolerances."""
     number = r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?"
     if not re.fullmatch(number, expected) or not re.fullmatch(number, actual):
@@ -44,6 +58,10 @@ def numeric_equal(expected: str, actual: str, contract: dict) -> bool:
 
 
 def typed_equal(reference: str, answer: str, contract: dict) -> bool:
+    # [FUNCTION DOC] Compare a reference and answer under an explicit output_type contract. Both are
+    # unboxed first. string: exact equality; number: numeric_equal; array: both parsed as JSON lists
+    # with numbers kept as strings, equal length, every pair numeric_equal (non-string elements
+    # fail). Output: bool. Raises ValueError for unsupported types; JSON errors propagate.
     expected, actual = unbox(reference), unbox(answer)
     kind = contract["output_type"]
     if kind == "string":
@@ -65,6 +83,11 @@ def typed_equal(reference: str, answer: str, contract: dict) -> bool:
 
 
 def main() -> None:
+    # [FUNCTION DOC] Verifier entry point. Creates /logs/verifier, writes reward "-1" first. Returns
+    # early (reward -1) if answer.txt is missing, a symlink, not regular, or over 64 KiB. Otherwise
+    # uses typed_equal when answer-contract.json declares output_type, else math-verify (LaTeX gold
+    # vs expression/LaTeX prediction). Any exception records score -1 and the error type in
+    # result.json. On success writes result.json {score, accuracy} and reward 1 or -1. Output: None.
     from math_verify.errors import TimeoutException
     from math_verify.metric import math_metric
     from math_verify.parser import ExprExtractionConfig, LatexExtractionConfig

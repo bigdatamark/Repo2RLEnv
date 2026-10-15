@@ -1,3 +1,6 @@
+# [MODULE DOC] Resolve a supplied public GitHub PR URL into a SWE-gen source record via the gh CLI
+# before any remote execution: merged-state check, changed-file classification, source-only diff
+# extraction, and linked issue lookup.
 """Resolve explicit public PR inputs before remote execution."""
 
 from __future__ import annotations
@@ -13,6 +16,17 @@ from repo2rlenv.pipelines.pr_runtime import _linked_issue_number
 
 
 def fetch_source(url: str, options) -> dict:
+    # [FUNCTION DOC] Fetch and validate one PR.
+    # Inputs: url (https://github.com/owner/name/pull/N), options (source_paths, test_paths).
+    # Requires host github.com, a merged PR on a non-private base repo. Lists changed files
+    # (paginated); files under source roots and not under test roots must be status "modified" .py
+    # files. Splits the full diff per file and keeps exactly the blocks for those source files.
+    # Looks up a linked issue from the PR body.
+    # Output: dict url, head sha, source_diff, id (sha256 prefix of those three), repo URL, base
+    # sha, title, body (<=10000 chars), linked_issue {title, body} or None, source_files,
+    # test_files.
+    # Raises ValueError on unsupported host/state/profile or diff mapping mismatch (and on malformed
+    # URL paths via unpacking). Side effects: gh API network calls.
     parsed = urlparse(url)
     if parsed.netloc != "github.com":
         raise ValueError("SWE-gen currently supports public GitHub PRs")
@@ -27,6 +41,7 @@ def fetch_source(url: str, options) -> dict:
     tests = [PurePosixPath(path) for path in options.test_paths]
 
     def within(path, prefixes):
+        # [FUNCTION DOC] HELPER: True if path equals or lies under any prefix in prefixes.
         return any(path == root or root in path.parents for root in prefixes)
 
     source_files = []

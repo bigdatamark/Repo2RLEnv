@@ -1,3 +1,6 @@
+# [MODULE DOC] Pure AST helpers for SWE-Flow: catalog top-level functions, group traced tests by
+# their core-function sets into an ordered development schedule, and skeletonize source for one
+# step. Node keys are "path:first_line:name" where first_line includes decorators.
 """Group observed core dependencies and introduce only newly developed functions."""
 
 from __future__ import annotations
@@ -8,6 +11,9 @@ from pathlib import Path
 
 
 def function_catalog(base: Path, paths: list[str]) -> dict:
+    # [FUNCTION DOC] Catalog top-level synchronous functions under source paths.
+    # Inputs: base (root), paths (files or directories; directories scanned recursively for .py).
+    # Output: dict key -> {path, name, line, source}. Raises SyntaxError on unparsable files.
     """This first profile covers top-level synchronous Python functions."""
     found = {}
     for relative in paths:
@@ -31,6 +37,15 @@ def function_catalog(base: Path, paths: list[str]) -> dict:
 
 
 def development_schedule(traces: list[dict], catalog: dict) -> list[dict]:
+    # [FUNCTION DOC] Order development steps from call traces.
+    # Inputs: traces (records with test_id, core_nodes, target_nodes, edges, truncated), catalog.
+    # Skips truncated traces; groups tests by frozenset(core_nodes within catalog). Groups are
+    # visited by (size, sorted keys); for each, new = core minus already developed, targets = union
+    # of target nodes intersected with new; a step is emitted only when both are non-empty, with
+    # core_nodes, nodes_to_develop, target_nodes, dependent_nodes (new minus targets), test_ids,
+    # previous_tests and deduplicated edges. All visited groups mark their nodes developed and add
+    # tests to previous_tests.
+    # Output: list of step dicts (step index = position).
     groups = defaultdict(list)
     for trace in traces:
         if trace.get("truncated"):
@@ -62,6 +77,12 @@ def development_schedule(traces: list[dict], catalog: dict) -> list[dict]:
 
 
 def skeletonize(source: str, *, path: str, schedule: dict, docstrings: dict | None = None) -> str:
+    # [FUNCTION DOC] Produce defective source for a schedule step.
+    # Inputs: source, keyword path (relative), schedule (step dict), docstrings (key -> text,
+    # optional). Removes top-level functions listed in dependent_nodes, replaces target-node bodies
+    # with a docstring (provided or a default) followed by an ellipsis expression, keeps everything
+    # else.
+    # Output: ast.unparse text plus newline (comments and formatting are lost).
     """Stub target entry points and remove newly introduced dependencies."""
     tree = ast.parse(source)
     docstrings = docstrings or {}

@@ -1,3 +1,5 @@
+# [MODULE DOC] Remote SWE-gen worker: build the healthy PR head, reverse-apply the PR's source diff
+# to obtain the defective files, and record test contrast plus test excerpts.
 """Build healthy PR heads, reverse source changes, and measure test contrast."""
 
 from __future__ import annotations
@@ -18,6 +20,14 @@ from repo2rlenv.ui import console
 
 
 def generate(source: dict, options: PRRecipeOptions, destination: Path) -> dict:
+    # [FUNCTION DOC] Build one SWE-gen candidate.
+    # Inputs: source (from fetch_source), options (PRRecipeOptions), destination (Path; must not
+    # exist). Bootstraps RepoSpec(url=repo, ref=head, public), requires the healthy suite to pass,
+    # copies source files to defective-source, writes source.diff and runs git apply --reverse there
+    # (stderr saved to reverse-patch.stderr), tests with the defective files substituted, and
+    # computes execution_contrast and F2P excerpts. Output: source fields plus contrast,
+    # image_digest and test_evidence (saved to candidate.json). Raises ValueError if healthy fails
+    # or the reverse patch does not apply. Side effects: Docker, git subprocess, writes.
     destination.mkdir(parents=True, exist_ok=False)
     repo = RepoSpec(url=source["repo"], ref=source["head"], access="public")
     boot, base = bootstrap_snapshot(repo, options, destination)
@@ -63,6 +73,8 @@ def generate(source: dict, options: PRRecipeOptions, destination: Path) -> dict:
 
 
 def main() -> None:
+    # [FUNCTION DOC] CLI entry: parse config and output, run generate with config source and
+    # validated PRRecipeOptions, print id and contrast as JSON.
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("config", type=Path)
     parser.add_argument("output", type=Path)

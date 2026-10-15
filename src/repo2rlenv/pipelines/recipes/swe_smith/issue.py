@@ -1,3 +1,6 @@
+# [MODULE DOC] SWE-smith issue (bug report) generation from failing-test evidence through the shared
+# metered LLM client, with deterministic validation (no private test names, no mention of the test
+# suite, Python examples must parse and not use undefined names) and bounded retries.
 """SWE-smith's test-evidence issue generation, through the shared metered client."""
 
 from __future__ import annotations
@@ -18,12 +21,17 @@ from repo2rlenv.spec.input import LLMSpec
 
 
 class IssueReport(BaseModel):
+    # [CLASS DOC] Pydantic model (extra forbidden): issue (markdown text, may be empty when
+    # unsupported) and reason.
     model_config = ConfigDict(extra="forbid")
     issue: str
     reason: str
 
 
 def _reproducer_errors(markdown: str) -> list[str]:
+    # [FUNCTION DOC] HELPER: Statically check python/py fenced code blocks in markdown. Reports
+    # syntax errors and pyflakes UndefinedName/UndefinedLocal messages, without executing code.
+    # Input: markdown. Output: list of error strings.
     """Check self-contained Python examples without executing generated code."""
     from pyflakes.checker import Checker
     from pyflakes.messages import UndefinedLocal, UndefinedName
@@ -46,6 +54,11 @@ def _reproducer_errors(markdown: str) -> list[str]:
 
 
 def issue_violations(report: IssueReport, candidate: dict) -> list[str]:
+    # [FUNCTION DOC] List validation problems for an IssueReport. Checks: empty issue (includes
+    # reason), over 4000 chars, mentions of private test function/class names derived from
+    # FAIL_TO_PASS ids (parts starting with test_ or ending with Tests), test-referring phrases, and
+    # reproducer errors. Inputs: report, candidate (contrast). Output: list of strings (empty =
+    # valid).
     issues = []
     text = report.issue
     if not text.strip():
@@ -78,6 +91,9 @@ def issue_violations(report: IssueReport, candidate: dict) -> list[str]:
 
 
 def issue_context(generation: Path, candidate: dict) -> str:
+    # [FUNCTION DOC] Build bounded LLM context for a candidate: up to 24 unique failing test methods
+    # (parametrization stripped) with source excerpts from generation/base, the defective run's
+    # stdout log, and counts. Inputs: generation, candidate. Output: str from bounded_context.
     """Select failing test methods and imports without executing repository code."""
     base = generation / "base"
     identities = candidate["contrast"]["FAIL_TO_PASS"]
@@ -108,6 +124,14 @@ def write_issue(
     review_feedback: list[str] | None = None,
     resume: bool = False,
 ) -> IssueReport:
+    # [FUNCTION DOC] Generate a validated IssueReport with up to max_attempts LLM calls.
+    # Inputs: generation, candidate, model (LLMSpec), ledger, receipt (Path), keyword operation_id,
+    # reservation_usd ("0.50"), max_attempts (1-3, default 2), review_feedback (optional list added
+    # to the prompt), resume. Later attempts use suffixed operation ids and receipt stems and
+    # include the previous validation errors (or a JSON-format reminder on parse failure) as
+    # feedback.
+    # Output: the first violation-free IssueReport. Raises ValueError if max_attempts is out of
+    # range or all attempts fail. Side effects: metered LLM calls and receipts.
     context = issue_context(generation, candidate)
     if max_attempts not in range(1, 4):
         raise ValueError("Issue generation allows one to three explicit attempts")

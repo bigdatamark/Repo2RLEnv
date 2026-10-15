@@ -1,3 +1,6 @@
+# [MODULE DOC] Remote SWE-Flow worker: bootstrap the repo, run healthy and traced test suites, build
+# the development schedule, then for each step write skeletonized sources and record the healthy-vs-
+# defective execution contrast as a candidate. Emits progress events to events.jsonl.
 """Remote healthy tracing, development scheduling, and executable skeleton contrast."""
 
 from __future__ import annotations
@@ -29,10 +32,24 @@ from repo2rlenv.ui import console
 
 
 def generate(repo: RepoSpec, options: ReconstructionOptions, destination: Path) -> dict:
+    # [FUNCTION DOC] Produce SWE-Flow candidates.
+    # Inputs: repo (RepoSpec), options (ReconstructionOptions: source_paths, trace_max_tests,
+    # trace_seed, target, max_candidates, exclude_candidate_ids, ...), destination (Path; must not
+    # exist).
+    # Raises ValueError unless healthy and traced runs both pass. Saves schedule.json. For each step
+    # (until target records or max_candidates attempts; excluded keys skipped without counting): key
+    # is a sha256 prefix of repo/ref/schedule, skeletonized files go to candidates/<key>/defective-
+    # source, the defective image is tested, and execution_contrast computed;
+    # ValueError/RuntimeError/ TimeoutExpired become rejected entries. Records include contrast,
+    # source_files, function catalog entries and F2P test excerpts; generation.json is rewritten as
+    # it goes.
+    # Output: {candidates, rejected, attempted}. Side effects: Docker runs, file writes, events.
     destination.mkdir(parents=True, exist_ok=False)
     journal = EventJournal(destination / "events.jsonl")
 
     def event(stage, state, message, **metrics):
+        # [FUNCTION DOC] HELPER: Emit a swe_flow ProgressEvent to the journal. Inputs: stage, state,
+        # message, **metrics.
         journal.emit(
             ProgressEvent(
                 recipe="swe_flow", stage=stage, state=state, message=message, metrics=metrics
@@ -133,6 +150,8 @@ def generate(repo: RepoSpec, options: ReconstructionOptions, destination: Path) 
 
 
 def main() -> None:
+    # [FUNCTION DOC] CLI entry: parse config and output paths, validate repo and options, run
+    # generate, print attempted and execution_passed counts as JSON.
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("config", type=Path)
     parser.add_argument("output", type=Path)

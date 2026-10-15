@@ -1,3 +1,5 @@
+# [MODULE DOC] Export a validated SWE-smith mutation as a standalone Harbor task using the shared
+# repository exporter. Defines RECIPE_VERSION and UPSTREAM_REVISION constants.
 """Export a mutation as a standalone task with a separate Harbor verifier."""
 
 from __future__ import annotations
@@ -21,6 +23,14 @@ def export_candidate(
     org: str,
     resume: bool = False,
 ) -> Path:
+    # [FUNCTION DOC] Export one mutation candidate.
+    # Inputs: generation (evidence dir with base/ and candidates/<id>/{mutated,original}.py),
+    # candidate (id, source_file, contrast, repo, ref, optional entity/operator), options
+    # (SWESmithOptions), instruction, destination, keyword org, resume (default False).
+    # Calls export_repository_task with the mutated file as defective, original as reference
+    # (single_reference=True), name "swe-smith-<id>" and recipe/upstream metadata. Output: task
+    # Path.
+    # Raises whatever the exporter raises (ValueError) or file-read errors.
     """Both build contexts begin with defective source, including private tests.
 
     Only source files are collected into a fresh grading environment. Interpreter,

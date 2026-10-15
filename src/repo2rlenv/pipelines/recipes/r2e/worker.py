@@ -1,3 +1,10 @@
+# [MODULE DOC] R2E remote worker entry point (run inside a provider worker, never with model
+# credentials). Two modes driven by a JSON config: "prepare" bootstraps the target repository,
+# verifies the healthy test suite passes, and enumerates candidate public top-level functions (with
+# docstrings) as R2E equivalence-test targets; "evaluate" runs LLM-written tests against the
+# reference implementation with a coverage driver, measures branch coverage of the target function,
+# and, when coverage is sufficient, contrasts against a stubbed (defective) copy. Results are
+# persisted as JSON records via save_record and summarised on the console as JSON.
 """Remote R2E preparation and bounded execution feedback, without model credentials."""
 
 from __future__ import annotations
@@ -26,6 +33,22 @@ from repo2rlenv.ui import console
 
 
 def prepare(repo: RepoSpec, options: R2EOptions, destination: Path) -> dict:
+    # [FUNCTION DOC] Bootstrap the repo, check the healthy suite, and collect R2E function
+    # candidates.
+    # Inputs: repo (RepoSpec), options (R2EOptions: test_paths, seed, max_candidates,
+    # exclude_candidate_ids, ...), destination (Path; must not exist).
+    # Behavior: creates destination; bootstrap_snapshot builds the image and extracts the source
+    # tree (base); test_image runs the healthy suite into destination/healthy. Walks
+    # repository_source_files, keeps top-level non-underscore FunctionDefs with a docstring, >=2
+    # body statements and <=6000 chars of source; dependency_slice failures are recorded in
+    # "rejected". Each candidate gets a 20-hex id (sha256 of repo/ref/path/function_name), excluded
+    # ids are skipped, a dotted module path (dropping a "src/" prefix when src is not a package),
+    # the generated test path (test_r2e_generated.py under the first test path or its parent), line
+    # span, source, context slice and image digest. Candidates are shuffled with Random(seed) and
+    # truncated to max_candidates.
+    # Output: dict with candidates, rejected, attempted (kept candidates + rejected); also written
+    # to destination/generation.json. Raises: ValueError if the healthy run fails; FileExistsError
+    # if destination exists. Side effects: Docker builds/runs, filesystem writes.
     destination.mkdir(parents=True, exist_ok=False)
     boot, base = bootstrap_snapshot(repo, options, destination)
     healthy = test_image(boot.image_digest, options, destination / "healthy")
@@ -86,6 +109,12 @@ def prepare(repo: RepoSpec, options: R2EOptions, destination: Path) -> dict:
 
 
 def branch_evidence(report: dict, candidate: dict) -> dict:
+    # [FUNCTION DOC] Extract per-function coverage evidence from a coverage.py JSON report.
+    # Inputs: report (coverage JSON dict with "files"), candidate (dict with path, line, end_line).
+    # Looks the file up by relative path, then by "/workspace/"+path. Keeps executed/missing branch
+    # arcs whose source line lies in [line, end_line] and executed lines in (line, end_line].
+    # Output: dict branch_coverage (covered/total arcs; if no arcs, 1.0 when any line executed else
+    # 0.0), covered_branches, missing_branches, executed_lines. Side effects: none.
     data = report.get("files", {}).get(candidate["path"], {})
     if not data:
         data = report.get("files", {}).get("/workspace/" + candidate["path"], {})
@@ -104,6 +133,18 @@ def branch_evidence(report: dict, candidate: dict) -> dict:
 
 
 def evaluate(config: dict, options: R2EOptions, destination: Path) -> dict:
+    # [FUNCTION DOC] Run generated tests against the reference and (if covered) a stubbed defect.
+    # Inputs: config (dict with candidate, generation directory, test_code), options (R2EOptions,
+    # uses min_branch_coverage), destination (Path; must not exist).
+    # Behavior: builds private verifier helper files via verifier_files and writes them under
+    # destination/private; raises ValueError if any would overwrite an existing repo file. Runs the
+    # healthy image with those replacements and the coverage_driver.py instrumentation (outputs
+    # coverage.json and observations.json). Records reference_passed, branch evidence, observations
+    # and the last 24000 chars of stdout. If the reference passes and branch_coverage >= threshold,
+    # writes a stubbed source (stub of the function) to destination/stub.py, reruns tests and stores
+    # execution_contrast(healthy, broken) under "contrast".
+    # Output: result dict, also saved to destination/evaluation.json. Side effects: Docker runs,
+    # writes.
     destination.mkdir(parents=True, exist_ok=False)
     candidate = config["candidate"]
     base = Path(config["generation"]) / "base"
@@ -154,6 +195,10 @@ def evaluate(config: dict, options: R2EOptions, destination: Path) -> dict:
 
 
 def main() -> None:
+    # [FUNCTION DOC] CLI entry: parse positional config (JSON path) and output (Path). Validates
+    # config["options"] as R2EOptions; if config mode is "evaluate" calls evaluate and prints
+    # reference_passed/branch_coverage as JSON, otherwise calls prepare with config["repo"] and
+    # prints the candidate count. Output: None. Raises whatever prepare/evaluate raise.
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("config", type=Path)
     parser.add_argument("output", type=Path)

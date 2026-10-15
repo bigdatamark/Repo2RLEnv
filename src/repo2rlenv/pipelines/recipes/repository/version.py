@@ -1,3 +1,6 @@
+# [MODULE DOC] Freeze a setuptools-git-versioning project's version for history-free task bundles:
+# since exported snapshots have no .git, the dynamic git-derived version would break, so the version
+# observed in recorded egg-info PKG-INFO metadata is written statically into pyproject.toml.
 """Freeze observed setuptools-git-versioning metadata for history-free bundles."""
 
 from __future__ import annotations
@@ -11,6 +14,18 @@ import tomli_w
 
 
 def freeze_version(base: Path, *, test_paths: list[str]) -> tuple[dict[str, bytes], dict[str, str]]:
+    # [FUNCTION DOC] Produce file overrides that pin the package version.
+    # Inputs: base (snapshot root containing pyproject.toml), test_paths (keyword; private test
+    # roots).
+    # Behavior: requires [tool.setuptools-git-versioning] enabled = true and "version" in
+    # project.dynamic. Finds *.egg-info/PKG-INFO files whose normalized Name matches project.name;
+    # they must agree on exactly one non-empty Version. Strips any "+local" suffix and validates the
+    # remainder against a simple version charset. Sets project.version, removes "version" from
+    # dynamic, disables the plugin, and drops packages under the test roots from
+    # tool.setuptools.packages when it is a list. Rewrites each matching PKG-INFO Version header.
+    # Output: (overrides: relative path -> new bytes for pyproject.toml and each PKG-INFO, evidence:
+    # {package, version, basis}). Raises: ValueError on any precondition failure.
+    # Side effects: reads files only (does not write).
     """Use recorded package metadata, without invoking target code or guessing a version."""
     project_file = base / "pyproject.toml"
     configuration = tomllib.loads(project_file.read_text())
@@ -20,6 +35,8 @@ def freeze_version(base: Path, *, test_paths: list[str]) -> tuple[dict[str, byte
         raise ValueError("Version freezing requires an enabled setuptools-git-versioning project")
 
     def normalize(name):
+        # [FUNCTION DOC] HELPER: PEP 503-style name normalization: collapse runs of -, _ and . to
+        # "-" and lowercase. Input: name (str). Output: str.
         return re.sub(r"[-_.]+", "-", name).lower()
 
     matches = []

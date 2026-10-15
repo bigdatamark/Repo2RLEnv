@@ -1,3 +1,5 @@
+# [MODULE DOC] SWE-gen's combined substantiality check and instruction writing, as one metered LLM
+# call returning a TaskInstruction.
 """SWE-gen's combined substantiality and instruction stage, with metered SDK calls."""
 
 from __future__ import annotations
@@ -11,6 +13,8 @@ from repo2rlenv.campaigns.llm import metered_complete
 
 
 class TaskInstruction(BaseModel):
+    # [CLASS DOC] Pydantic model (extra forbidden): is_substantial (bool), reason (str), instruction
+    # (str or None), tags (exactly 3 strings).
     model_config = ConfigDict(extra="forbid")
     is_substantial: bool
     reason: str
@@ -19,6 +23,13 @@ class TaskInstruction(BaseModel):
 
 
 def write_instruction(candidate, options, model, ledger, receipt, *, operation_id, resume):
+    # [FUNCTION DOC] Decide whether a PR is substantial and write the learner instruction.
+    # Inputs: candidate (title, body, linked_issue, test_evidence, source_files), options
+    # (force_generate_instruction), model, ledger, receipt, keyword operation_id, resume.
+    # Prompt is instruction_prompt.md plus owned adaptation text (and a forcing note when enabled);
+    # the user message is the evidence JSON with source_file_count. Uses metered_complete (0.75 USD,
+    # 4096 tokens). Output: TaskInstruction. Raises ValueError if marked substantial but the
+    # instruction is missing or under 100 chars. Side effects: LLM call, ledger/receipt.
     prompt = files(__package__).joinpath("instruction_prompt.md").read_text()
     prompt += (
         "\n\nOWNED ADAPTATION: the repository root is /workspace, replacing /app/src "

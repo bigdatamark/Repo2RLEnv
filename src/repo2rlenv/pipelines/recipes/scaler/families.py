@@ -1,3 +1,6 @@
+# [MODULE DOC] Pure (no code execution) helpers for SCALER family definitions: loading and
+# validating the family JSON, explicit answer contracts, difficulty-to-parameter scaling, parsing
+# generator output, and composing the learner instruction.
 """Difficulty scaling and native generator result parsing without code execution."""
 
 from __future__ import annotations
@@ -11,6 +14,12 @@ from pathlib import Path
 
 
 def load_families(path: Path) -> tuple[dict, str]:
+    # [FUNCTION DOC] Load and validate a native SCALER family mapping.
+    # Input: path (JSON file). Raises ValueError if over 32 MiB, not a non-empty dict, a family is
+    # not a dict keyed by str, any of
+    # name/logic_description/generate_testcase/params/difficulty_dict/ solutions is falsy,
+    # solution/language lists differ in length or contain no language 2 or 3, or answer_contract
+    # rejects it. Output: (data dict, sha256 hex of the raw bytes).
     payload = path.read_bytes()
     if len(payload) > 32 * 1024 * 1024:
         raise ValueError("Family input exceeds 32 MiB")
@@ -40,6 +49,12 @@ def load_families(path: Path) -> tuple[dict, str]:
 
 
 def answer_contract(family: dict) -> dict:
+    # [FUNCTION DOC] Derive the explicit answer-comparison contract for a family.
+    # Input: family dict. If output_type is absent returns {} (legacy math-verify route).
+    # output_type must be number, string or array; answer_tolerance must be a dict with only
+    # absolute/relative keys, not allowed for strings, each value a finite Decimal in [0, 1).
+    # Output: {"output_type": kind, "<key>_tolerance": str(Decimal)...}. Raises ValueError on
+    # violations.
     """Keep answer semantics explicit; do not guess tolerances from prose."""
     kind = family.get("output_type")
     if kind is None:
@@ -61,6 +76,10 @@ def answer_contract(family: dict) -> dict:
 
 
 def scale_parameters(family: dict, difficulty: int) -> dict[str, int]:
+    # [FUNCTION DOC] Compute integer generator parameters for a difficulty level.
+    # Inputs: family (with difficulty_dict and params), difficulty (int; looked up as a string key).
+    # Each non-"difficulty" param becomes int(scale * base(default 1.0) + min). Raises ValueError if
+    # the scale is not a finite nonnegative number; KeyError if the difficulty or min is missing.
     scale = family["difficulty_dict"][str(difficulty)]
     if not isinstance(scale, (int, float)) or not math.isfinite(scale) or scale < 0:
         raise ValueError("Difficulty scale must be finite and nonnegative")
@@ -72,6 +91,13 @@ def scale_parameters(family: dict, difficulty: int) -> dict[str, int]:
 
 
 def parse_testcase(text: str) -> tuple[str, dict]:
+    # [FUNCTION DOC] Parse generator stdout of the form "(stdin_string, detail_dict)". Strips outer
+    # parentheses, splits at the first comma; a quoted first part is unquoted via literal_eval when
+    # it yields a str. The detail is parsed as JSON after replacing single with double quotes,
+    # falling back to ast.literal_eval. Output: (stdin str, detail dict). Raises ValueError if there
+    # is no comma or the detail is not a dict; SyntaxError/ValueError may come from literal_eval.
+    # KNOWN ISSUE: splitting at the first comma breaks when the stdin string itself contains a
+    # comma.
     """Retain the native first-comma parser and JSON/Python-literal fallback."""
     value = text.strip()
     if value.startswith("(") and value.endswith(")"):
@@ -97,6 +123,11 @@ def parse_testcase(text: str) -> tuple[str, dict]:
 
 
 def instruction_for(family: dict, detail: dict) -> str:
+    # [FUNCTION DOC] Compose the learner instruction for a concrete instance.
+    # Inputs: family, detail (concrete input dict). Includes the family name, logic description,
+    # instance, optional family instruction, a fixed reasoning directive, output-type hints (array
+    # in boxed brackets, preserve strings, decimal numbers), tolerance text when answer_tolerance is
+    # set, and the requirement to write a boxed answer to /workspace/answer.txt. Output: str.
     text = f"# {family['name']} Problem Description:\n{family['logic_description']}\n\n# Input Instance:\n{detail}\n\n# Instruction\n{family.get('instruction', '')}\n"
     text += "Treat the description as a single fully specified math/algorithm problem about the given concrete input, and ignore any mentions of writing a program, input/output formats, or multiple test cases. Reason step by step to compute the required answer for this instance.\n"
     if family.get("output_type") == "array":

@@ -1,3 +1,9 @@
+# [MODULE DOC] Materialize a repository repair task as a Harbor task bundle. Given a base source
+# snapshot plus defective and reference versions of changed files, writes a bundle with:
+# environment/ (learner image built from defective source, minus private assets), tests/ (separate
+# verifier image containing the full source including private tests, the swe_smith
+# grade.py/test_driver.py, quality/test_results.py, and a contract.json), solution/ (reference files
+# plus solve.sh), and metadata/agent/verifier network policy (no network).
 """Standalone repository task materialization with a fresh private verifier."""
 
 from __future__ import annotations
@@ -14,6 +20,12 @@ from repo2rlenv.spec.recipe_options import PythonRepositoryProfile
 
 
 def _learner_venv_login() -> str:
+    # [FUNCTION DOC] HELPER: Build a Dockerfile RUN line that rewrites the learner's ~/.bash_profile
+    # so a login shell keeps the task venv on PATH. The embedded sh script moves an existing
+    # .bash_profile aside (failing if the backup name already exists) or picks .bash_login/.profile,
+    # writes a profile that sources the original if readable, then appends exports of PATH (prefixed
+    # with /opt/tasksmith-venv/bin) and VIRTUAL_ENV, and chowns the profile to learner. Inputs:
+    # none. Output: Dockerfile text ending in newline. Side effects: none.
     # Harbor's interactive learner starts `bash --login`, whose startup files
     # can replace image ENV PATH. Preserve the original login script, then
     # restore the task runtime after it (even if that script returns early).
@@ -38,6 +50,10 @@ def _learner_venv_login() -> str:
 
 
 def _learner_venv_startup() -> str:
+    # [FUNCTION DOC] HELPER: Dockerfile fragment exposing /opt/tasksmith-venv to both login and non-
+    # interactive bash. Returns _learner_venv_login() plus a RUN that writes PATH and VIRTUAL_ENV
+    # exports to /etc/repo2rlenv-venv.sh and an ENV setting BASH_ENV to that file.
+    # Inputs: none. Output: Dockerfile text. Side effects: none.
     # Native Harbor exec also uses noninteractive bash, including after `su`.
     # Its runtime hook must not source the learner's interactive/login scripts.
     runtime = 'export PATH="%s/bin:$PATH"\\nexport VIRTUAL_ENV="%s"\\n'
@@ -51,6 +67,11 @@ def _learner_venv_startup() -> str:
 
 
 def repository_build(options: PythonRepositoryProfile) -> str:
+    # [FUNCTION DOC] Shared Dockerfile prefix for readiness checks and final Harbor images.
+    # Input: options (PythonRepositoryProfile). Output: dependency_recipe(base_image, dependencies,
+    # use_system_site_packages, hub_assets) followed by COPY source /workspace, a RUN of
+    # task_install_command (falling back to install_command), and ENV lines disabling bytecode
+    # writes, pytest plugin autoload and Hugging Face network access. Side effects: none.
     """Shared install recipe for public readiness and final Harbor images."""
     return (
         dependency_recipe(
@@ -67,6 +88,10 @@ def repository_build(options: PythonRepositoryProfile) -> str:
 
 
 def private_asset(relative: PurePosixPath, options: PythonRepositoryProfile) -> bool:
+    # [FUNCTION DOC] Return True if a relative path equals or lies under any of the profile's
+    # test_paths, private_test_paths or public_exclude roots (i.e. it must be hidden from the
+    # learner).
+    # Inputs: relative (PurePosixPath), options (PythonRepositoryProfile). Output: bool.
     return any(
         relative == root or root in relative.parents
         for root in map(
@@ -92,6 +117,34 @@ def export_repository_task(
     verifier_source: dict[str, bytes] | None = None,
     collect_source_directories: bool = False,
 ) -> Path:
+    # [FUNCTION DOC] Write a complete Harbor task bundle for one tested defect/reference contrast
+    # and return its directory.
+    # Inputs (keyword-only): base (snapshot dir), defective (path->bytes, or None meaning the file
+    # is added by the fix and absent in the defective state), reference (path->bytes, same keys),
+    # options (PythonRepositoryProfile), instruction (learner text), destination, name, org,
+    # contrast (dict with FAIL_TO_PASS/PASS_TO_PASS lists), metadata (merged into bundle metadata),
+    # single_reference (store reference as solution/reference.py; default False), resume (passed to
+    # write_bundle), verifier_source (extra private files for tests/source),
+    # collect_source_directories (force directory-root collection).
+    # Behavior: optional freeze_version overrides when freeze_git_version is set. Directory
+    # collection is enabled when any file is added or forced; then source roots must not overlap
+    # each other or private roots and must be directories or .py files. Every snapshot file is
+    # copied to tests/source/ and (unless private) environment/source/, with defective
+    # content/overrides substituted; symlinks, non-regular files and
+    # .git/__pycache__/.pytest_cache/.pyc raise. Non-.py files under source roots become
+    # sha256-pinned immutable assets in directory mode; public .py files under source roots are
+    # "collected" submissions. Builds environment Dockerfile (tmux, learner user, optional venv
+    # startup), tests Dockerfile (grader uid 1001, copies grading assets), test.sh,
+    # grade/driver/results scripts, contract.json (submitted_files, test_paths or selectors,
+    # pytest_args, expected_passes = F2P+P2P, timeout, and roots/optional/immutable in directory
+    # mode), solution files and solve.sh, and appends workspace/offline guidance to the instruction.
+    # Bundle metadata adds reward kinds, quality_status "exported", F2P/P2P counts and frozen
+    # version evidence; agent and verifier run with no network; artifacts list submitted files or
+    # roots; verifier timeout is test_timeout_sec + 30.
+    # Output: Path from write_bundle. Raises: ValueError on mismatched snapshots, overlaps,
+    # forbidden assets, changed source outside collected files, or verifier files replacing repo
+    # files.
+    # Side effects: reads the snapshot, writes the bundle.
     """Materialize a tested repository contrast with private reference files.
 
     A None baseline value means the PR added that file. Such tasks collect source
