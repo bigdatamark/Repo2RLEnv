@@ -1,3 +1,8 @@
+# [MODULE DOC] Static check that no module under the installed repo2rlenv package imports a POSIX-only stdlib
+# module (fcntl, pwd, grp, termios, tty, pty, posix, resource, crypt, nis, spwd) unconditionally at
+# module top level, since that breaks Windows imports (e.g. `repo2rlenv --version`, issue #128).
+# Imports nested inside an `if` guard are exempt. Globals: SRC (package directory), _POSIX_ONLY
+# (frozenset of module names). Side effects: reads every .py file under SRC.
 """No POSIX-only stdlib module is imported unconditionally at module level.
 
 `fcntl` (and pwd/grp/termios/tty/pty/posix/resource/crypt/nis/spwd) don't
@@ -29,6 +34,11 @@ _POSIX_ONLY = frozenset(
 
 
 def _unconditional_posix_only_imports() -> Iterator[str]:
+    # [FUNCTION DOC] HELPER: Walks every .py under SRC in sorted order, parses it with ast, and for each top-level
+    # (module.body only) `import X` or `from X import ...` whose module is in _POSIX_ONLY yields a
+    # string 'relpath:lineno (import X)' or 'relpath:lineno (from X import ...)'. Note `import
+    # fcntl.sub`-style dotted names are matched only by exact name. Output: iterator of offender
+    # strings. Raises SyntaxError/OSError if a file cannot be parsed/read.
     for path in sorted(SRC.rglob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"))
         # Only module.body (top level): an import inside an `if` guard, e.g.
@@ -45,6 +55,7 @@ def _unconditional_posix_only_imports() -> Iterator[str]:
 
 
 def test_no_unconditional_posix_only_imports():
+    # [FUNCTION DOC] Asserts the offender list is empty, with a message advising a sys.platform guard.
     offenders = list(_unconditional_posix_only_imports())
     assert offenders == [], (
         f'guard with `if sys.platform != "win32":` before importing: {offenders}'

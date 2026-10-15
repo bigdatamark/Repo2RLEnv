@@ -1,3 +1,10 @@
+# [MODULE DOC] Unit tests for the commit_runtime pipeline's pure-Python logic:
+# _strip_commit_prefix, build_instruction_from_commit (title/body use, trailer and PR/commit-link
+# leak stripping, issue override, body reflow), CommitRuntimePipeline._metadata_filter
+# (merge/author/length/bugfix-signal gates), _structural_filter (CI-only, file count, new test
+# funcs), _build_task metadata (reward_calibration, difficulty, per-host reference URL) and the
+# bootstrap contract. Pipelines are built via __new__ with mocks; no git, Docker, network or LLM.
+# One test writes under tmp_path.
 """commit_runtime — metadata filters, instruction synthesis, contract.
 
 The git_local helpers are tested in test_git_local.py against a real
@@ -30,6 +37,10 @@ def _make_commit(
     subject: str = "fix: real bugfix in foo",
     body: str = "Closes #42.\nReplaces the broken thing with the working thing.",
 ) -> CommitInfo:
+    # [FUNCTION DOC] HELPER: Builds a CommitInfo with sensible defaults. Inputs: sha (default 40
+    # 'a's), parents (default one 'b'*40 parent; [] allowed -> parent_sha ''), author_email,
+    # subject (default 'fix: real bugfix in foo'), body (default text with 'Closes #42.'). Fixed
+    # author name 'Alice' and timestamp. Output: CommitInfo whose parent_sha is the first parent.
     parents = parents if parents is not None else ["b" * 40]
     return CommitInfo(
         sha=sha,
@@ -47,18 +58,22 @@ def _make_commit(
 
 
 def test_strip_commit_prefix_fix():
+    # [FUNCTION DOC] Checks a 'fix:' conventional-commit prefix is removed.
     assert _strip_commit_prefix("fix: thing") == "thing"
 
 
 def test_strip_commit_prefix_feat_scoped():
+    # [FUNCTION DOC] Checks a scoped prefix like 'feat(api):' is removed.
     assert _strip_commit_prefix("feat(api): new thing") == "new thing"
 
 
 def test_strip_commit_prefix_case_insensitive():
+    # [FUNCTION DOC] Checks prefix stripping is case-insensitive ('FIX:').
     assert _strip_commit_prefix("FIX: thing") == "thing"
 
 
 def test_strip_commit_prefix_passthrough_when_no_prefix():
+    # [FUNCTION DOC] Checks a subject without a prefix is returned unchanged.
     assert _strip_commit_prefix("plain old subject line") == "plain old subject line"
 
 
@@ -66,6 +81,8 @@ def test_strip_commit_prefix_passthrough_when_no_prefix():
 
 
 def test_instruction_uses_subject_and_body():
+    # [FUNCTION DOC] Checks the instruction has a '**Title:**' line with the prefix-stripped
+    # subject, includes body context, and mentions the first 12 chars of the parent SHA.
     commit = _make_commit()
     out = build_instruction_from_commit(commit)
     assert "**Title:** real bugfix in foo" in out  # `fix:` stripped
@@ -74,6 +91,8 @@ def test_instruction_uses_subject_and_body():
 
 
 def test_instruction_strips_closes_trailers():
+    # [FUNCTION DOC] Checks 'Closes #N' trailers are removed from the body while other context
+    # stays.
     commit = _make_commit(body="Closes #42.\nThis is the actual context.")
     out = build_instruction_from_commit(commit)
     assert "Closes #42" not in out
@@ -81,6 +100,8 @@ def test_instruction_strips_closes_trailers():
 
 
 def test_instruction_handles_empty_body():
+    # [FUNCTION DOC] Checks an empty body still yields Title and '## Task' sections without an
+    # empty Description section.
     commit = _make_commit(body="")
     out = build_instruction_from_commit(commit)
     assert "**Title:**" in out
@@ -93,6 +114,10 @@ def test_instruction_handles_empty_body():
 
 
 def _pipeline_for_filter_tests(**opts):
+    # [FUNCTION DOC] HELPER: Builds a CommitRuntimePipeline via __new__ with
+    # CommitRuntimeOptions(**opts), MagicMock bootstrap/input and no progress callback, so
+    # _metadata_filter/_structural_filter can be called. Defaults min_problem_statement_words to 0
+    # (mutates the opts dict via setdefault) to isolate other gates. Output: the stub pipeline.
     """Build a pipeline whose _metadata_filter/_structural_filter we can call."""
     from unittest.mock import MagicMock
 
@@ -108,24 +133,30 @@ def _pipeline_for_filter_tests(**opts):
 
 
 def test_metadata_filter_skip_merge_commit():
+    # [FUNCTION DOC] Checks a two-parent commit is rejected as 'merge_commit' when
+    # skip_merge_commits=True.
     pipe = _pipeline_for_filter_tests(skip_merge_commits=True)
     merge = _make_commit(parents=["a" * 40, "b" * 40])  # 2 parents
     assert pipe._metadata_filter(merge) == "merge_commit"
 
 
 def test_metadata_filter_keeps_merge_when_option_disabled():
+    # [FUNCTION DOC] Checks merge commits pass (None) when skip_merge_commits=False.
     pipe = _pipeline_for_filter_tests(skip_merge_commits=False)
     merge = _make_commit(parents=["a" * 40, "b" * 40])
     assert pipe._metadata_filter(merge) is None
 
 
 def test_metadata_filter_excluded_author():
+    # [FUNCTION DOC] Checks an author email in exclude_authors yields 'excluded_author'.
     pipe = _pipeline_for_filter_tests(exclude_authors=["dependabot[bot]@example.com"])
     commit = _make_commit(author_email="dependabot[bot]@example.com")
     assert pipe._metadata_filter(commit) == "excluded_author"
 
 
 def test_metadata_filter_short_message():
+    # [FUNCTION DOC] Checks a one-word message is rejected as 'short_message' with
+    # min_message_words=5.
     """`min_message_words=5` rejects 1-3-word commits like 'wip'."""
     pipe = _pipeline_for_filter_tests(min_message_words=5)
     commit = _make_commit(subject="wip", body="")
@@ -133,6 +164,8 @@ def test_metadata_filter_short_message():
 
 
 def test_metadata_filter_problem_statement_too_short():
+    # [FUNCTION DOC] Checks a commit passing the message-word gate but under
+    # min_problem_statement_words=20 yields 'problem_statement_too_short'.
     """New gate: with min_problem_statement_words set, a terse commit is dropped."""
     pipe = _pipeline_for_filter_tests(min_problem_statement_words=20)
     # passes min_message_words(5) but under the 20-word problem-statement gate
@@ -141,11 +174,14 @@ def test_metadata_filter_problem_statement_too_short():
 
 
 def test_metadata_filter_passes_a_good_commit():
+    # [FUNCTION DOC] Checks the default commit passes the metadata filter (None).
     pipe = _pipeline_for_filter_tests()
     assert pipe._metadata_filter(_make_commit()) is None
 
 
 def test_metadata_filter_rejects_non_bugfix_types():
+    # [FUNCTION DOC] Loops over chore/docs/feat/refactor/style/test/ci/build/perf/revert prefixes
+    # and checks each is rejected as 'non_bugfix_type'.
     """chore/docs/feat/refactor/style/test/ci/build/perf/revert are NOT bugfixes."""
     pipe = _pipeline_for_filter_tests()
     for prefix in (
@@ -165,6 +201,8 @@ def test_metadata_filter_rejects_non_bugfix_types():
 
 
 def test_metadata_filter_no_bugfix_signal_is_rejected():
+    # [FUNCTION DOC] Checks a commit with no fix prefix, issue link or bugfix keyword yields
+    # 'no_bugfix_signal'.
     """No `fix:` prefix, no `Closes #N`, no bugfix keyword ⇒ rejected."""
     pipe = _pipeline_for_filter_tests()
     c = _make_commit(subject="Update README with new logo", body="")
@@ -172,12 +210,14 @@ def test_metadata_filter_no_bugfix_signal_is_rejected():
 
 
 def test_metadata_filter_keeps_fix_prefix():
+    # [FUNCTION DOC] Checks a 'fix:' subject passes even with an empty body.
     pipe = _pipeline_for_filter_tests()
     c = _make_commit(subject="fix: off-by-one in pager", body="")
     assert pipe._metadata_filter(c) is None
 
 
 def test_metadata_filter_keeps_linked_issue_even_without_keyword():
+    # [FUNCTION DOC] Checks a 'Closes #42' link in the body counts as a bugfix signal.
     """A commit that links an issue (e.g. `Closes #42`) is a bugfix signal."""
     pipe = _pipeline_for_filter_tests()
     c = _make_commit(subject="Update token handling", body="Closes #42, see context.")
@@ -185,6 +225,7 @@ def test_metadata_filter_keeps_linked_issue_even_without_keyword():
 
 
 def test_metadata_filter_keeps_bugfix_keyword_in_subject():
+    # [FUNCTION DOC] Checks a bugfix keyword in the subject (e.g. 'regression') passes the filter.
     pipe = _pipeline_for_filter_tests()
     c = _make_commit(subject="Repair broken parser regression on Windows", body="")
     assert pipe._metadata_filter(c) is None
@@ -194,6 +235,8 @@ def test_metadata_filter_keeps_bugfix_keyword_in_subject():
 
 
 def test_instruction_strips_fix_pr_link_leak():
+    # [FUNCTION DOC] Checks markdown PR links and full commit SHAs in the body are scrubbed from
+    # the instruction while other context is kept.
     """Markdown PR/commit links in the body must not leak into the instruction."""
     commit = _make_commit(
         body=(
@@ -209,6 +252,7 @@ def test_instruction_strips_fix_pr_link_leak():
 
 
 def test_instruction_strips_leak_from_subject():
+    # [FUNCTION DOC] Checks a markdown issue link in the subject ('[#42](url)') is scrubbed.
     """Cross-references in the subject itself must also be stripped."""
     commit = _make_commit(subject="fix: regression introduced in [#42](url)", body="")
     out = build_instruction_from_commit(commit)
@@ -216,6 +260,8 @@ def test_instruction_strips_leak_from_subject():
 
 
 def test_instruction_uses_issue_when_provided():
+    # [FUNCTION DOC] Checks that when issue=(title, body) is passed, the instruction is built from
+    # the issue text and the leak-prone commit subject (function name, 'off-by-one') is absent.
     """When `issue=(title, body)` is supplied (issue-fetch fallback), the
     problem statement comes from the issue — not the leak-prone commit msg."""
     commit = _make_commit(
@@ -236,6 +282,8 @@ def test_instruction_uses_issue_when_provided():
 
 
 def test_instruction_reflows_long_body_with_template_noise():
+    # [FUNCTION DOC] Checks body reflow drops HTML template comments and everything from a '##
+    # Checklist' header onward while keeping the real problem statement.
     """Verbose commit bodies get the same `_reflow_pr_body` cleanup as PRs:
     drop HTML template comments, stop at checklist headers, collapse blanks."""
     commit = _make_commit(
@@ -258,6 +306,12 @@ def test_instruction_reflows_long_body_with_template_noise():
 
 
 def _stub_pipeline_for_build_task(test_cmds=None, language="python", source_kind=SourceKind.GITHUB):
+    # [FUNCTION DOC] HELPER: Builds a CommitRuntimePipeline via __new__ with only what _build_task
+    # needs: options with synthesize_with_llm=False (deterministic, no LLM), zero cost, a
+    # SimpleNamespace bootstrap (local image, not pushed, test_cmds default ['pytest -v'], given
+    # language), and a MagicMock input (repo o/r, GitHub URL, given source_kind, org 'default', llm
+    # None, platform linux/amd64). Inputs: test_cmds, language (default 'python'), source_kind
+    # (default GITHUB). Output: stub pipeline.
     """A pipeline instance with just enough scaffolding to call `_build_task`."""
     from types import SimpleNamespace
     from unittest.mock import MagicMock
@@ -286,6 +340,9 @@ def _stub_pipeline_for_build_task(test_cmds=None, language="python", source_kind
 
 
 def test_build_task_stamps_reward_calibration_and_difficulty():
+    # [FUNCTION DOC] Builds a task from a one-line patch plus one F2P/one P2P test and checks
+    # repo2env.reward_calibration counts (f2p 1, p2p 1, 1 source file, loc_changed >= 1), a valid
+    # difficulty bucket, and that HarborTask.difficulty equals that bucket.
     """Tasks now carry reward_calibration parity with pr_runtime — needed by
     the manifest enricher and the eval_grade flag."""
     pipe = _stub_pipeline_for_build_task()
@@ -334,6 +391,8 @@ def test_build_task_stamps_reward_calibration_and_difficulty():
     ],
 )
 def test_build_task_reference_host_matches_source(source_kind, expected_reference):
+    # [FUNCTION DOC] Parametrized over GITHUB/GITLAB/LOCAL: checks repo2env 'reference' is a
+    # github.com '/commit/' URL, a gitlab.com '/-/commit/' URL, or absent for local sources.
     """The 'reference' provenance URL must point at the commit's actual host,
     not always github.com: commit_runtime works on any source (docstring in
     sources.py), and a GitLab- or local-sourced task previously got a
@@ -365,6 +424,9 @@ def test_build_task_reference_host_matches_source(source_kind, expected_referenc
 
 
 def test_build_task_local_source_writes_a_loadable_task_toml(tmp_path):
+    # [FUNCTION DOC] Writes a LOCAL-source task with the real write_harbor_task into tmp_path and
+    # checks task.toml parses without a metadata.repo2env 'reference' key. Side effects: files
+    # under tmp_path.
     """A None reference would crash tomli_w.dumps (TOML has no null) inside
     write_harbor_task. Drive the real emitter, not just the dict, so a
     regression here fails loudly instead of only at push time."""
@@ -399,6 +461,8 @@ def test_build_task_local_source_writes_a_loadable_task_toml(tmp_path):
 
 
 def test_structural_filter_skips_ci_only():
+    # [FUNCTION DOC] Checks a source patch touching only .github/workflows yields 'ci_only_patch'
+    # when skip_ci_only=True.
     pipe = _pipeline_for_filter_tests(skip_ci_only=True)
     source = """\
 diff --git a/.github/workflows/test.yml b/.github/workflows/test.yml
@@ -411,6 +475,8 @@ diff --git a/.github/workflows/test.yml b/.github/workflows/test.yml
 
 
 def test_structural_filter_too_many_source_files():
+    # [FUNCTION DOC] Checks a 5-file source patch exceeds max_source_files_per_commit=2 ->
+    # 'too_many_source_files'.
     pipe = _pipeline_for_filter_tests(max_source_files_per_commit=2)
     source = "\n".join(
         f"diff --git a/src/file{i}.py b/src/file{i}.py\n@@ +1 @@\n+x = 1" for i in range(5)
@@ -420,6 +486,8 @@ def test_structural_filter_too_many_source_files():
 
 
 def test_structural_filter_no_new_test_funcs():
+    # [FUNCTION DOC] Checks a test patch that adds no new test functions yields 'no_new_test_funcs'
+    # when require_new_test_funcs=True.
     pipe = _pipeline_for_filter_tests(require_new_test_funcs=True)
     source = "diff --git a/src/foo.py b/src/foo.py\n@@ +1 @@\n+x = 1"
     # Test patch only adjusts comments — no new test funcs
@@ -428,6 +496,7 @@ def test_structural_filter_no_new_test_funcs():
 
 
 def test_structural_filter_passes_good_commit():
+    # [FUNCTION DOC] Checks a one-file source patch plus a new test function passes (None).
     pipe = _pipeline_for_filter_tests()
     source = "diff --git a/src/foo.py b/src/foo.py\n@@ +1 @@\n+x = 1"
     test_patch = "diff --git a/tests/test_x.py b/tests/test_x.py\n@@ +1 @@\n+def test_y(): pass\n"
@@ -438,10 +507,13 @@ def test_structural_filter_passes_good_commit():
 
 
 def test_commit_runtime_requires_bootstrap_attr():
+    # [FUNCTION DOC] Checks CommitRuntimePipeline.requires_bootstrap is True.
     assert CommitRuntimePipeline.requires_bootstrap is True
 
 
 def test_commit_runtime_rejects_missing_bootstrap():
+    # [FUNCTION DOC] Checks constructing CommitRuntimePipeline with bootstrap=None raises
+    # RuntimeError matching 'requires a BootstrapResult'.
     from repo2rlenv.spec.input import (
         GenerationInput,
         LLMSpec,

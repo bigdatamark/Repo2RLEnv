@@ -1,3 +1,7 @@
+# [MODULE DOC] Unit tests for the cve_patches pipeline: _build_instruction (hides CVE/GHSA ids and
+# fix pointers, keeps severity, CWE class and symptom), _strip_fix_leaks, _poc_user_prompt,
+# CVEPatchesPipeline._poc_test_patch (new-file test diff), the bootstrap contract and
+# CVEPatchesOptions defaults. OSV parsing is in test_osv.py. Side effects: none.
 """cve_patches — pipeline contract + helper unit tests.
 
 OSV client tests live in test_osv.py. Validation harness is exercised
@@ -21,6 +25,9 @@ def _make_vuln(
     severity: str = "HIGH",
     cwe: list[str] | None = None,
 ) -> OSVVuln:
+    # [FUNCTION DOC] HELPER: Builds an OSVVuln with id GHSA-abc-def-ghi, the given CVE as sole
+    # alias (default CVE-2024-1234), fixed summary/details/published, severity_text (default HIGH)
+    # and cwe_ids (default ['CWE-22'] when None or empty). Output: OSVVuln.
     return OSVVuln(
         id="GHSA-abc-def-ghi",
         aliases=[cve],
@@ -35,6 +42,8 @@ def _make_vuln(
 def test_instruction_omits_vuln_id_but_keeps_class_and_symptom():
     # The CVE/GHSA id is a direct lookup key to the published patch — it must
     # NOT appear in the visible prompt (it lives in task.toml metadata).
+    # [FUNCTION DOC] Checks the instruction omits the CVE id but includes '**Severity:** HIGH', the
+    # CWE id and the details text.
     out = _build_instruction(_make_vuln())
     assert "CVE-2024-1234" not in out
     assert "**Severity:** HIGH" in out
@@ -43,6 +52,8 @@ def test_instruction_omits_vuln_id_but_keeps_class_and_symptom():
 
 
 def test_instruction_falls_back_when_no_cve():
+    # [FUNCTION DOC] Checks that without a CVE alias the GHSA id is also hidden and a generic
+    # 'Security advisory' title is used.
     v = OSVVuln(id="GHSA-only", aliases=[], summary="x", details="y", severity_text="LOW")
     out = _build_instruction(v)
     assert "GHSA-only" not in out  # id scrubbed; generic title used instead
@@ -50,6 +61,7 @@ def test_instruction_falls_back_when_no_cve():
 
 
 def test_instruction_handles_empty_details():
+    # [FUNCTION DOC] Checks empty details produce a 'no detailed description' placeholder.
     v = OSVVuln(id="GHSA-x", summary="brief", severity_text="MEDIUM")
     out = _build_instruction(v)
     assert "no detailed description" in out
@@ -61,10 +73,13 @@ def test_instruction_handles_empty_details():
 
 
 def test_cve_patches_requires_bootstrap_attr():
+    # [FUNCTION DOC] Checks CVEPatchesPipeline.requires_bootstrap is True.
     assert CVEPatchesPipeline.requires_bootstrap is True
 
 
 def test_cve_patches_rejects_missing_bootstrap():
+    # [FUNCTION DOC] Checks constructing CVEPatchesPipeline with bootstrap=None raises RuntimeError
+    # matching 'requires a BootstrapResult'.
     from repo2rlenv.spec.input import (
         GenerationInput,
         LLMSpec,
@@ -85,6 +100,9 @@ def test_cve_patches_rejects_missing_bootstrap():
 
 
 def test_cve_patches_options_defaults():
+    # [FUNCTION DOC] Checks CVEPatchesOptions defaults: limit 50, min_severity 'low',
+    # synthesize_poc_test and require_fail_to_pass True, max_pass_to_pass 50,
+    # osv_ecosystem/osv_package None.
     opts = CVEPatchesOptions()
     assert opts.limit == 50
     assert opts.min_severity == "low"
@@ -97,6 +115,8 @@ def test_cve_patches_options_defaults():
 
 
 def test_poc_test_patch_is_new_file_git_diff():
+    # [FUNCTION DOC] Checks _poc_test_patch wraps PoC code as a new-file diff at
+    # tests/test_cve_<slugified id>.py with '+'-prefixed lines.
     """Synthesized PoC code is wrapped as a git-appliable new-file test diff."""
     from repo2rlenv.pipelines.cve_patches import CVEPatchesPipeline
 
@@ -108,6 +128,9 @@ def test_poc_test_patch_is_new_file_git_diff():
 
 
 def test_instruction_strips_fix_leaks():
+    # [FUNCTION DOC] Feeds an advisory whose details contain a PR URL, commit SHA, CVE/GHSA ids,
+    # fixed version and Workarounds/References/upgrade text; checks none survive while the symptom
+    # and CWE class remain.
     """The visible instruction must not leak fix-pointers (PR/commit/CVE id/version)."""
     v = OSVVuln(
         id="GHSA-248m-82v9-q6g6",
@@ -144,6 +167,7 @@ def test_instruction_strips_fix_leaks():
 
 
 def test_strip_fix_leaks_keeps_plain_description():
+    # [FUNCTION DOC] Checks _strip_fix_leaks returns a leak-free description unchanged.
     from repo2rlenv.pipelines.cve_patches import _strip_fix_leaks
 
     txt = "Improper validation lets an attacker bypass the auth check via a crafted header."
@@ -151,6 +175,8 @@ def test_strip_fix_leaks_keeps_plain_description():
 
 
 def test_poc_user_prompt_includes_cve_and_diff():
+    # [FUNCTION DOC] Checks cve_id derives from aliases and _poc_user_prompt includes the CVE id,
+    # summary content and the fix diff.
     from repo2rlenv.osv import OSVVuln
     from repo2rlenv.pipelines.cve_patches import _poc_user_prompt
 

@@ -1,3 +1,10 @@
+# [MODULE DOC] Tests that pr_diff's emitted environment Dockerfile clones from the mined repository's real host
+# (GitHub or GitLab, normalized to an https .git URL with embedded credentials removed) and uses the
+# host-appropriate build-time token arg (GITHUB_TOKEN with x-access-token, GITLAB_TOKEN with
+# oauth2),
+# never baking ambient tokens, and resetting origin to the clean URL. The clone RUN body is executed
+# with a fake git that records argv. Side effects: files and subprocesses under tmp_path; env vars
+# via monkeypatch. No network or Docker.
 """The emitted clone must use the mined repository's host and build-time token."""
 
 from __future__ import annotations
@@ -39,6 +46,12 @@ from repo2rlenv.spec.options import PRDiffOptions
     ],
 )
 def test_emitted_task_preserves_clone_host_and_path(tmp_path: Path, source, expected):
+    # [FUNCTION DOC] Parametrized over GitHub/GitLab source spellings (owner/name, https, ssh, embedded creds,
+    # http, subgroups, trailing slash): builds a pr_diff task via PRDiffPipeline._build_task, writes
+    # it with write_harbor_task into tmp_path, and checks the Dockerfile clones and sets origin to
+    # the expected normalized URL, resets to base_sha, contains no embedded secret, and for GitLab
+    # declares GITLAB_TOKEN with no GitHub token/host references. Side effects: files under
+    # tmp_path.
     config = GenerationInput(
         repo=RepoSpec(url=source, access="public"),
         pipeline=PipelineSpec(name="pr_diff"),
@@ -83,6 +96,15 @@ def test_clone_shell_uses_correct_token_and_scrubs_origin(
     tmp_path: Path, monkeypatch, host, token_arg, username, other_arg, token
 ):
     # Ambient credentials must not be embedded in the generated Dockerfile.
+    # [FUNCTION DOC] Parametrized over host (github/gitlab) and token ('', plain, shell-metacharacter string): sets
+    # an ambient generation token via monkeypatch and checks it is not baked and only the host's ARG
+    # is declared. Then extracts the 'RUN if ...' clone body (up to WORKDIR), runs it with /bin/sh
+    # using a fake git on PATH (a shell shim calling a Python recorder that appends argv as JSON
+    # lines), with the token env set and a wrong-provider token in the other var. Asserts exit 0 and
+    # exactly two git calls: clone with an authed URL (username:token@host) when a token is set or
+    # the clean URL otherwise, then remote set-url origin to the clean URL. Side effects: writes
+    # files, chmods, runs a subprocess (10s timeout). Not skipped on Windows despite requiring
+    # /bin/sh.
     monkeypatch.setenv(token_arg, "generation-token-must-not-be-emitted")
     repo_url = f"https://{host}/group/repo.git"
     dockerfile = build_pr_diff_environment_dockerfile(

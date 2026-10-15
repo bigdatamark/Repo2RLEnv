@@ -1,3 +1,9 @@
+# [MODULE DOC] Contract tests over the pipeline registry (repo2rlenv.pipelines.PIPELINES): every
+# registered class declares a matching `name`, a PipelineName enum value, an OPTIONS_REGISTRY
+# entry, a boolean requires_bootstrap and a boolean experimental flag (only
+# pr_diff/pr_runtime/commit_runtime stable); Python-only pipelines restrict supported_languages to
+# {PYTHON} and language-agnostic ones leave it None; PipelineResult has its documented fields;
+# Pipeline/PipelineResult are exported. Must be run after touching pipelines/. Side effects: none.
 """Every registered pipeline must satisfy the Pipeline Protocol."""
 
 from __future__ import annotations
@@ -8,6 +14,8 @@ from repo2rlenv.spec.options import OPTIONS_REGISTRY
 
 
 def test_pipelines_implement_protocol():
+    # [FUNCTION DOC] Asserts the registry is non-empty and each entry is a class with a `name`
+    # attribute equal to its registry key.
     """Each PIPELINES entry duck-conforms to Pipeline."""
     assert PIPELINES, "PIPELINES registry is empty"
     for name, cls in PIPELINES.items():
@@ -21,6 +29,8 @@ def test_pipelines_implement_protocol():
 
 
 def test_pipeline_names_are_in_enum():
+    # [FUNCTION DOC] Asserts every registry key converts to PipelineName (ValueError would fail the
+    # test).
     """Every registered pipeline name is a valid PipelineName enum value."""
     for name in PIPELINES:
         # Will raise ValueError if not in the enum
@@ -28,12 +38,15 @@ def test_pipeline_names_are_in_enum():
 
 
 def test_options_registry_aligns_with_pipelines():
+    # [FUNCTION DOC] Asserts every registered pipeline has an Options class in OPTIONS_REGISTRY.
     """Every registered pipeline has a corresponding Options class."""
     for name in PIPELINES:
         assert name in OPTIONS_REGISTRY, f"pipeline {name!r} has no Options class registered"
 
 
 def test_pipelines_declare_requires_bootstrap():
+    # [FUNCTION DOC] Asserts every pipeline class has a bool requires_bootstrap attribute
+    # (cmd_generate dispatches on it).
     """Each pipeline must declare requires_bootstrap (True/False) — cmd_generate dispatches on it."""
     for name, cls in PIPELINES.items():
         assert hasattr(cls, "requires_bootstrap"), (
@@ -43,6 +56,8 @@ def test_pipelines_declare_requires_bootstrap():
 
 
 def test_pipeline_stability_classification():
+    # [FUNCTION DOC] Asserts each class's `experimental` (default False if missing) is a bool and
+    # is True exactly for pipelines outside {pr_diff, pr_runtime, commit_runtime}.
     """pr_diff, pr_runtime, commit_runtime are stable; the rest are experimental.
 
     cmd_generate warns before running any pipeline whose `experimental` is True.
@@ -58,6 +73,8 @@ def test_pipeline_stability_classification():
 
 
 def test_python_only_pipelines_declare_supported_languages():
+    # [FUNCTION DOC] Asserts code_instruct and equivalence_tests set supported_languages to
+    # frozenset({LanguageHint.PYTHON}).
     """The Python-only pipelines must restrict supported_languages to {PYTHON}.
 
     Anything else risks the silent-late-failure mode the pre-flight check
@@ -79,6 +96,8 @@ def test_python_only_pipelines_declare_supported_languages():
 
 
 def test_language_agnostic_pipelines_have_no_restriction():
+    # [FUNCTION DOC] Asserts pr_diff, pr_runtime, commit_runtime and cve_patches have
+    # supported_languages None (absent or None).
     """Lite + language-agnostic full pipelines must NOT restrict languages."""
     agnostic = {"pr_diff", "pr_runtime", "commit_runtime", "cve_patches"}
     for name in agnostic:
@@ -90,6 +109,8 @@ def test_language_agnostic_pipelines_have_no_restriction():
 
 
 def test_pipeline_result_shape():
+    # [FUNCTION DOC] Constructs a PipelineResult and asserts fields candidates, emitted, skipped,
+    # out_dir and skip_reasons exist.
     """PipelineResult has the documented fields."""
     r = PipelineResult(
         candidates=0,
@@ -104,6 +125,7 @@ def test_pipeline_result_shape():
 
 
 def test_protocol_export():
+    # [FUNCTION DOC] Asserts the repo2rlenv.pipelines package exports Pipeline and PipelineResult.
     """Pipeline + PipelineResult are public exports of the package."""
     from repo2rlenv import pipelines
 

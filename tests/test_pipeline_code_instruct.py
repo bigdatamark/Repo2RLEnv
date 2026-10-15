@@ -1,3 +1,9 @@
+# [MODULE DOC] Unit tests for the code_instruct pipeline's pure-Python pieces: make_solution_diff
+# (gold patch contains only task_module.py), build_code_instruct_dockerfile shape, the shared
+# all_tests_passed log check, the CodeInstructPipeline contract (requires_bootstrap, missing-
+# bootstrap error, option defaults) and _build_task's provenance 'reference' URL per source kind.
+# Sampler/parser helpers are covered elsewhere (test_oss_instruct_helpers.py). Side effects: one
+# test writes a Harbor task directory under pytest's tmp_path; no network, Docker or LLM.
 """code_instruct — diff builder, dockerfile shape, pipeline contract.
 
 Sampler / parser / decontam are tested in test_oss_instruct_helpers.py.
@@ -24,12 +30,16 @@ from repo2rlenv.spec.options import CodeInstructOptions
 
 
 def test_solution_diff_has_single_header():
+    # [FUNCTION DOC] Checks make_solution_diff emits exactly one 'diff --git' header, for
+    # task_module.py.
     diff = make_solution_diff(task_module_code="def add(x, y):\n    return x + y\n")
     assert diff.count("diff --git ") == 1
     assert "diff --git a/task_module.py b/task_module.py" in diff
 
 
 def test_solution_diff_excludes_test_file():
+    # [FUNCTION DOC] Regression for issue #54: the gold patch must not include the grading test
+    # file; checks there is exactly one new-file section and no 'test_r2e' path.
     """Regression for #54: the grading test must NOT be packed into the gold
     patch — it ships under tests/ so non-oracle agents can reach it."""
     diff = make_solution_diff(task_module_code="x = 1\n")
@@ -39,11 +49,15 @@ def test_solution_diff_excludes_test_file():
 
 
 def test_solution_diff_hunk_line_counts():
+    # [FUNCTION DOC] Checks the new-file hunk header counts lines correctly ('@@ -0,0 +1,3 @@' for
+    # 3 lines).
     diff = make_solution_diff(task_module_code="line1\nline2\nline3\n")
     assert "@@ -0,0 +1,3 @@" in diff
 
 
 def test_solution_diff_handles_missing_trailing_newline():
+    # [FUNCTION DOC] Checks the '\ No newline at end of file' marker is emitted when the code lacks
+    # a trailing newline.
     """If a file doesn't end with \\n, we emit the `\\ No newline at end of file` line."""
     diff = make_solution_diff(task_module_code="x = 1")  # no trailing newline
     assert "\\ No newline at end of file" in diff
@@ -55,6 +69,8 @@ def test_solution_diff_handles_missing_trailing_newline():
 
 
 def test_dockerfile_minimal_shape():
+    # [FUNCTION DOC] Checks build_code_instruct_dockerfile uses the given image in FROM, applies no
+    # patch at build time ('git apply' absent) and installs git defensively via apt-get.
     df = build_code_instruct_dockerfile("local/img:abc")
     assert df.startswith("# Auto-generated") or "FROM local/img:abc" in df
     assert "FROM local/img:abc" in df
@@ -70,21 +86,25 @@ def test_dockerfile_minimal_shape():
 
 
 def test_all_tests_passed_detects_passed_summary():
+    # [FUNCTION DOC] Checks all_tests_passed returns True for a pytest summary with only passes.
     log = "==== 3 passed in 0.12s ===="
     assert _all_tests_passed(log)
 
 
 def test_all_tests_passed_rejects_failed():
+    # [FUNCTION DOC] Checks all_tests_passed returns False when the summary reports any failure.
     log = "==== 1 failed, 2 passed in 0.12s ===="
     assert not _all_tests_passed(log)
 
 
 def test_all_tests_passed_rejects_no_collected():
+    # [FUNCTION DOC] Checks all_tests_passed returns False when zero tests were collected.
     log = "ERROR: collected 0 items"
     assert not _all_tests_passed(log)
 
 
 def test_all_tests_passed_rejects_collection_error():
+    # [FUNCTION DOC] Checks all_tests_passed returns False on an import/collection error log.
     log = "ImportError: No module named 'task_module'\nERRORS\ncollected 0 items / 1 error\n"
     assert not _all_tests_passed(log)
 
@@ -95,10 +115,13 @@ def test_all_tests_passed_rejects_collection_error():
 
 
 def test_code_instruct_requires_bootstrap_attr():
+    # [FUNCTION DOC] Checks CodeInstructPipeline.requires_bootstrap is True.
     assert CodeInstructPipeline.requires_bootstrap is True
 
 
 def test_code_instruct_rejects_missing_bootstrap():
+    # [FUNCTION DOC] Builds a GenerationInput for code_instruct and checks constructing the
+    # pipeline with bootstrap=None raises RuntimeError mentioning 'requires a BootstrapResult'.
     from repo2rlenv.spec.input import (
         GenerationInput,
         LLMSpec,
@@ -119,6 +142,8 @@ def test_code_instruct_rejects_missing_bootstrap():
 
 
 def test_code_instruct_options_defaults():
+    # [FUNCTION DOC] Checks CodeInstructOptions defaults: limit 50, seed_min_loc 30, seed_max_loc
+    # 200, and both oracle fail/pass requirements True.
     opts = CodeInstructOptions()
     assert opts.limit == 50
     assert opts.seed_min_loc == 30
@@ -133,6 +158,12 @@ def test_code_instruct_options_defaults():
 
 
 def _stub_pipeline_for_build_task(source_kind=SourceKind.GITHUB):
+    # [FUNCTION DOC] HELPER: Builds a CodeInstructPipeline via __new__ (skipping __init__) with
+    # only the attributes _build_task reads: zero LLM cost, a SimpleNamespace bootstrap (local
+    # image tag/digest, not pushed, python language), and a MagicMock input with repo owner/name
+    # ('o','r'), ref 'main', access 'auto', the given source_kind, org 'default' and an LLM
+    # qualified name. Input: source_kind (SourceKind, default GITHUB). Output: the stub pipeline.
+    # Side effects: none.
     """A pipeline instance with just enough scaffolding to call `_build_task`."""
     from types import SimpleNamespace
     from unittest.mock import MagicMock
@@ -157,6 +188,8 @@ def _stub_pipeline_for_build_task(source_kind=SourceKind.GITHUB):
 
 
 def _seed_and_parsed():
+    # [FUNCTION DOC] HELPER: Returns a (Seed, ParsedTask) pair: a seed at src/calc.py lines 10-20
+    # with an add function and a parsed task with problem text, a test and a solution.
     seed = Seed(
         relative_path="src/calc.py",
         start_line=10,
@@ -180,6 +213,9 @@ def _seed_and_parsed():
     ],
 )
 def test_build_task_reference_host_matches_source(source_kind, expected_reference):
+    # [FUNCTION DOC] Parametrized over GITHUB/GITLAB/LOCAL: checks _build_task's repo2env
+    # 'reference' is a GitHub blob URL, a GitLab '/-/blob/' URL with 'L10-20' range, or absent
+    # entirely for local sources (TOML cannot hold null).
     """The 'reference' provenance URL must point at the seed's actual host,
     not always github.com: code_instruct sets no required_capabilities and
     runs on any source (sources.py), and a GitLab- or local-sourced task
@@ -195,6 +231,9 @@ def test_build_task_reference_host_matches_source(source_kind, expected_referenc
 
 
 def test_build_task_local_source_writes_a_loadable_task_toml(tmp_path):
+    # [FUNCTION DOC] Drives the real write_harbor_task emitter with a LOCAL-source task into
+    # tmp_path and checks the resulting task.toml parses and has no 'reference' in
+    # metadata.repo2env. Side effects: writes files under tmp_path.
     """A None reference would crash tomli_w.dumps (TOML has no null) inside
     write_harbor_task. Drive the real emitter, not just the dict, so a
     regression here fails loudly instead of only at push time."""

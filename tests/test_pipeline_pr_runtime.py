@@ -1,3 +1,13 @@
+# [MODULE DOC] Unit tests for the pr_runtime pipeline's pure-Python pieces (no Docker):
+# split_patch_and_test_patch
+# and _path_is_test (SWE-bench-style source/test split), _files_in_patch, build_eval_script (log
+# capture, resets, && joining, exit-code capture, reward files, binary vs graded mode, language PATH
+# preludes, fail-closed test_patch apply), _runtime_aux_files, _reflow_pr_body, _difficulty_bucket,
+# _strip_info_leak, _linked_issue_number, _is_non_bug_pr, _build_instruction fallback,
+# build_environment_dockerfile reset ordering, _count_new_test_funcs,
+# normalize_test_cmds_for_runtime,
+# targeted_test_cmds_for_pr and the bootstrap contract. Module constant _SAMPLE_DIFF is a two-file
+# diff (src/foo.py source + tests/test_foo.py test). Side effects: none.
 """Unit tests for the pr_runtime pipeline.
 
 We don't actually drive Docker here — that's covered by manual end-to-end
@@ -57,6 +67,8 @@ index 111..222 100644
 
 
 def test_split_patch_and_test_patch_separates_by_path():
+    # [FUNCTION DOC] Checks _SAMPLE_DIFF splits into a source patch with only src/foo.py and a test patch with only
+    # tests/test_foo.py.
     patch, test_patch = split_patch_and_test_patch(_SAMPLE_DIFF)
     # Source hunk goes into patch
     assert "src/foo.py" in patch
@@ -67,11 +79,13 @@ def test_split_patch_and_test_patch_separates_by_path():
 
 
 def test_split_patch_handles_empty_diff():
+    # [FUNCTION DOC] Checks an empty diff yields two empty strings.
     patch, test_patch = split_patch_and_test_patch("")
     assert patch == "" and test_patch == ""
 
 
 def test_split_patch_handles_no_test_files():
+    # [FUNCTION DOC] Checks a source-only diff yields that patch and an empty test patch.
     diff = """\
 diff --git a/lib/util.py b/lib/util.py
 @@ -1 +1 @@
@@ -84,6 +98,8 @@ diff --git a/lib/util.py b/lib/util.py
 
 
 def test_split_patch_renames_to_test_dir_count_as_test():
+    # [FUNCTION DOC] Checks a rename into tests/ is classified as test patch (either side being a test path
+    # counts).
     """A file moving INTO tests/ should be in test_patch."""
     diff = """\
 diff --git a/src/foo.py b/tests/test_foo.py
@@ -99,6 +115,9 @@ diff --git a/src/foo.py b/tests/test_foo.py
 
 def test_path_is_test_heuristic():
     # True positives: files inside test directories
+    # [FUNCTION DOC] Checks _path_is_test positives (tests/, e2e/, testing/ dirs; *_test.py, *_test.go, *.spec.ts)
+    # and negatives (plain source, empty, docs/testing.md, docs/test_strategy.md,
+    # examples/test_app.py, src/click/testing.py).
     assert _path_is_test("tests/test_foo.py")
     assert _path_is_test("src/e2e/something.py")
     assert _path_is_test("module/testing/util.py")
@@ -120,6 +139,7 @@ def test_path_is_test_heuristic():
 
 
 def test_files_in_patch_returns_unique_paths():
+    # [FUNCTION DOC] Checks _files_in_patch returns the ordered unique paths of _SAMPLE_DIFF.
     paths = _files_in_patch(_SAMPLE_DIFF)
     assert paths == ["src/foo.py", "tests/test_foo.py"]
 
@@ -128,6 +148,8 @@ def test_files_in_patch_returns_unique_paths():
 
 
 def test_build_eval_script_captures_log_and_test_cmds():
+    # [FUNCTION DOC] Checks the eval script writes /logs/verifier/test_output.log, contains the test command,
+    # resets with git checkout at least twice, and wires /workspace and safe.directory.
     script = build_eval_script(
         base_commit="a" * 40,
         test_patch=_SAMPLE_DIFF,  # any non-empty diff works for the heredoc test
@@ -144,6 +166,8 @@ def test_build_eval_script_captures_log_and_test_cmds():
 
 
 def test_build_eval_script_tolerates_no_test_files():
+    # [FUNCTION DOC] Checks an empty test_patch produces a 'no test files to reset' message rather than file
+    # references.
     """If test_patch is empty, the reset step shouldn't reference any files."""
     script = build_eval_script(
         base_commit="b" * 40,
@@ -155,6 +179,7 @@ def test_build_eval_script_tolerates_no_test_files():
 
 
 def test_build_eval_script_joins_multiple_test_cmds_with_and():
+    # [FUNCTION DOC] Checks multiple test_cmds are joined with ' && ' in one shell invocation.
     """Bootstrap-recorded test_cmds may have multiple steps; they share one shell."""
     script = build_eval_script(
         base_commit="c" * 40,
@@ -165,6 +190,8 @@ def test_build_eval_script_joins_multiple_test_cmds_with_and():
 
 
 def test_build_eval_script_captures_exit_code_before_cleanup():
+    # [FUNCTION DOC] Checks TEST_EXIT_CODE=$? is captured after the test command and before the reward write, and
+    # the script exits 0.
     """The reward is the verdict (written to reward.txt), so the script exits 0.
 
     But the test exit code must be captured AFTER the test block and BEFORE
@@ -185,6 +212,7 @@ def test_build_eval_script_captures_exit_code_before_cleanup():
 
 
 def test_build_eval_script_writes_reward_file():
+    # [FUNCTION DOC] Checks the script creates /logs/verifier and writes reward.txt with 1.0/0.0 values.
     """Harbor verifier reads /logs/verifier/reward.txt — exit code alone isn't enough."""
     script = build_eval_script(
         base_commit="a" * 40,
@@ -198,6 +226,7 @@ def test_build_eval_script_writes_reward_file():
 
 
 def test_build_eval_script_binary_fallback_when_no_f2p():
+    # [FUNCTION DOC] Checks fail_to_pass=None yields a binary exit-code reward with no verifier.py reference.
     """No F2P oracle (e.g. --skip-validation) → binary exit-code reward, no verifier."""
     script = build_eval_script(
         base_commit="a" * 40,
@@ -210,6 +239,8 @@ def test_build_eval_script_binary_fallback_when_no_f2p():
 
 
 def test_build_eval_script_graded_reads_artifacts_from_tests_dir():
+    # [FUNCTION DOC] Checks the graded script (F2P given) runs verifier.py with f2p.json/p2p.json from $SCRIPT_DIR,
+    # contains no base64, and keeps a reward.txt fallback.
     """With F2P provided, test.sh is a thin orchestrator that reads the plain
     verifier.py + f2p.json + p2p.json artifacts from the mounted tests dir
     ($SCRIPT_DIR) — NO base64 blobs."""
@@ -229,6 +260,8 @@ def test_build_eval_script_graded_reads_artifacts_from_tests_dir():
 
 
 def test_runtime_aux_files_shape():
+    # [FUNCTION DOC] Checks _runtime_aux_files returns tests/verifier.py, tests/f2p.json and tests/p2p.json with
+    # the JSON lists round-tripping and real verifier source (has a grade function).
     """The graded path ships verifier.py + f2p.json + p2p.json as task files."""
     from repo2rlenv.pipelines.pr_runtime import _runtime_aux_files
 
@@ -242,6 +275,7 @@ def test_runtime_aux_files_shape():
 
 
 def test_build_eval_script_no_path_prelude_for_python():
+    # [FUNCTION DOC] Checks language='python' adds no Go/Cargo PATH prelude.
     """Python is always on PATH in standard images; no prelude needed."""
     script = build_eval_script(
         base_commit="a" * 40,
@@ -254,6 +288,7 @@ def test_build_eval_script_no_path_prelude_for_python():
 
 
 def test_build_eval_script_path_prelude_for_go():
+    # [FUNCTION DOC] Checks language='go' exports /usr/local/go/bin onto PATH before the go test command.
     """Go binaries typically install to /usr/local/go/bin — must be on PATH."""
     script = build_eval_script(
         base_commit="a" * 40,
@@ -269,6 +304,7 @@ def test_build_eval_script_path_prelude_for_go():
 
 
 def test_build_eval_script_path_prelude_for_rust():
+    # [FUNCTION DOC] Checks language='rust' adds .cargo/bin to PATH.
     script = build_eval_script(
         base_commit="a" * 40,
         test_patch="",
@@ -282,6 +318,8 @@ def test_build_eval_script_path_prelude_for_rust():
 
 
 def test_reflow_drops_checklist_and_html_comments():
+    # [FUNCTION DOC] Checks _reflow_pr_body drops HTML comments and the Checklist section, keeping the problem
+    # text.
     body = (
         "This fixes a real bug in the parser.\n\n"
         "<!-- please fill the template -->\n\n"
@@ -297,6 +335,8 @@ def test_reflow_drops_checklist_and_html_comments():
 
 
 def test_reflow_collapses_blank_lines_and_caps_length():
+    # [FUNCTION DOC] Checks blank-line runs collapse and output is capped to about 4100 chars including truncation
+    # marker.
     body = "Problem.\n\n\n\n\nMore." + ("x" * 5000)
     out = _reflow_pr_body(body)
     assert "\n\n\n" not in out
@@ -304,6 +344,7 @@ def test_reflow_collapses_blank_lines_and_caps_length():
 
 
 def test_difficulty_bucket():
+    # [FUNCTION DOC] Checks _difficulty_bucket(files, loc) maps to trivial/small/medium/large on sample inputs.
     assert _difficulty_bucket(1, 3) == "trivial"
     assert _difficulty_bucket(2, 15) == "small"
     assert _difficulty_bucket(1, 50) == "medium"
@@ -314,6 +355,7 @@ def test_difficulty_bucket():
 
 
 def test_strip_info_leak_removes_shas_and_refs():
+    # [FUNCTION DOC] Checks short SHAs, PR URLs, 'fixes #N' and markdown issue links are removed.
     text = (
         "This PR cherry-picks c3535905 from main.\n"
         "See https://github.com/pallets/click/pull/3504 and fixes #3458.\n"
@@ -327,11 +369,13 @@ def test_strip_info_leak_removes_shas_and_refs():
 
 
 def test_strip_info_leak_keeps_real_prose():
+    # [FUNCTION DOC] Checks plain prose is returned unchanged.
     text = "The parser crashes on empty input because the index is off by one."
     assert _strip_info_leak(text) == text
 
 
 def test_reflow_drops_tests_added_section():
+    # [FUNCTION DOC] Checks a 'Tests added / updated' section naming grading tests is removed.
     """A 'Tests added/updated' block names the grading tests — must be cut."""
     body = (
         "The completion output isn't escaped for fish.\n\n"
@@ -344,6 +388,8 @@ def test_reflow_drops_tests_added_section():
 
 
 def test_linked_issue_number():
+    # [FUNCTION DOC] Checks _linked_issue_number returns the first closing-keyword issue number (bare or markdown-
+    # link form) or None.
     assert _linked_issue_number("blah\nFixes #3458 thanks") == 3458
     assert _linked_issue_number("Closes #12, #13") == 12
     assert _linked_issue_number("no refs here") is None
@@ -352,6 +398,8 @@ def test_linked_issue_number():
 
 
 def test_is_non_bug_pr():
+    # [FUNCTION DOC] Checks backport, version bump, revert and cherry-pick titles are flagged non-bug, while a real
+    # fix is not.
     assert _is_non_bug_pr("Backport #3504 from main to stable")
     assert _is_non_bug_pr("Bump version to 8.4.2")
     assert _is_non_bug_pr('Revert "fix the thing"')
@@ -360,6 +408,7 @@ def test_is_non_bug_pr():
 
 
 def test_is_non_bug_pr_catches_merge_forward():
+    # [FUNCTION DOC] Checks merge-forward/sync titles are flagged, but a fix that mentions 'merge conflict' is not.
     """Merge-forward / branch-sync PRs are not bug fixes (audit P1)."""
     assert _is_non_bug_pr("Merge stable into main")
     assert _is_non_bug_pr("Merge Stable into master")
@@ -371,6 +420,8 @@ def test_is_non_bug_pr_catches_merge_forward():
 
 
 def test_build_eval_script_fails_closed_on_patch_apply():
+    # [FUNCTION DOC] Checks the graded script records R2E_APPLY_RC and a test_patch_apply_failed flag in reward-
+    # details.json (never reward.json) before running tests.
     """If the hidden test_patch can't apply, score 0 + flag — never run
     against stale/native tests (audit P1)."""
     script = build_eval_script(
@@ -387,6 +438,8 @@ def test_build_eval_script_fails_closed_on_patch_apply():
 
 
 def test_build_instruction_falls_back_to_pr_when_no_issue():
+    # [FUNCTION DOC] Checks that without owner/name (no issue fetch) the instruction uses the PR title/body with
+    # SHA leaks stripped.
     """No linked issue + no owner/name → use the PR body, leak-stripped."""
     from repo2rlenv.github import PullRequestSummary
 
@@ -412,6 +465,8 @@ def test_build_instruction_falls_back_to_pr_when_no_issue():
 
 
 def test_environment_dockerfile_resets_to_base_commit():
+    # [FUNCTION DOC] Checks the env Dockerfile is FROM the bootstrap image, sets WORKDIR /workspace, fetches, then
+    # hard-resets to the exact base commit, in that order.
     """P1 fix: image must be at PR base_commit, not bootstrap HEAD.
 
     Without this, the model writes its patch against base_commit's line
@@ -440,6 +495,7 @@ def test_environment_dockerfile_resets_to_base_commit():
 
 
 def test_count_new_test_funcs_python():
+    # [FUNCTION DOC] Checks added Python test defs (incl. indented methods) and Test classes are counted (4).
     """Counts +def test_* and +class .*Test in unified diffs."""
     diff = """\
 +def test_one():
@@ -456,6 +512,7 @@ def test_count_new_test_funcs_python():
 
 
 def test_count_new_test_funcs_ignores_modifications():
+    # [FUNCTION DOC] Checks only '+'-prefixed new test defs count, not context/removed lines or comments (1).
     """Lines without leading + (e.g. context lines, removals) don't count."""
     diff = """\
  def test_existing():
@@ -469,11 +526,13 @@ def test_count_new_test_funcs_ignores_modifications():
 
 
 def test_count_new_test_funcs_handles_empty():
+    # [FUNCTION DOC] Checks empty or whitespace-only diffs count 0.
     assert _count_new_test_funcs("") == 0
     assert _count_new_test_funcs("   \n  ") == 0
 
 
 def test_count_new_test_funcs_go_and_js():
+    # [FUNCTION DOC] Checks Go 'func TestX(' and JS it()/test()/describe() additions are counted (4).
     """Cross-language: Go's `func TestX(` and JS's `it(`/`test(`/`describe(`."""
     diff = """\
 +func TestParseConfig(t *testing.T) {
@@ -490,6 +549,8 @@ def test_count_new_test_funcs_go_and_js():
 
 
 def test_normalize_strips_collect_only():
+    # [FUNCTION DOC] Checks --collect-only is removed and -v appended (tolerating a double space variant for the
+    # path case).
     """Bootstrap often records `--collect-only` for the fast smoke gate; we need
     actual test execution at validation time."""
     assert normalize_test_cmds_for_runtime(["pytest --collect-only"]) == ["pytest -v"]
@@ -499,15 +560,18 @@ def test_normalize_strips_collect_only():
 
 
 def test_normalize_strips_short_co():
+    # [FUNCTION DOC] Checks the short '--co' flag is removed and -v added.
     assert normalize_test_cmds_for_runtime(["pytest --co"]) == ["pytest -v"]
 
 
 def test_normalize_preserves_existing_verbose():
+    # [FUNCTION DOC] Checks commands already containing -v/-vv are unchanged.
     assert normalize_test_cmds_for_runtime(["pytest -v tests/"]) == ["pytest -v tests/"]
     assert normalize_test_cmds_for_runtime(["pytest -vv"]) == ["pytest -vv"]
 
 
 def test_normalize_go_test_gets_v_flag():
+    # [FUNCTION DOC] Checks 'go test' gains -v unless already verbose.
     """`go test` without -v doesn't print --- PASS lines — parser needs them."""
     assert normalize_test_cmds_for_runtime(["go test ./..."]) == ["go test -v ./..."]
     # Already verbose ⇒ no change
@@ -515,6 +579,7 @@ def test_normalize_go_test_gets_v_flag():
 
 
 def test_normalize_cargo_strips_quiet():
+    # [FUNCTION DOC] Checks cargo test -q/--quiet are stripped and plain cargo test unchanged.
     """`cargo test -q` swallows per-test lines; strip it to recover parseable output."""
     assert normalize_test_cmds_for_runtime(["cargo test -q"]) == ["cargo test"]
     assert normalize_test_cmds_for_runtime(["cargo test --quiet"]) == ["cargo test"]
@@ -523,6 +588,7 @@ def test_normalize_cargo_strips_quiet():
 
 
 def test_normalize_jest_adds_verbose_and_strips_silent():
+    # [FUNCTION DOC] Checks jest gains --verbose and loses --silent.
     assert normalize_test_cmds_for_runtime(["jest"]) == ["jest --verbose"]
     assert normalize_test_cmds_for_runtime(["jest --silent"]) == ["jest --verbose"]
     # Already verbose ⇒ keep
@@ -531,6 +597,8 @@ def test_normalize_jest_adds_verbose_and_strips_silent():
 
 def test_normalize_vitest_uses_verbose_reporter():
     # `vitest --verbose` exits with `CACError: Unknown option`.
+    # [FUNCTION DOC] Checks vitest uses --reporter=verbose (dropping --verbose/--silent), keeps an explicit
+    # reporter, and mocha gains --verbose.
     assert normalize_test_cmds_for_runtime(["npx vitest run"]) == [
         "npx vitest run --reporter=verbose"
     ]
@@ -545,6 +613,8 @@ def test_normalize_vitest_uses_verbose_reporter():
 
 
 def test_normalize_strips_trailing_pipe_head_or_tail():
+    # [FUNCTION DOC] Regression: checks trailing '2>&1 | head/tail' truncators and -q are stripped before -v is
+    # appended.
     """Bootstrap agents sometimes save commands with a `| head -N` tail truncator.
 
     targeted_test_cmds_for_pr appends test files at the end, which lands them
@@ -560,6 +630,7 @@ def test_normalize_strips_trailing_pipe_head_or_tail():
 
 
 def test_normalize_strips_quiet_flag():
+    # [FUNCTION DOC] Checks pytest -q/--quiet are stripped and -v appended at the end.
     """-q suppresses per-test names; -v and -q cancel each other in pytest 9 (verbosity
     counter). Strip -q so the log parser gets named PASSED/FAILED lines.
 
@@ -574,16 +645,19 @@ def test_normalize_strips_quiet_flag():
 
 
 def test_normalize_strips_dev_null_redirect():
+    # [FUNCTION DOC] Checks '> /dev/null' and '&> /dev/null' redirects are stripped.
     """`> /dev/null` or `&> /dev/null` would also swallow output we need to parse."""
     assert normalize_test_cmds_for_runtime(["go test ./... > /dev/null"]) == ["go test -v ./..."]
     assert normalize_test_cmds_for_runtime(["pytest &> /dev/null"]) == ["pytest -v"]
 
 
 def test_normalize_strips_bare_2_redirect_1():
+    # [FUNCTION DOC] Checks a bare '2>&1' is stripped.
     assert normalize_test_cmds_for_runtime(["pytest 2>&1"]) == ["pytest -v"]
 
 
 def test_normalize_npm_test_unchanged_when_wrapper():
+    # [FUNCTION DOC] Checks 'npm test' is passed through unchanged.
     """`npm test` is a wrapper — we can't safely add jest flags through it."""
     # Just verify it doesn't crash and doesn't corrupt the cmd
     out = normalize_test_cmds_for_runtime(["npm test"])
@@ -594,12 +668,14 @@ def test_normalize_npm_test_unchanged_when_wrapper():
 
 
 def test_targeted_appends_test_files_to_pytest():
+    # [FUNCTION DOC] Checks pytest commands get the touched test files appended.
     """pytest -v becomes pytest -v tests/foo.py when test_patch touches foo."""
     out = targeted_test_cmds_for_pr(["pytest -v"], ["tests/test_foo.py", "tests/test_bar.py"])
     assert out == ["pytest -v tests/test_foo.py tests/test_bar.py"]
 
 
 def test_targeted_go_test_replaces_dot_dot_dot_with_packages():
+    # [FUNCTION DOC] Checks 'go test ./...' is narrowed to the single touched package ./pkg/foo.
     """`go test ./...` → `go test ./pkg/foo` when the test_patch only touches pkg/foo."""
     out = targeted_test_cmds_for_pr(
         ["go test -v ./..."],
@@ -610,6 +686,7 @@ def test_targeted_go_test_replaces_dot_dot_dot_with_packages():
 
 
 def test_targeted_go_test_handles_multiple_packages():
+    # [FUNCTION DOC] Checks multiple touched Go packages all appear in the targeted command.
     out = targeted_test_cmds_for_pr(
         ["go test -v ./..."],
         ["pkg/a/a_test.go", "pkg/b/b_test.go"],
@@ -619,6 +696,7 @@ def test_targeted_go_test_handles_multiple_packages():
 
 
 def test_targeted_jest_appends_test_files():
+    # [FUNCTION DOC] Checks jest commands get touched test files appended.
     """Jest accepts positional file paths like pytest."""
     out = targeted_test_cmds_for_pr(["jest --verbose"], ["src/foo.test.ts", "src/bar.test.js"])
     assert "src/foo.test.ts" in out[0]
@@ -626,28 +704,33 @@ def test_targeted_jest_appends_test_files():
 
 
 def test_targeted_cargo_no_op():
+    # [FUNCTION DOC] Checks cargo test is not targeted (unchanged).
     """Rust's filter is name-substring not file path; we don't target."""
     out = targeted_test_cmds_for_pr(["cargo test"], ["src/lib.rs", "tests/integration_test.rs"])
     assert out == ["cargo test"]
 
 
 def test_targeted_npm_test_passes_through():
+    # [FUNCTION DOC] Checks 'npm test' is not modified.
     """npm test is a wrapper; we can't safely append positional args."""
     assert targeted_test_cmds_for_pr(["npm test"], ["src/foo.test.ts"]) == ["npm test"]
 
 
 def test_targeted_skips_when_no_test_files():
+    # [FUNCTION DOC] Checks an empty test file list leaves commands unchanged.
     """Empty test_files → don't touch the command."""
     assert targeted_test_cmds_for_pr(["pytest -v"], []) == ["pytest -v"]
 
 
 def test_targeted_skips_when_pytest_already_has_path():
+    # [FUNCTION DOC] Checks a pytest command that already has a path argument is not extended.
     """If user already passed a path argument, don't double-up."""
     out = targeted_test_cmds_for_pr(["pytest -v tests/"], ["tests/test_foo.py"])
     assert out == ["pytest -v tests/"]
 
 
 def test_targeted_filters_non_py_test_files():
+    # [FUNCTION DOC] Checks non-.py test fixtures (e.g. JSON snapshots) are not appended to pytest.
     """Snapshot fixtures / YAML test data shouldn't end up as pytest args."""
     out = targeted_test_cmds_for_pr(
         ["pytest -v"],
@@ -660,10 +743,13 @@ def test_targeted_filters_non_py_test_files():
 
 
 def test_pr_runtime_requires_bootstrap_attr():
+    # [FUNCTION DOC] Checks PRRuntimePipeline.requires_bootstrap is True.
     assert PRRuntimePipeline.requires_bootstrap is True
 
 
 def test_pr_runtime_rejects_missing_bootstrap():
+    # [FUNCTION DOC] Checks constructing PRRuntimePipeline with bootstrap=None raises RuntimeError matching
+    # 'requires a BootstrapResult'.
     """Constructing without a BootstrapResult should fail loudly (not silently emit broken tasks)."""
     from repo2rlenv.spec.input import (
         GenerationInput,

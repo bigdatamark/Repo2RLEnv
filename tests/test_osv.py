@@ -1,3 +1,7 @@
+# [MODULE DOC] Unit tests for repo2rlenv.osv (OSV vulnerability client helpers). No network: canned
+# raw OSV JSON dicts are fed through _from_raw, and OSVVuln.cve_id, OSVVuln.fix_commits,
+# severity_at_least and guess_ecosystem are exercised on hand-built OSVVuln instances. Side
+# effects: none (pure in-memory assertions).
 """OSV client + helpers — unit tests.
 
 Network calls are not exercised here (we don't hit api.osv.dev from tests).
@@ -20,6 +24,8 @@ from repo2rlenv.osv import (
 
 
 def test_from_raw_minimal():
+    # [FUNCTION DOC] Checks _from_raw on a dict with only 'id': aliases default to [], summary and
+    # severity_text to ''. Inputs: none. Output: none (asserts).
     raw = {"id": "GHSA-abc-def-ghi"}
     v = _from_raw(raw)
     assert v.id == "GHSA-abc-def-ghi"
@@ -29,6 +35,8 @@ def test_from_raw_minimal():
 
 
 def test_from_raw_full():
+    # [FUNCTION DOC] Checks _from_raw parses a full OSV record: id, aliases, severity_text from
+    # database_specific.severity, and cwe_ids from database_specific.cwe_ids.
     raw = {
         "id": "GHSA-29vq-49wr-vm6x",
         "aliases": ["CVE-2026-1234", "PYSEC-2026-1"],
@@ -60,16 +68,21 @@ def test_from_raw_full():
 
 
 def test_cve_id_from_aliases():
+    # [FUNCTION DOC] Checks OSVVuln.cve_id returns a CVE-prefixed alias when the primary id is a
+    # GHSA id.
     v = OSVVuln(id="GHSA-x-y-z", aliases=["CVE-2026-1234"])
     assert v.cve_id == "CVE-2026-1234"
 
 
 def test_cve_id_from_primary_id():
+    # [FUNCTION DOC] Checks OSVVuln.cve_id returns the primary id itself when it is a CVE id.
     v = OSVVuln(id="CVE-2024-9999")
     assert v.cve_id == "CVE-2024-9999"
 
 
 def test_cve_id_none_when_neither_has_cve():
+    # [FUNCTION DOC] Checks OSVVuln.cve_id is None when neither id nor aliases contain a CVE
+    # identifier.
     v = OSVVuln(id="GHSA-x", aliases=["PYSEC-2026-1"])
     assert v.cve_id is None
 
@@ -80,6 +93,8 @@ def test_cve_id_none_when_neither_has_cve():
 
 
 def test_fix_commits_filters_by_owner_repo():
+    # [FUNCTION DOC] Checks fix_commits keeps only github.com commit URLs for the given owner/repo,
+    # dropping forks and non-commit references.
     v = OSVVuln(
         id="x",
         references=[
@@ -92,6 +107,7 @@ def test_fix_commits_filters_by_owner_repo():
 
 
 def test_fix_commits_supports_pr_commit_url():
+    # [FUNCTION DOC] Checks fix_commits extracts the SHA from a '/pull/N/commits/SHA' style URL.
     v = OSVVuln(
         id="x",
         references=[
@@ -105,6 +121,7 @@ def test_fix_commits_supports_pr_commit_url():
 
 
 def test_fix_commits_deduplicates():
+    # [FUNCTION DOC] Checks fix_commits returns each commit SHA once even when referenced twice.
     v = OSVVuln(
         id="x",
         references=[
@@ -116,6 +133,7 @@ def test_fix_commits_deduplicates():
 
 
 def test_fix_commits_empty_when_no_github_commit_refs():
+    # [FUNCTION DOC] Checks fix_commits returns [] when no reference is a GitHub commit URL.
     v = OSVVuln(
         id="x",
         references=[
@@ -132,26 +150,32 @@ def test_fix_commits_empty_when_no_github_commit_refs():
 
 
 def test_severity_high_at_least_medium():
+    # [FUNCTION DOC] Checks severity_at_least treats HIGH as meeting a 'medium' threshold.
     v = OSVVuln(id="x", severity_text="HIGH")
     assert severity_at_least(v, "medium")
 
 
 def test_severity_low_below_high():
+    # [FUNCTION DOC] Checks severity_at_least treats LOW as below a 'high' threshold.
     v = OSVVuln(id="x", severity_text="LOW")
     assert not severity_at_least(v, "high")
 
 
 def test_severity_critical_at_least_critical():
+    # [FUNCTION DOC] Checks severity_at_least treats CRITICAL as meeting a 'critical' threshold
+    # (inclusive).
     v = OSVVuln(id="x", severity_text="CRITICAL")
     assert severity_at_least(v, "critical")
 
 
 def test_severity_moderate_treated_as_medium():
+    # [FUNCTION DOC] Checks severity_at_least maps the GHSA label MODERATE to medium.
     v = OSVVuln(id="x", severity_text="MODERATE")
     assert severity_at_least(v, "medium")
 
 
 def test_severity_unknown_below_threshold():
+    # [FUNCTION DOC] Checks an empty/unknown severity never meets even the 'low' threshold.
     v = OSVVuln(id="x", severity_text="")
     assert not severity_at_least(v, "low")
 
@@ -162,20 +186,26 @@ def test_severity_unknown_below_threshold():
 
 
 def test_guess_ecosystem_known_pypi():
+    # [FUNCTION DOC] Checks guess_ecosystem maps the known owner 'pallets' to 'PyPI'.
     assert guess_ecosystem("pallets") == "PyPI"
 
 
 def test_guess_ecosystem_known_npm():
+    # [FUNCTION DOC] Checks guess_ecosystem maps 'expressjs' to 'npm'.
     assert guess_ecosystem("expressjs") == "npm"
 
 
 def test_guess_ecosystem_known_crates():
+    # [FUNCTION DOC] Checks guess_ecosystem maps 'rust-lang' to 'crates.io'.
     assert guess_ecosystem("rust-lang") == "crates.io"
 
 
 def test_guess_ecosystem_unknown_defaults_pypi():
+    # [FUNCTION DOC] Checks guess_ecosystem falls back to 'PyPI' for an unknown owner.
     assert guess_ecosystem("nobody-knows-this") == "PyPI"
 
 
 def test_guess_ecosystem_case_insensitive():
+    # [FUNCTION DOC] Checks guess_ecosystem matches owners case-insensitively ('PALLETS' ->
+    # 'PyPI').
     assert guess_ecosystem("PALLETS") == "PyPI"
