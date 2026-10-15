@@ -1,3 +1,8 @@
+# [MODULE DOC] gitlab.com merge-request client mirroring github.py's list_merged_prs / fetch_pr_diff
+# / fetch_issue signatures and PullRequestSummary output, so PR-mining pipelines can run against
+# GitLab through provider.py. Pure stdlib urllib over HTTPS (network side effects). Optional token
+# sent as PRIVATE-TOKEN header on API calls; diffs come from a non-API web route the header does not
+# authenticate, so only public projects are fully supported. Constants GITLAB_HOST / GITLAB_API.
 """GitLab merge-request client — mirrors the `github.py` surface.
 
 Exposes `list_merged_prs` / `fetch_pr_diff` / `fetch_issue` with the SAME
@@ -30,15 +35,22 @@ GITLAB_API = f"{GITLAB_HOST}/api/v4"
 
 
 class GitLabError(RuntimeError):
+    # [CLASS DOC] Raised for GitLab HTTP errors or unreachable hosts. Subclass of RuntimeError.
     pass
 
 
 def _project_id(owner: str, name: str) -> str:
+    # [FUNCTION DOC] HELPER: Return the URL-encoded "owner/name" path (slash encoded as %2F) that
+    # GitLab accepts as a project id. Pure.
     """URL-encoded `namespace/project` path GitLab accepts as a project id."""
     return urllib.parse.quote(f"{owner}/{name}", safe="")
 
 
 def _request(url: str, token: str | None, *, accept_json: bool = True):
+    # [FUNCTION DOC] HELPER: GET url with a 60 s timeout, adding a PRIVATE-TOKEN header when token
+    # is set. Decodes the body as UTF-8 (replacing bad bytes); returns parsed JSON when accept_json
+    # (default True), else the raw text. Raises GitLabError on HTTPError (includes status) or
+    # URLError; json decode errors propagate as json.JSONDecodeError. Side effect: network.
     req = urllib.request.Request(url)
     if token:
         req.add_header("PRIVATE-TOKEN", token)
@@ -62,6 +74,15 @@ def list_merged_prs(
     skip_drafts: bool = True,
     token: str | None = None,
 ) -> list[PullRequestSummary]:
+    # [FUNCTION DOC] List merged MRs and return them as PullRequestSummary records. Inputs mirror
+    # github.list_merged_prs: owner, name, limit (default 50), since/until (dates compared with
+    # merged_at[:10], inclusive), skip_drafts (default True), token. Fetches one page of
+    # min(limit*3, 100) merged MRs, then for each kept MR calls the `/changes` endpoint for
+    # diff_refs.base_sha/head_sha and the changed file list (new_path); MRs whose `/changes` call
+    # fails are skipped. number=iid, state is always "merged". Returns at most limit summaries.
+    # Raises GitLabError if the listing call fails.
+    # KNOWN ISSUE: the listing is ordered by created_at, not merged_at, so "newest-first" means
+    # newest created, and only the first 100 MRs are ever considered (no pagination).
     """List recently merged MRs newest-first (mirrors github.list_merged_prs)."""
     pid = _project_id(owner, name)
     # Single page (GitLab caps per_page at 100). Over-fetch ×3 to absorb
@@ -113,6 +134,9 @@ def list_merged_prs(
 
 
 def fetch_pr_diff(owner: str, name: str, number: int, *, token: str | None = None) -> str:
+    # [FUNCTION DOC] Return an MR's unified diff from the web route
+    # `{host}/{owner}/{name}/-/merge_requests/ {n}.diff` as text. Works for public projects only
+    # (token header is not honored there). Raises GitLabError on HTTP/network failure.
     """Return the MR's unified diff via the `<mr>.diff` web route (git-format).
 
     NOTE: this is a non-API route; the `PRIVATE-TOKEN` header does not
@@ -126,6 +150,10 @@ def fetch_pr_diff(owner: str, name: str, number: int, *, token: str | None = Non
 def fetch_issue(
     owner: str, name: str, number: int, *, token: str | None = None
 ) -> tuple[str, str] | None:
+    # [FUNCTION DOC] Return (title, description) for a GitLab issue (each "" when missing), or None
+    # when the API call raises GitLabError.
+    # KNOWN ISSUE: unlike github.fetch_issue it returns ("", "") instead of None when both fields
+    # are empty, so callers' fallback-to-PR-body logic may not trigger.
     """Return (title, description) for a GitLab issue, or None if unavailable."""
     try:
         issue = _request(f"{GITLAB_API}/projects/{_project_id(owner, name)}/issues/{number}", token)

@@ -1,3 +1,8 @@
+# [MODULE DOC] Thin GitHub API client that shells out to the `gh` CLI (subprocess) for every call.
+# Provides PR listing, PR/commit diff fetch, issue/file/language/parent-commit lookup, and the
+# PullRequestSummary record shared with gitlab.py. Auth is a token passed as GH_TOKEN env var to gh,
+# or gh's own login. Requires `gh` on PATH; no urllib fallback exists despite the docstring wording.
+# Logging via the module logger.
 """Thin GitHub client built on the `gh` CLI for auth simplicity.
 
 We deliberately shell out to `gh` rather than depend on PyGithub:
@@ -23,11 +28,17 @@ logger = logging.getLogger(__name__)
 
 
 class GitHubError(RuntimeError):
+    # [CLASS DOC] Raised when the gh CLI is missing or a gh invocation exits non-zero. Subclass of
+    # RuntimeError; no extra fields.
     pass
 
 
 @dataclass(slots=True)
 class PullRequestSummary:
+    # [CLASS DOC] Slotted dataclass describing one merged PR (or GitLab MR). Fields: number, title,
+    # body, state, merged_at (ISO string or None), base_ref (branch name), base_sha (base commit),
+    # head_sha, is_draft, url, changed_files (list of paths). Produced by list_merged_prs here and
+    # in gitlab.py.
     number: int
     title: str
     body: str
@@ -42,6 +53,14 @@ class PullRequestSummary:
 
 
 def _run_gh(args: list[str], token: str | None = None) -> str:
+    # [FUNCTION DOC] HELPER: Run `gh <args>` and return its stdout text.
+    # Inputs: args (gh argument list); token (optional; when set, the subprocess env is os.environ
+    # plus GH_TOKEN=token). Classifies the call as read-only when it is `gh api` with no
+    # -X/-f/-F/--method/ --raw-field/--field/--input flags, or `gh pr list|view|diff`; read-only
+    # calls get up to 3 attempts on subprocess timeout (60 s each) with exponential backoff sleeps
+    # of 0.5 s and 1 s; mutating calls get 1.
+    # Raises GitHubError if gh is not on PATH or exits non-zero (message includes stderr); re-raises
+    # subprocess.TimeoutExpired after the final attempt. Side effects: subprocess, network.
     if not shutil.which("gh"):
         raise GitHubError("gh CLI not found on PATH; install it or use a different auth path")
     env = None
@@ -82,6 +101,9 @@ def _run_gh(args: list[str], token: str | None = None) -> str:
 
 
 def _fetch_base_sha(owner: str, name: str, number: int, *, token: str | None = None) -> str | None:
+    # [FUNCTION DOC] HELPER: Fetch a PR's base commit SHA via `gh api
+    # repos/{owner}/{name}/pulls/{n}` with jq `.base.sha`. Returns the stripped SHA, or None (with a
+    # logged warning) when the gh call fails or returns empty. Never raises GitHubError.
     """
     Return a PR's base-branch commit SHA via the REST pulls endpoint, or None on failure.
     """
@@ -110,6 +132,13 @@ def list_merged_prs(
     skip_drafts: bool = True,
     token: str | None = None,
 ) -> list[PullRequestSummary]:
+    # [FUNCTION DOC] List merged PRs newest-first via `gh pr list --state merged --json ...`.
+    # Inputs: owner, name; limit (max summaries returned, default 50; over-fetches min(limit*3,
+    # 1000) rows); since/until (optional dates, compared against the first 10 chars of mergedAt,
+    # inclusive); skip_drafts (default True); token. Each kept row costs an extra API call for
+    # base_sha (_fetch_base_sha); rows whose base_sha cannot be fetched are dropped. changed_files
+    # comes from the `files` JSON field. Output: list[PullRequestSummary], at most limit long.
+    # Raises GitHubError if the listing call fails; json errors propagate.
     """List recently merged PRs ordered newest-first.
 
     Uses `gh pr list` (REST under the hood). Filters by date client-side.
@@ -163,6 +192,8 @@ def list_merged_prs(
 
 
 def fetch_pr_diff(owner: str, name: str, number: int, *, token: str | None = None) -> str:
+    # [FUNCTION DOC] Return a PR's unified diff text via `gh pr diff <n> --repo owner/name`.
+    # Raises GitHubError on failure. Network via subprocess.
     """Return the unified diff for a PR via `gh pr diff`."""
     return _run_gh(
         ["pr", "diff", str(number), "--repo", f"{owner}/{name}"],
@@ -173,6 +204,10 @@ def fetch_pr_diff(owner: str, name: str, number: int, *, token: str | None = Non
 def fetch_issue(
     owner: str, name: str, number: int, *, token: str | None = None
 ) -> tuple[str, str] | None:
+    # [FUNCTION DOC] Return (title, body) of an issue via `gh issue view --json title,body`, both
+    # stripped. Used to source problem statements from the bug report rather than the PR body.
+    # Returns None when the gh call fails, the output is not JSON, or both title and body are empty.
+    # Issue numbers that are actually PRs are accepted as-is.
     """Return (title, body) for an issue, or None if it can't be fetched.
 
     Used by `pr_runtime` to source the problem statement from the linked
@@ -204,6 +239,9 @@ def fetch_issue(
 
 
 def get_primary_language(owner: str, name: str, *, token: str | None = None) -> str | None:
+    # [FUNCTION DOC] Return GitHub Linguist's primary language for the repo (e.g. "Python") via `gh
+    # api repos/{owner}/{name} --jq .language`. Returns None on GitHubError, empty output or the
+    # literal "null"; unwraps a JSON-quoted string if present, else returns the raw text.
     """Return GitHub's primary language string for a repo, or None on failure.
 
     Used by the pipeline-language compatibility pre-flight check so we can
@@ -231,6 +269,9 @@ def get_primary_language(owner: str, name: str, *, token: str | None = None) -> 
 
 
 def fetch_commit_diff(owner: str, name: str, sha: str, *, token: str | None = None) -> str:
+    # [FUNCTION DOC] Return the unified diff of one commit via `gh api repos/.../commits/{sha}` with
+    # the `application/vnd.github.v3.diff` Accept header (same shape as `git show --format= <sha>`).
+    # Raises GitHubError on failure.
     """Return the unified diff for a single commit via `gh api`.
 
     Hits `GET /repos/{owner}/{repo}/commits/{sha}` with the `diff` media
@@ -248,6 +289,8 @@ def fetch_commit_diff(owner: str, name: str, sha: str, *, token: str | None = No
 
 
 def fetch_commit_parent(owner: str, name: str, sha: str, *, token: str | None = None) -> str:
+    # [FUNCTION DOC] Return the first parent SHA of a commit from `gh api repos/.../commits/{sha}`.
+    # Returns "" for a root commit or on any GitHubError / JSON decode error.
     """Return the first parent SHA of `sha` via `gh api`.
 
     Returns "" if the commit has no parents (root commit) or on any error.
@@ -271,6 +314,9 @@ def fetch_commit_parent(owner: str, name: str, sha: str, *, token: str | None = 
 def fetch_file_at_ref(
     owner: str, name: str, path: str, ref: str, *, token: str | None = None
 ) -> str | None:
+    # [FUNCTION DOC] Return a file's raw text at a git ref via the contents API
+    # (`repos/.../contents/{path}?ref={ref}`, Accept `application/vnd.github.raw`). Returns None on
+    # GitHubError. path and ref are interpolated unescaped into the URL.
     """Return a file's raw text content at a given ref, or None on failure.
 
     Hits `GET /repos/{owner}/{repo}/contents/{path}?ref={ref}` with the raw

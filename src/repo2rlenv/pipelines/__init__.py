@@ -1,3 +1,8 @@
+# [PACKAGE DOC] Pipelines package: imports every native pipeline class and exposes the PIPELINES
+# registry mapping pipeline name (pr_diff, pr_runtime, commit_runtime, code_instruct,
+# equivalence_tests, cve_patches, repo_mutate, repo_reconstruct, pr_to_env, terminal_synth,
+# task_evolve) to its class, plus re-exports of the Pipeline protocol and PipelineResult. Importing
+# it imports all pipeline modules.
 """Pipeline implementations + the standardized contract."""
 
 from __future__ import annotations

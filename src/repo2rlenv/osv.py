@@ -1,3 +1,7 @@
+# [MODULE DOC] Client for the public OSV vulnerability API (https://api.osv.dev/v1/query, no auth),
+# used by the cve_patches pipeline: query vulns per package/ecosystem, distill records into OSVVuln,
+# extract GitHub fix-commit SHAs from references, guess an ecosystem from a GitHub owner, and
+# compare severities. Network via urllib.
 """OSV (Open Source Vulnerabilities) API client.
 
 OSV is Google's public vuln database (https://osv.dev) — no auth required,
@@ -32,6 +36,9 @@ _GH_COMMIT_RE = re.compile(
 
 @dataclass(slots=True)
 class OSVVuln:
+    # [CLASS DOC] Slotted dataclass for one OSV record: id (GHSA/PYSEC/CVE...), aliases, summary,
+    # details, severity_text (upper-cased label such as HIGH, or a CVSS type when no label exists),
+    # cwe_ids, published (ISO8601 string), references (raw list of {type,url} dicts).
     """One vulnerability record, distilled from the OSV JSON shape."""
 
     id: str  # primary identifier (GHSA-* or PYSEC-* or CVE-* etc.)
@@ -45,6 +52,8 @@ class OSVVuln:
 
     @property
     def cve_id(self) -> str | None:
+        # [FUNCTION DOC] Property: first identifier among id then aliases that starts with "CVE-"
+        # (case-insensitive), else None.
         """First CVE-* identifier in id or aliases."""
         for cand in [self.id, *self.aliases]:
             if cand.upper().startswith("CVE-"):
@@ -52,6 +61,9 @@ class OSVVuln:
         return None
 
     def fix_commits(self, *, owner: str, repo: str) -> list[str]:
+        # [FUNCTION DOC] Return de-duplicated commit SHAs (order preserved) from references whose
+        # URL matches a github.com commit or pull/N/commits URL for exactly owner/repo (case-
+        # insensitive). SHAs of 7-40 hex chars are accepted, so abbreviated SHAs may be returned.
         """Return commit SHAs in `references[]` that point at <owner>/<repo>.
 
         Filters by owner/repo so we don't accept fix URLs from forks /
@@ -74,6 +86,12 @@ class OSVVuln:
 
 
 def _from_raw(raw: dict) -> OSVVuln:
+    # [FUNCTION DOC] HELPER: Build an OSVVuln from a raw OSV JSON dict. severity_text comes from
+    # database_specific.severity; if absent, from the first severity[] entry's "type" (e.g.
+    # "CVSS_V3"); upper-cased. cwe_ids come from database_specific.cwe_ids. Missing fields default
+    # to empty.
+    # KNOWN ISSUE: the inline comment says the fallback is "UNKNOWN", but the code stores the CVSS
+    # type string (e.g. "CVSS_V3"), which severity_at_least then ranks as 0.
     db = raw.get("database_specific", {}) or {}
     severity_text = db.get("severity", "") or ""
     if not severity_text:
@@ -94,6 +112,7 @@ def _from_raw(raw: dict) -> OSVVuln:
 
 
 class OSVError(RuntimeError):
+    # [CLASS DOC] Raised for OSV HTTP, network or JSON decoding failures. Subclass of RuntimeError.
     pass
 
 
@@ -103,6 +122,10 @@ def query_vulns(
     *,
     timeout: float = 30.0,
 ) -> list[OSVVuln]:
+    # [FUNCTION DOC] POST {"package": {"name", "ecosystem"}} to the OSV query endpoint and return
+    # the parsed list of OSVVuln (empty list when no "vulns"). Inputs: package; ecosystem (e.g.
+    # PyPI, npm, crates.io, Go); timeout seconds (default 30). Raises OSVError on HTTPError,
+    # URLError or malformed JSON. Only the first result page is read (OSV page tokens are ignored).
     """POST to OSV `/v1/query` and return the parsed list of vulns.
 
     `ecosystem` examples: "PyPI", "npm", "crates.io", "Go", "Maven",
@@ -146,6 +169,8 @@ _KNOWN_OWNER_ECOSYSTEM: dict[str, str] = {
 
 
 def guess_ecosystem(owner: str) -> str:
+    # [FUNCTION DOC] Map a GitHub owner (case-insensitive) to an OSV ecosystem using the small
+    # _KNOWN_OWNER_ECOSYSTEM table; defaults to "PyPI". Pure.
     """Best-effort: map a GitHub owner to a likely OSV ecosystem.
 
     Falls back to "PyPI" since that's where the bulk of CVE-attached repos
@@ -159,6 +184,10 @@ _SEVERITY_RANK = {"LOW": 1, "MEDIUM": 2, "MODERATE": 2, "HIGH": 3, "CRITICAL": 4
 
 
 def severity_at_least(vuln: OSVVuln, threshold: str) -> bool:
+    # [FUNCTION DOC] True iff the vuln's severity rank >= the threshold's rank, using LOW=1,
+    # MEDIUM/MODERATE=2, HIGH=3, CRITICAL=4 (case-insensitive). Unknown vuln severities rank 0
+    # (below any known threshold); an unknown threshold also ranks 0, so it accepts everything.
+    # Pure.
     """True iff the vuln's severity meets or exceeds `threshold` (case-insensitive).
 
     Unknown severities are treated as below threshold (conservative).

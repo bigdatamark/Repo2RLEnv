@@ -1,3 +1,6 @@
+# [MODULE DOC] Cross-platform exclusive process lock on an open file handle, used for controller
+# receipts and shared worker checkouts. POSIX uses fcntl.flock; Windows uses msvcrt.locking on byte
+# 0.
 """Process locks for controller receipts and shared worker checkouts."""
 
 from __future__ import annotations
@@ -9,6 +12,13 @@ from typing import IO
 
 
 def lock_file(handle: IO, *, blocking: bool = False) -> None:
+    # [FUNCTION DOC] Exclusively lock an open file handle until it is closed; never deletes the
+    # path.
+    # Inputs: handle (open file object); blocking (default False). POSIX: flock LOCK_EX, adding
+    # LOCK_NB when not blocking (raises BlockingIOError/OSError if held). Windows: seeks to 0 and
+    # tries a non-blocking 1-byte lock in a loop; on EACCES/EAGAIN/EDEADLK either raises
+    # BlockingIOError (non-blocking) or sleeps 0.1 s and retries forever (blocking); other OSErrors
+    # propagate. Returns None. Side effect: moves the file position to 0 on Windows.
     """Exclusively lock an open file until it closes, without deleting its path.
 
     POSIX retains flock semantics, including interoperability with older

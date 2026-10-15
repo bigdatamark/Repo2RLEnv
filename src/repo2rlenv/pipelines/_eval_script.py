@@ -1,3 +1,7 @@
+# [MODULE DOC] HELPER: Shared helpers for synthesis pipelines (code_instruct, equivalence_tests):
+# git-applicable unified diffs, a binary-reward tests/test.sh builder, a pytest log pass heuristic,
+# and AST utilities (signature-only stubs, recursion-safe function rename, annotation stripping, a
+# static importability check).
 """Shared verifier-script + diff helpers for synthesis pipelines.
 
 These were originally defined in `mutation_bugs.py`; they outlived that
@@ -15,6 +19,10 @@ from repo2rlenv.pipelines.pr_runtime import _path_prelude_for_language
 
 
 def make_unified_diff(old: str, new: str, path: str) -> str:
+    # [FUNCTION DOC] Return a `diff --git a/path b/path` unified diff (3 context lines) from old to
+    # new text for one path, after ensuring both end with a newline. Returns "" when the texts are
+    # equal.
+    # Output always ends with a newline. Pure.
     """Build a unified diff with a `diff --git` header so `git apply` accepts it.
 
     Normalizes trailing newlines BEFORE diffing — without this, when one side
@@ -48,6 +56,11 @@ def make_unified_diff(old: str, new: str, path: str) -> str:
 
 
 def build_binary_eval_script(test_cmds: list[str], *, language: str | None = None) -> str:
+    # [FUNCTION DOC] Return a bash tests/test.sh script: applies the language PATH prelude
+    # (pr_runtime._path_prelude_for_language), cds to /workspace, marks it a safe git dir, runs the
+    # test commands joined with && between START/END_TEST_OUTPUT markers (or an echo when none),
+    # writes 1.0 to /logs/verifier/reward.txt if the exit code is 0 else 0.0, and exits with the
+    # test exit code. Inputs: test_cmds; language (optional keyword).
     """Build a `tests/test.sh` that maps test exit code to a binary reward.
 
     Runs the commands wrapped in START/END markers and writes 1.0/0.0 to
@@ -78,6 +91,11 @@ def build_binary_eval_script(test_cmds: list[str], *, language: str | None = Non
 
 
 def all_tests_passed(log: str) -> bool:
+    # [FUNCTION DOC] Heuristic pytest-log check: False if the log mentions "error" and "collected 0
+    # items", or has a non-zero "N failed" count; otherwise True iff a non-zero "N passed" count
+    # appears. Case-insensitive. Pure.
+    # KNOWN ISSUE: the docstring promises no failed/error, but logs like "3 passed, 1 error"
+    # (collection or fixture errors with tests collected) return True.
     """Heuristic: pytest summary line ends with `N passed` and no `failed`/`error`.
 
     Used by synthesis pipelines that run pytest inside the sandbox with a
@@ -99,6 +117,10 @@ def all_tests_passed(log: str) -> bool:
 
 
 def signature_only_source(source: str) -> str | None:
+    # [FUNCTION DOC] Return a stub of the first top-level function in source: its decorators, async
+    # keyword, unparsed arguments and return annotation, the docstring (re-wrapped in triple double
+    # quotes, indented 4 spaces) and an ellipsis body. Returns None on SyntaxError or when the first
+    # statement is not a function. Docstrings containing triple quotes would produce invalid output.
     """Extract a signature + docstring + `...` body from a full function source.
 
     Used by `equivalence_tests` to build a leak-free instruction that shows
@@ -135,23 +157,30 @@ def signature_only_source(source: str) -> str | None:
 
 
 class _NameRenamer(ast.NodeTransformer):
+    # [CLASS DOC] HELPER: ast.NodeTransformer that renames a function: def names, call targets and
+    # Load-context Name references equal to old_name become new_name.
     def __init__(self, old_name: str, new_name: str):
+        # [FUNCTION DOC] Store old_name and new_name.
         self._old = old_name
         self._new = new_name
 
     def visit_FunctionDef(self, node):
+        # [FUNCTION DOC] Rename the def if its name matches, then visit children; returns the node.
         if node.name == self._old:
             node.name = self._new
         self.generic_visit(node)
         return node
 
     def visit_AsyncFunctionDef(self, node):
+        # [FUNCTION DOC] Same as visit_FunctionDef for async defs.
         if node.name == self._old:
             node.name = self._new
         self.generic_visit(node)
         return node
 
     def visit_Call(self, node):
+        # [FUNCTION DOC] Replace a bare Name call target equal to the old name with a new Name
+        # (location copied), then visit children; returns the node.
         # Rewrite recursive calls in the body
         if isinstance(node.func, ast.Name) and node.func.id == self._old:
             node.func = ast.copy_location(ast.Name(id=self._new, ctx=ast.Load()), node.func)
@@ -159,6 +188,7 @@ class _NameRenamer(ast.NodeTransformer):
         return node
 
     def visit_Name(self, node):
+        # [FUNCTION DOC] Rename Load-context Name nodes equal to the old name; returns the node.
         # Also catch bare references (e.g. `factorial = factorial`) that
         # would otherwise leave the old symbol dangling.
         if node.id == self._old and isinstance(node.ctx, ast.Load):
@@ -167,6 +197,9 @@ class _NameRenamer(ast.NodeTransformer):
 
 
 def rename_function_ast(source: str, old_name: str, new_name: str) -> str:
+    # [FUNCTION DOC] Return source with function old_name renamed to new_name everywhere (def,
+    # recursive calls, bare loads) via _NameRenamer and ast.unparse (so formatting/comments are
+    # normalized). Returns source unchanged on SyntaxError. Pure.
     """AST-based rewrite of `def OLD(...)` and all references to OLD → NEW.
 
     Recursion-safe: unlike a regex-on-the-def-line, this also rewrites
@@ -187,6 +220,9 @@ def rename_function_ast(source: str, old_name: str, new_name: str) -> str:
 
 
 class _AnnotationStripper(ast.NodeTransformer):
+    # [CLASS DOC] HELPER: ast.NodeTransformer that removes parameter and return annotations from all
+    # functions and converts annotated assignments to plain assignments (dropping bare annotations),
+    # so stubs import without the annotation types.
     """Strip type annotations from function defs so the stub imports cleanly.
 
     Signature-only external references (`def foo(x: Argument) -> FC`) are
@@ -199,6 +235,8 @@ class _AnnotationStripper(ast.NodeTransformer):
     """
 
     def _clean_args(self, args: ast.arguments) -> ast.arguments:
+        # [FUNCTION DOC] HELPER: Set annotation to None on all positional-only, regular, keyword-
+        # only, *args and **kwargs parameters; returns the mutated arguments node.
         for a in args.posonlyargs + args.args + args.kwonlyargs:
             a.annotation = None
         if args.vararg is not None:
@@ -208,18 +246,24 @@ class _AnnotationStripper(ast.NodeTransformer):
         return args
 
     def visit_FunctionDef(self, node):
+        # [FUNCTION DOC] Strip argument and return annotations, visit children, return the node.
         node.args = self._clean_args(node.args)
         node.returns = None
         self.generic_visit(node)
         return node
 
     def visit_AsyncFunctionDef(self, node):
+        # [FUNCTION DOC] Same as visit_FunctionDef for async defs.
         node.args = self._clean_args(node.args)
         node.returns = None
         self.generic_visit(node)
         return node
 
     def visit_AnnAssign(self, node):
+        # [FUNCTION DOC] Return None (delete) for an annotation without value, otherwise an
+        # equivalent Assign node with the location copied.
+        # KNOWN ISSUE: deleting a bare annotation that is the only statement in a class or function
+        # body leaves an empty body, and ast.unparse then emits invalid code.
         # Convert `x: T = v` → `x = v`, drop `x: T` (no value) entirely.
         if node.value is None:
             return None
@@ -232,6 +276,8 @@ class _AnnotationStripper(ast.NodeTransformer):
 
 
 def strip_annotations(source: str) -> str:
+    # [FUNCTION DOC] Return source with type annotations removed via _AnnotationStripper and
+    # ast.unparse; returns the input unchanged on SyntaxError. Pure.
     """Return the source with type annotations removed. Falls back to the
     input verbatim on parse failure.
     """
@@ -245,6 +291,14 @@ def strip_annotations(source: str) -> str:
 
 
 def is_module_importable(source: str) -> bool:
+    # [FUNCTION DOC] Statically guess whether source would import without NameError: parse and
+    # compile (False on SyntaxError), collect known names (builtins plus top-level defs, classes,
+    # assignment targets, annotated targets, imports), then check every Load Name under each top-
+    # level statement. For functions, unknown names only matter if they occur in default values; any
+    # other unknown name returns False. Executes no code.
+    # KNOWN ISSUE: for classes the walk descends into method bodies, so a class whose methods
+    # reference non-top-level names (e.g. locals or later imports inside methods) is wrongly
+    # reported as not importable; decorators and annotations of functions are also not checked.
     """True iff `source` compiles AND all top-level Names can be resolved to
     Python builtins (i.e., the module would import without a NameError).
 

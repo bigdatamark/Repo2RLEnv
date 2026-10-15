@@ -1,3 +1,8 @@
+# [PACKAGE DOC] Per-runner test-log parsers that turn raw test output into a {test_name: status} map
+# (status one of PASSED/FAILED/SKIPPED/ERROR, the TestStatus literal). Used by the pr_runtime
+# validation harness to compute FAIL_TO_PASS / PASS_TO_PASS sets. Re-exports parse_pytest,
+# parse_go_test, parse_cargo_test, parse_jest and TestStatus, and provides parse_logs, which picks a
+# parser from the recorded test commands with a language fallback.
 """Per-language test output parsers.
 
 Each parser turns the raw stdout/stderr of a test runner into a
@@ -44,6 +49,10 @@ __all__ = [
 
 
 def _detect_runner(test_cmds: list[str]) -> str:
+    # [FUNCTION DOC] HELPER: Name the test runner from the joined, lower-cased test commands.
+    # Returns "pytest" if "pytest" appears; "go" for `go test`; "cargo" for `cargo test`; "jest" if
+    # jest, mocha or vitest appear, or for npm/yarn/pnpm test; else "unknown". Checks occur in that
+    # order.
     """Inspect the bootstrap-recorded test commands and name the runner.
 
     Returns one of: "pytest", "go", "cargo", "jest", "unknown".
@@ -77,6 +86,10 @@ def parse_logs(
     *,
     language: str | None = None,
 ) -> dict[str, TestStatus]:
+    # [FUNCTION DOC] Parse a test log with the parser chosen by _detect_runner(test_cmds). When the
+    # runner is unknown and language is given, maps python->pytest, go->go, rust->cargo, node->jest
+    # (case-insensitive). Inputs: test_cmds; log; language (optional keyword). Returns the parser's
+    # status dict, or {} when no runner could be determined. Pure.
     """Dispatch to the right per-runner parser based on test_cmds.
 
     Args:

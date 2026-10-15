@@ -1,3 +1,9 @@
+# [MODULE DOC] Dataset publish/retrieve bridge. push_to_hub stages a local Harbor task directory as
+# tasks/<id>/ in a Hugging Face dataset repo, writes manifest.json, a README dataset card and a
+# Harbor legacy-format registry.json pinned to the upload commit. pull_from_hub / pull_from_harbor /
+# pull_from_github materialize tasks back into a flat <local_dir>/<task-id>/ layout. Side effects:
+# HF Hub network calls (huggingface_hub), subprocesses (harbor, git), filesystem writes/deletes,
+# logging. VISUALISER_BASE_URL is read from env R2E_VISUALISER_URL at import time.
 """HF Hub push/pull for Repo2RLEnv datasets.
 
 Generates a Harbor-compatible registry.json at the dataset root pointing at
@@ -51,6 +57,8 @@ VISUALISER_BASE_URL = os.environ.get(
 
 @dataclass(slots=True)
 class PushResult:
+    # [CLASS DOC] Slotted dataclass returned by push_to_hub: repo_id, commit_sha (of the task upload
+    # commit that registry.json pins), registry_url (resolve/main/registry.json URL), task_count.
     repo_id: str
     commit_sha: str
     registry_url: str
@@ -59,6 +67,10 @@ class PushResult:
 
 @dataclass(slots=True)
 class PullResult:
+    # [CLASS DOC] Slotted dataclass returned by the pull_* functions: repo_id (or harbor target /
+    # gh:// id), local_dir, task_count, snapshot_path.
+    # KNOWN ISSUE: snapshot_path is commented as the on-disk snapshot location, but every pull
+    # function sets it to local_dir (the snapshot scratch dir is deleted).
     repo_id: str
     local_dir: Path
     task_count: int
@@ -66,6 +78,12 @@ class PullResult:
 
 
 def _build_manifest(tasks_dir: Path, *, repo_id: str, pipeline: str) -> str:
+    # [FUNCTION DOC] HELPER: Build manifest.json text (indented JSON) from staged task dirs.
+    # Inputs: tasks_dir (directory of task subdirs); repo_id; pipeline. For each subdir (sorted)
+    # with a parseable task.toml containing [metadata.repo2env], emits a row with task_id, repo,
+    # ref, reference (or the pipeline subtable's pr_url), reward_kinds and reward_calibration
+    # f2p_count/p2p_count/ loc_changed/difficulty. Unparseable tasks are skipped silently. Output:
+    # JSON string with dataset, pipeline, task_count, spec, note and tasks.
     """Per-task composition manifest from the staged task.toml files.
 
     One row per task: repo, PR URL, base commit, language hint, reward kinds,
@@ -121,6 +139,9 @@ def _build_registry_json(
     description: str,
     task_dirs: list[str],
 ) -> list[dict[str, Any]]:
+    # [FUNCTION DOC] HELPER: Return Harbor's legacy registry.json structure: a one-element list with
+    # name=dataset_name, version "1.0", description, and one task entry per task dir (name, git_url
+    # of the HF dataset, git_commit_id=commit_sha, path tasks/<name>). Pure.
     """Harbor's legacy registry.json format — list of DatasetSpec rows."""
     git_url = f"https://huggingface.co/datasets/{repo_id}"
     return [
@@ -142,6 +163,9 @@ def _build_registry_json(
 
 
 def _reward_doc_for(pipeline: str) -> str:
+    # [FUNCTION DOC] HELPER: Return Markdown describing the reward for a pipeline's dataset card:
+    # graded F2P/P2P text for pr_runtime/commit_runtime/cve_patches, 6-component diff-similarity
+    # text for pr_diff, and a generic paragraph for everything else. Pure.
     """Per-pipeline reward documentation for the dataset card.
 
     Each pipeline scores differently — don't describe one pipeline's reward
@@ -180,6 +204,11 @@ def _reward_doc_for(pipeline: str) -> str:
 
 
 def _composition_block(summary: dict[str, Any] | None) -> str:
+    # [FUNCTION DOC] HELPER: Render the "Validation & composition" Markdown section from an enriched
+    # manifest summary dict (task_count, validation{tracked_resolved, command_resolved, eval_grade,
+    # harbor_version}, repo_distribution{repo: count}). Returns "" for a falsy summary; the
+    # resolution bullets appear only when tracked_resolved is present and the repo table only when
+    # the distribution is non-empty. Pure.
     """Render the composition + validation section from an enriched manifest.
 
     Returns "" when no validated manifest is available (so the card stays
@@ -247,6 +276,14 @@ def _build_dataset_card(
     has_environment: bool = False,
     manifest_summary: dict[str, Any] | None = None,
 ) -> str:
+    # [FUNCTION DOC] HELPER: Render the full README.md dataset card (YAML front matter with
+    # license/tags, visualiser badge link, source repo(s), pipeline, task count, visibility,
+    # generation and reproduction instructions, run section, optional composition block, reward and
+    # layout sections).
+    # Inputs: repo_id; dataset_name; task_count; repo_source (single-repo fallback); pipeline;
+    # visibility string; source_repos (list rendered when more than one); has_environment (True
+    # gives a harbor run recipe plus _reward_doc_for text, False a harbor download snippet);
+    # manifest_summary (passed to _composition_block). Output: Markdown string. Pure.
     """Render the HF Hub dataset card (README.md) for a published dataset.
 
     ``source_repos`` lets multi-repo datasets (e.g. a single ``pr_diff`` push
@@ -384,6 +421,8 @@ public commits under fair-use for ML research / training-data purposes.
 
 
 def _read_task_metadata(task_toml: Path) -> dict[str, Any]:
+    # [FUNCTION DOC] HELPER: Parse a task.toml and return its [metadata.repo2env] table, or {} when
+    # missing/unreadable/invalid TOML (logged at debug).
     """Extract `[metadata.repo2env]` from a task.toml. Empty dict on parse failure."""
     import tomllib
 
@@ -413,6 +452,22 @@ def push_to_hub(
     image_visibility: str = "inherit",
     on_message=None,
 ) -> PushResult:
+    # [FUNCTION DOC] Publish a local dataset directory to an HF dataset repo.
+    # Inputs: local_dataset_dir; repo_id ("org/name"); auth (AuthSpec used to resolve the HF token);
+    # private (default False); pipeline / repo_source (overrides; otherwise read from the first
+    # task's metadata, defaulting to "pr_diff" / ""); description (registry description; default
+    # derived); commit_message (default "Repo2RLEnv: add N tasks"); image distribution options
+    # image_registry, inline_dockerfile, require_registry, skip_image_push, image_visibility and
+    # on_message, all forwarded to registry.integration.prepare_dataset_for_push. Steps: create the
+    # repo (exist_ok); run prepare_dataset_for_push, which may push images and rewrite task
+    # Dockerfiles/task.toml in place; copy each task dir into <dir>/.r2e_staging/tasks/; write
+    # manifest.json (preserving a source manifest.json verbatim when it has a "validation" key, and
+    # using it for the card summary) and README.md; upload_folder with delete_patterns tasks/**
+    # (clean-sync removes remote tasks not in this push); take the commit oid (or latest commit);
+    # write and upload registry.json pinned to that SHA as a second commit; delete the staging dir.
+    # Returns PushResult. Raises RuntimeError when no HF token resolves or no task dirs are found;
+    # HF/ registry errors propagate. Side effects: network, mutates the local dataset, filesystem;
+    # the staging dir is left behind if an exception occurs mid-push.
     """Push a dataset directory to HF Hub. Returns the resulting registry URL.
 
     `pipeline` and `repo_source` are read out of the first task's
@@ -616,6 +671,15 @@ def pull_from_hub(
     force: bool = False,
     revision: str | None = None,
 ) -> PullResult:
+    # [FUNCTION DOC] Download a published dataset from the HF Hub and flatten it locally.
+    # Inputs: repo_id; local_dir; auth (optional AuthSpec, default empty -> env-resolved token,
+    # optional for public data); task (fetch only tasks/<task>/** plus registry.json/README.md);
+    # force (delete local_dir first); revision (git ref, default latest). Uses snapshot_download
+    # into local_dir/.r2e_snapshot, copies each tasks/<id>/ having task.toml to local_dir/<id>
+    # (replacing existing), copies registry.json and README.md to the root, then removes the
+    # snapshot dir.
+    # Returns PullResult. Raises RuntimeError if the snapshot has no tasks/ dir or zero tasks were
+    # materialized. Side effects: network, filesystem writes/deletes.
     """Pull a Repo2RLEnv-published dataset from HF Hub into a local directory.
 
     Reverses `push_to_hub`: the staged Hub layout has `tasks/<task-id>/...`,
@@ -713,6 +777,10 @@ def pull_from_hub(
 
 
 def _flatten_to_task_layout(source: Path, local_dir: Path) -> int:
+    # [FUNCTION DOC] HELPER: Copy task dirs from source into local_dir. Uses source/tasks/ when it
+    # exists, else source itself; each immediate subdir containing task.toml is copied (replacing
+    # any existing target; symlinks are followed, dangling ones ignored). Also copies top-level
+    # registry.json/README.md if present. Returns the number of tasks copied.
     """Materialize a directory of Harbor task dirs into `local_dir`.
 
     Accepts two layouts at `source`:
@@ -759,6 +827,15 @@ def pull_from_harbor(
     registry_url: str | None = None,
     force: bool = False,
 ) -> PullResult:
+    # [FUNCTION DOC] Download a Harbor-registry dataset via `harbor datasets download <name[@tag]>
+    # -o <tmp>` (optional --registry-url) and flatten it into local_dir.
+    # Inputs: name; local_dir; tag (optional version); registry_url (optional); force (delete
+    # local_dir first). Runs in a temp dir with a 600 s timeout; if the download holds exactly one
+    # subdir and no top-level task.toml, descends into it before _flatten_to_task_layout.
+    # Returns PullResult with repo_id = the target string. Raises RuntimeError if harbor is not on
+    # PATH, the command fails (message includes up to 400 chars of stderr/stdout), or zero tasks
+    # were found; subprocess.TimeoutExpired propagates. Side effects: subprocess, network,
+    # filesystem.
     """Pull a Harbor-registry dataset by shelling out to `harbor datasets download`.
 
     Harbor handles its own auth, caching, registry resolution, version pinning
@@ -835,6 +912,16 @@ def pull_from_github(
     ref: str | None = None,
     force: bool = False,
 ) -> PullResult:
+    # [FUNCTION DOC] Shallow-clone a GitHub repo holding Harbor tasks and flatten it into local_dir.
+    # Inputs: owner_repo ("owner/repo"); local_dir; ref (optional branch/tag passed as --branch);
+    # force (delete local_dir first). Resolves a token via auth.resolve_github_token (gh ->
+    # $GITHUB_TOKEN -> anonymous) and embeds it in the clone URL via auth_clone_url; runs `git clone
+    # --depth 1` (300 s timeout) in a temp dir, redacting the token from error output, then
+    # _flatten_to_task_layout.
+    # Returns PullResult with repo_id "gh://owner/repo[@ref]". Raises RuntimeError if git is
+    # missing, the clone fails, or no tasks are found; ValueError for a malformed owner_repo.
+    # KNOWN ISSUE: the docstring says ref may be a commit SHA, but `git clone --branch` only accepts
+    # branch or tag names, so a SHA ref fails.
     """Pull a dataset from a public/private GitHub repo via `git clone --depth 1`.
 
     The cloned repo must follow the Repo2RLEnv / Harbor task layout: either

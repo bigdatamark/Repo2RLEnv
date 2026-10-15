@@ -1,3 +1,7 @@
+# [MODULE DOC] HELPER: Anti-contamination machinery for emitted tasks. Supplies the denylist of
+# hosts serving published fixes (PyPI, GitHub, plus gitlab.com for GitLab sources), Dockerfile RUN
+# lines that scrub git history back to the base commit, and a docker-compose overlay that maps the
+# hosts to 0.0.0.0 via extra_hosts on Harbor's main service. Pure string builders; no I/O.
 """Anti-contamination egress guard for sandbox-verified tasks.
 
 A published fix lives on the package index and the code host, so an agent with
@@ -50,6 +54,9 @@ GITLAB_FIX_SOURCE_HOSTS: tuple[str, ...] = (
 
 
 def fix_source_hosts(source_kind: SourceKind | None = None) -> tuple[str, ...]:
+    # [FUNCTION DOC] Return the host tuple to blackhole: FIX_SOURCE_HOSTS, plus
+    # GITLAB_FIX_SOURCE_HOSTS when source_kind is SourceKind.GITLAB. Input source_kind defaults to
+    # None.
     """Return the hosts to blackhole for a task mined from `source_kind`.
 
     The base list covers PyPI and GitHub. A GitLab-sourced repo's fix lives on
@@ -62,6 +69,10 @@ def fix_source_hosts(source_kind: SourceKind | None = None) -> tuple[str, ...]:
 
 
 def git_history_scrub(base_commit: str) -> str:
+    # [FUNCTION DOC] Return Dockerfile text (two RUN instructions) that checks out a branch "base"
+    # at base_commit, removes the origin remote, deletes all other branches, all tags and remote
+    # refs, expires the reflog and runs gc --prune=now, each step tolerating failure. Meant to
+    # follow the `git reset --hard <base_commit>` line. base_commit is interpolated unquoted.
     """Return Dockerfile RUN lines that strip the repo to `base_commit`.
 
     The working tree may be reset to the base commit, but `.git` still holds
@@ -89,6 +100,9 @@ def git_history_scrub(base_commit: str) -> str:
 
 
 def egress_guard_compose(hosts: tuple[str, ...] = FIX_SOURCE_HOSTS) -> str:
+    # [FUNCTION DOC] Return docker-compose YAML text (with a header comment) defining
+    # services.main.extra_hosts entries "host:0.0.0.0" for each host in hosts (default
+    # FIX_SOURCE_HOSTS), ending with a newline.
     """Return `environment/docker-compose.yaml` content blackholing `hosts`.
 
     Harbor includes a task's `environment/docker-compose.yaml` in its compose

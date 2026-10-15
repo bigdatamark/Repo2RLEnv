@@ -1,3 +1,5 @@
+# [MODULE DOC] Parser for `go test -v` output: each `--- PASS|FAIL|SKIP: Name` line (any
+# indentation, subtests included as Test/sub paths) records that test's status.
 """Go test (`go test -v`) output parser.
 
 Go's verbose test output uses unambiguous marker lines:
@@ -50,6 +52,9 @@ _STATUS_MAP: dict[str, TestStatus] = {
 
 
 def parse_go_test(log: str) -> dict[str, TestStatus]:
+    # [FUNCTION DOC] Return {test_name: status} from go test -v output; PASS->PASSED, FAIL->FAILED,
+    # SKIP->SKIPPED, last-write-wins; names are the first token after the colon. Other lines
+    # ignored; empty input returns {}. Pure.
     """Return {test_name -> status} parsed from `go test -v` output.
 
     Test names include any subtest path (`TestX/subY/subZ`). Lines that

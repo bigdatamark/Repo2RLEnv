@@ -1,3 +1,7 @@
+# [MODULE DOC] Parser for Rust libtest output (`cargo test`): reads `test NAME ...
+# ok|FAILED|ignored` lines, strips libtest mode suffixes (` - should panic`, ` - compile fail`, ` -
+# compile`) and keys doctests by file and item without the volatile `(line N)` part, keeping the
+# worst status per doctest item.
 """Cargo / `cargo test` output parser.
 
 Rust's libtest format (used by both `cargo test` and `rustc --test`) emits:
@@ -69,6 +73,11 @@ _DOCTEST_RANK: dict[TestStatus, int] = {"SKIPPED": 0, "PASSED": 1, "FAILED": 2}
 
 
 def parse_cargo_test(log: str) -> dict[str, TestStatus]:
+    # [FUNCTION DOC] Return {test_name: status} from cargo test output; ok->PASSED, FAILED->FAILED,
+    # ignored->SKIPPED. Non-matching lines are ignored. Ordinary tests use last-write-wins; doctests
+    # are normalized to "file - item" (or just "file" for crate-level docs) and a new status only
+    # replaces an existing one when its rank is not lower (SKIPPED < PASSED < FAILED). Empty input
+    # returns {}. Pure.
     """Return {test_name -> status} parsed from `cargo test` output.
 
     Lines that don't match the `test NAME ... STATUS` shape are ignored —

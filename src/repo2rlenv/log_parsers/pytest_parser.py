@@ -1,3 +1,6 @@
+# [MODULE DOC] Pytest log parser plus the shared TestStatus literal type (PASSED/FAILED/SKIPPED/
+# ERROR). Handles verbose progress lines (`node PASSED [12%]`), short-summary lines (`FAILED node -
+# reason`), folded skip lines and pytest-xdist worker prefixes.
 """Pytest output parser.
 
 Pytest emits per-test status lines in TWO formats, depending on flags:
@@ -51,6 +54,13 @@ _XDIST_PREFIX_RE = re.compile(rf"^\[gw\d+\]\s+(?:(?:{_PROGRESS})\s+)?")
 
 
 def parse_pytest(log: str) -> dict[str, TestStatus]:
+    # [FUNCTION DOC] Return {test_name: status} from pytest output of any verbosity, last-write-
+    # wins. Per stripped non-empty line: removes an xdist `[gwN] [progress]` prefix; if the line
+    # starts with a status word, records summary form (SKIPPED `[N] path:line` lines are keyed by
+    # the location token, others by the node id with any " - reason" removed); otherwise, only if
+    # the first token contains "::" or ends in ".py", matches the verbose form (name, status,
+    # optional reason in parentheses and progress/duration) and records it when the name contains
+    # "::" or ends in ".py". Empty input -> {}. Pure.
     """Return {test_name -> status} parsed from pytest output (any verbosity).
 
     Notes:

@@ -1,3 +1,9 @@
+# [MODULE DOC] LiteLLM wrapper: the single chat-completion entry point across providers. Resolves
+# API keys (LLMSpec.api_key_env, provider defaults from auth.LLM_KEY_ENV_DEFAULTS, or a placeholder
+# for custom endpoints), builds provider-appropriate kwargs (temperature suppression for reasoning
+# models, max_tokens vs max_completion_tokens, json_schema response_format, HF router base), calls
+# litellm.completion, records token usage and litellm.completion_cost, and falls back along
+# LLMSpec.fallback on transient errors. Side effects: network calls, env var reads, logging.
 """LiteLLM wrapper — single entry point across providers, with cost tracking.
 
 The pipelines call `complete(input, prompt)`; we resolve the API key from
@@ -32,10 +38,16 @@ _OPENAI_COMPLETION_LIMIT_RE = re.compile(r"^(gpt-[56](?:[.-]|$)|o[134](?:-|$))")
 
 
 def _supports_temperature(model: str) -> bool:
+    # [FUNCTION DOC] HELPER: True unless the model id matches _NO_TEMPERATURE_RE (Opus 4.7/4.8,
+    # GPT-5/6, o1/o3/o4 families), which reject an explicit temperature.
     return _NO_TEMPERATURE_RE.search(model) is None
 
 
 def completion_token_limit(spec: LLMSpec, max_tokens: int) -> dict[str, int]:
+    # [FUNCTION DOC] Return the completion-length kwarg for a spec as a one-entry dict:
+    # {"max_completion_tokens": max_tokens} for provider "openai" with a GPT-5/6 or o1/o3/o4 model
+    # id (matched from the start of spec.model), otherwise {"max_tokens": max_tokens}. Pure; also
+    # used by external Harbor call builders.
     """Provider wire parameters shared with externally orchestrated Harbor calls."""
     name = (
         "max_completion_tokens"
@@ -47,6 +59,9 @@ def completion_token_limit(spec: LLMSpec, max_tokens: int) -> dict[str, int]:
 
 @dataclass(slots=True)
 class LLMResponse:
+    # [CLASS DOC] Slotted dataclass result of one completion: content (text, "" if none), usage (raw
+    # usage dict or None), cost_usd (best-effort USD cost of this call, 0.0 if unknown),
+    # prompt_tokens, completion_tokens.
     content: str
     usage: dict | None = None
     cost_usd: float = 0.0  # cost of THIS call, in USD (best-effort)
@@ -55,6 +70,9 @@ class LLMResponse:
 
 
 def _is_failover_eligible(exc: BaseException) -> bool:
+    # [FUNCTION DOC] HELPER: True if the exception's class name is one of LiteLLM's transient errors
+    # (InternalServerError, RateLimitError, ServiceUnavailableError, APIConnectionError, Timeout,
+    # APIError), meaning retrying on a fallback model is worthwhile. Matches by name only.
     """True for transient provider errors worth retrying on a fallback model.
 
     LiteLLM raises specific subclasses; we match on class names so we don't
@@ -75,6 +93,13 @@ def _is_failover_eligible(exc: BaseException) -> bool:
 
 
 def _resolve_api_key(spec: LLMSpec) -> str | None:
+    # [FUNCTION DOC] HELPER: Decide which API key to pass LiteLLM for a spec. If spec.api_key_env is
+    # set: returns that env var's value via resolve_llm_api_key, raising RuntimeError if unset. Else
+    # if spec.endpoint is set: never forwards provider-default keys; logs a warning if the
+    # provider's default key env var is set; returns the "EMPTY" placeholder for providers listed in
+    # LLM_KEY_ENV_DEFAULTS, else None. Else: returns the provider-default key, raising RuntimeError
+    # naming the env var when a known provider has none; None for unknown providers (LiteLLM
+    # resolves).
     """The API key to hand LiteLLM, or None to let LiteLLM resolve it.
 
     - `api_key_env` given → its value; raise if unset (never falls through)
@@ -114,6 +139,9 @@ def _resolve_api_key(spec: LLMSpec) -> str | None:
 
 
 def check_provider(spec: LLMSpec) -> None:
+    # [FUNCTION DOC] Validate that LiteLLM recognizes every model in the spec's fallback chain by
+    # calling litellm.get_llm_provider on each qualified_name. Raises RuntimeError (first line of
+    # the underlying error, chained) on the first unknown one. Returns None; no network.
     """Raise early if LiteLLM doesn't know a provider in the spec's fallback chain.
 
     Cheap next to what follows (clone, image pull, agent loop), so the bootstrap
@@ -142,6 +170,16 @@ def _do_complete(
     temperature: float,
     response_schema: dict | None = None,
 ) -> LLMResponse:
+    # [FUNCTION DOC] HELPER: One chat completion without fallback.
+    # Inputs: spec; system (optional system prompt); user (user message); max_tokens; temperature;
+    # response_schema (optional JSON schema, sent as strict json_schema response_format named
+    # "repo2rlenv_response"). Builds messages and kwargs (model=qualified_name, num_retries=0,
+    # timeout=spec.timeout_sec, token-limit key via completion_token_limit, api_key if resolved,
+    # temperature only if supported, api_base=endpoint if set, HF router base URL for provider
+    # "huggingface" without an endpoint), calls litellm.completion, and returns an LLMResponse with
+    # the first choice's content, usage tokens and completion_cost (failure to cost is logged at
+    # debug and yields 0.0). Raises whatever _resolve_api_key or litellm raises. Side effect:
+    # network.
     """One non-fallback chat-completion call. Internal helper for `complete()`."""
     import litellm  # type: ignore[import-untyped]
 
@@ -217,6 +255,12 @@ def complete(
     response_schema: dict | None = None,
     _depth: int = 0,
 ) -> LLMResponse:
+    # [FUNCTION DOC] Public chat-completion call with automatic fallback.
+    # Inputs: spec; keyword-only system (default None), user, max_tokens (default 1024), temperature
+    # (default 0.7), response_schema (default None), _depth (internal recursion counter, default 0).
+    # Calls _do_complete; on an exception that is failover-eligible, when spec.fallback is set and
+    # _depth < 3, logs a warning and recursively calls itself with spec.fallback and _depth+1;
+    # otherwise re-raises. Returns LLMResponse. Cost of failed attempts is not accumulated.
     """Single chat-completion call with automatic fallback on transient errors.
 
     Calls `spec.qualified_name`. On 5xx / 429 / network / timeout errors, if

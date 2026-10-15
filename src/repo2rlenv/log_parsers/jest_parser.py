@@ -1,3 +1,7 @@
+# [MODULE DOC] Parser for JavaScript test output from Jest (glyph lines under PASS/FAIL file
+# headers, names qualified by file and describe chain), Mocha's spec reporter (indent-nested suites,
+# numbered failures, dash-pending tests, epilogue skipping) and Vitest's verbose reporter (one fully
+# qualified line per test). ANSI escape codes are stripped before detection and parsing.
 """Jest output parser.
 
 Jest's default reporter prints per-test status lines using Unicode glyphs:
@@ -121,6 +125,11 @@ _MOCHA_TEST_RE = re.compile(
 
 
 def _parse_mocha(log: str) -> dict[str, TestStatus]:
+    # [FUNCTION DOC] HELPER: Return {name: status} from mocha spec-reporter output. Tracks suite
+    # titles by indent (lines indented >= 2 that are not test lines) and names tests "Suite > Sub >
+    # title". Check marks -> PASSED, "N)" -> FAILED, "-" -> SKIPPED. After an "N passing (" epilogue
+    # line, skips the "N failing" count of indent-2 numbered failure repeats; any other test line
+    # ends the epilogue (a new run started).
     """Return {test_name -> status} parsed from mocha's spec reporter."""
     out: dict[str, TestStatus] = {}
     # Suite titles by the indent they were printed at; deeper entries are
@@ -179,6 +188,10 @@ _VITEST_STATUS: dict[str, TestStatus] = {
 
 
 def _parse_vitest(log: str) -> dict[str, TestStatus]:
+    # [FUNCTION DOC] HELPER: Return {name: status} from vitest --reporter=verbose lines. Glyph ✓ ->
+    # PASSED, × -> FAILED, ↓/□ -> SKIPPED. The name is the printed "file > ... > test" text without
+    # duration/retry/repeat/heap/note suffixes, prefixed "|project| " when a project label is
+    # present; for skipped tests a trailing "Nms" is treated as part of the title and re-appended.
     out: dict[str, TestStatus] = {}
     for raw in log.split("\n"):
         m = _VITEST_TEST_RE.match(raw.rstrip())
@@ -195,6 +208,14 @@ def _parse_vitest(log: str) -> dict[str, TestStatus]:
 
 
 def parse_jest(log: str) -> dict[str, TestStatus]:
+    # [FUNCTION DOC] Return {test_name: status} from Jest, Mocha or Vitest output. Strips ANSI
+    # codes; dispatches to _parse_vitest when vitest RUN/Test Files markers exist, to _parse_mocha
+    # when mocha markers exist and no jest file header does. Otherwise parses Jest: a PASS/FAIL file
+    # header sets the current file and resets the describe stack; glyph lines (✓ √ PASSED, ✕ × ✗
+    # FAILED, ○ ◯ SKIPPED; "skipped:"/"todo:" prefixes and "(N ms)" timing removed) are named "file
+    # > describes... > test" using describe entries with smaller indent; other lines (excluding
+    # summary lines and ●/→ error blocks) with a file in scope and indent below the last test's
+    # indent become describe headers. Empty input returns {}. Pure.
     """Return {test_name -> status} parsed from Jest / Mocha / Vitest output.
 
     Test names are qualified with their file path and describe chain so
