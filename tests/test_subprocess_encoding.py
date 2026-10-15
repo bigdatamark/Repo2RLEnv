@@ -1,3 +1,6 @@
+# [MODULE DOC] Static check that every text-mode subprocess call in src/repo2rlenv passes an
+# explicit encoding, preventing Windows locale (cp1252) decode failures. Parses source with ast;
+# runs nothing.
 """Every text-mode subprocess call must decode its output as UTF-8.
 
 `text=True` alone decodes with the locale encoding: UTF-8 on Linux and macOS,
@@ -20,6 +23,10 @@ SRC = Path(repo2rlenv.__file__).parent
 
 
 def _text_mode_calls_without_encoding() -> Iterator[str]:
+    # [FUNCTION DOC] HELPER: Walks every .py under the package, finds calls of the form
+    # subprocess.<attr>(...) using text= or universal_newlines= without encoding=, and yields
+    # 'relative/path.py:lineno' strings. Only catches calls via the bare 'subprocess' name, not
+    # aliased imports.
     for path in sorted(SRC.rglob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
@@ -38,5 +45,6 @@ def _text_mode_calls_without_encoding() -> Iterator[str]:
 
 
 def test_text_mode_subprocess_calls_pass_an_encoding():
+    # [FUNCTION DOC] Asserts the offender list is empty.
     offenders = list(_text_mode_calls_without_encoding())
     assert offenders == [], f'add encoding="utf-8" to: {offenders}'

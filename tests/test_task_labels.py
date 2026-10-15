@@ -1,3 +1,6 @@
+# [MODULE DOC] Tests for task evaluation labels (emitter.evaluation, quality.labels, task_labels
+# CLI): defaults are unverified, labeled copies preserve bundle identity, 'verified' requires a
+# complete and correctly bound quality-loop evidence set, and tampering or rebinding is rejected.
 from __future__ import annotations
 
 import argparse
@@ -26,6 +29,8 @@ from repo2rlenv.task_labels import add_tasks_parser
 
 @pytest.fixture
 def task(tmp_path):
+    # [FUNCTION DOC] HELPER (fixture): Writes a minimal fixture TaskBundle under tmp_path/original
+    # and returns its path.
     return write_bundle(
         TaskBundle(
             name="fixture",
@@ -48,6 +53,11 @@ def task(tmp_path):
 
 @pytest.fixture
 def quality(task, tmp_path):
+    # [FUNCTION DOC] HELPER (fixture): Fabricates a full quality-loop result for the task: a passing
+    # Review, five trials (baseline 0, oracle 1, wrong_solution probe 0, valid_alternative probe 1,
+    # rollout 0) each with a Harbor-like result.json, a trial.json receipt binding bundle hash and
+    # result sha256, probe variants and oracle completion markers, then writes LoopResult as
+    # quality/result.json. Returns that path.
     directory = tmp_path / "quality"
     assessment = Assessment(
         status="pass",
@@ -150,12 +160,16 @@ def quality(task, tmp_path):
 
 
 def update_quality(path, change):
+    # [FUNCTION DOC] HELPER: Loads the JSON at path, applies the mutating callable change, and
+    # writes it back.
     value = json.loads(path.read_text())
     change(value)
     path.write_text(json.dumps(value))
 
 
 def test_default_is_deterministic_unverified_with_unknown_provenance():
+    # [FUNCTION DOC] generated_evaluation is deterministic, unverified, provenance unknown, without
+    # checked_at or subject hash.
     first, second = generated_evaluation(), generated_evaluation()
     assert first == second
     assert first["status"] == "unverified" and first["provenance"] == "unknown"
@@ -163,10 +177,14 @@ def test_default_is_deterministic_unverified_with_unknown_provenance():
 
 
 def test_missing_label_never_implies_verification(task):
+    # [FUNCTION DOC] A task with no label reads as unverified.
     assert read_evaluation(task).status == "unverified"
 
 
 def test_copy_preserves_original_and_bundle_identity(task, tmp_path):
+    # [FUNCTION DOC] write_labeled_copy with a blocked label leaves the original untouched, keeps
+    # tests and integrity and task_identity, records the original task.toml sha256, and refuses to
+    # overwrite an existing target.
     original = (task / "task.toml").read_bytes()
     target = write_labeled_copy(
         task,
@@ -191,6 +209,8 @@ def test_copy_preserves_original_and_bundle_identity(task, tmp_path):
 
 
 def test_real_control_pattern_can_label_legitimate_solver_failure(task, quality, tmp_path):
+    # [FUNCTION DOC] label_from_quality yields verified/assisted with 6 evidence entries; the
+    # labeled copy reads verified and keeps identity.
     label = label_from_quality(task, quality, provenance="assisted")
     assert label.status == "verified" and label.provenance == "assisted"
     assert len(label.evidence) == 6
@@ -203,6 +223,9 @@ def test_real_control_pattern_can_label_legitimate_solver_failure(task, quality,
     "change", ["missing", "tampered", "receipt", "probe_parent", "probe_marker", "outcome"]
 )
 def test_verification_rejects_incomplete_or_misbound_evidence(task, quality, change):
+    # [FUNCTION DOC] Parametrized corruption of the probe trial (missing/tampered result, wrong
+    # receipt hash, wrong probe parent, missing marker, changed reward) makes label_from_quality
+    # raise ValueError.
     result = json.loads(quality.read_text())
     trial = result["trials"][2]
     raw = Path(trial["result"])
@@ -229,6 +252,8 @@ def test_verification_rejects_incomplete_or_misbound_evidence(task, quality, cha
 
 
 def test_worker_sandbox_probe_paths_resolve_preserved_controller_copy(task, quality):
+    # [FUNCTION DOC] Rewriting probe task paths to nonexistent sandbox paths (with consistent
+    # hashes) still verifies via the preserved local copies.
     result = json.loads(quality.read_text())
     for trial in result["trials"]:
         if trial["role"] != "probe":
@@ -250,6 +275,8 @@ def test_worker_sandbox_probe_paths_resolve_preserved_controller_copy(task, qual
 def test_imported_worker_checksum_requires_exact_preserved_local_task(
     task, quality, valid_checksum
 ):
+    # [FUNCTION DOC] Parametrized: with harbor_checksum binding, a matching Harbor checksum
+    # verifies; a wrong one raises 'checksum'. Requires harbor.
     pytest.importorskip("harbor")
     from repo2rlenv.quality.loop.artifacts import parse_task
 
@@ -282,6 +309,8 @@ def test_imported_worker_checksum_requires_exact_preserved_local_task(
 def test_unaccepted_attempts_are_retained_with_missing_evidence(
     task, quality, tmp_path, status, expected
 ):
+    # [FUNCTION DOC] Non-usable statuses map to the expected label status with
+    # 'evidence_unavailable' when a trial result is missing, and can be written as a copy.
     result = json.loads(quality.read_text())
     result.update(status=status, reasons=["Retain this attempted verifier for diagnosis."])
     Path(result["trials"][0]["result"]).unlink()
@@ -293,6 +322,7 @@ def test_unaccepted_attempts_are_retained_with_missing_evidence(
 
 
 def test_label_cannot_rebind_a_changed_task(task, quality):
+    # [FUNCTION DOC] Changing task.toml makes label_from_quality raise 'differs'.
     config = tomllib.loads((task / "task.toml").read_text())
     config["agent"]["timeout_sec"] += 1
     (task / "task.toml").write_text(tomli_w.dumps(config))
@@ -301,6 +331,8 @@ def test_label_cannot_rebind_a_changed_task(task, quality):
 
 
 def test_copy_checks_quality_again_before_publishing(task, quality, tmp_path):
+    # [FUNCTION DOC] Editing the quality file after labeling makes write_labeled_copy raise
+    # 'unchanged' and creates no target.
     label = label_from_quality(task, quality)
     quality.write_text(quality.read_text() + " ")
     with pytest.raises(ValueError, match="unchanged"):
@@ -309,6 +341,8 @@ def test_copy_checks_quality_again_before_publishing(task, quality, tmp_path):
 
 
 def test_source_links_and_nested_destinations_rejected(task, tmp_path):
+    # [FUNCTION DOC] Destination inside the task raises 'outside'; a symlink in the source raises
+    # 'symlink'.
     with pytest.raises(ValueError, match="outside"):
         write_labeled_copy(task, task / "copy", EvaluationLabel())
     (task / "tests/link").symlink_to(tmp_path)
@@ -327,11 +361,15 @@ def test_source_links_and_nested_destinations_rejected(task, tmp_path):
     ],
 )
 def test_schema_rejects_unbound_claims_and_nonuniform_codes(values):
+    # [FUNCTION DOC] Parametrized invalid EvaluationLabel fields (bare verified, empty/non-
+    # code/duplicate reason codes, naive timestamp) raise ValueError.
     with pytest.raises(ValueError):
         EvaluationLabel(**values)
 
 
 def test_cli_keeps_verification_behind_evidence_import(task, quality, tmp_path):
+    # [FUNCTION DOC] The 'tasks label' parser rejects '--status verified' (SystemExit) but labels
+    # verified via --quality-result, returning 0 and writing the copy.
     parser = argparse.ArgumentParser()
     add_tasks_parser(parser.add_subparsers())
     with pytest.raises(SystemExit):
@@ -363,6 +401,7 @@ def test_cli_keeps_verification_behind_evidence_import(task, quality, tmp_path):
 
 
 def test_label_from_another_bundle_is_rejected(task, quality):
+    # [FUNCTION DOC] A quality result for a different bundle hash raises 'different'.
     update_quality(quality, lambda value: value.update(bundle_hash="sha256:" + "c" * 64))
     with pytest.raises(ValueError, match="different"):
         label_from_quality(task, quality)

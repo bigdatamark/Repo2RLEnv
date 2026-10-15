@@ -1,3 +1,5 @@
+# [MODULE DOC] Tests for the SWE-gen pr_to_env recipe: PR source intake separates tests from source
+# diff and pins the head, and repository export keeps multiple reference files private.
 from __future__ import annotations
 
 import json
@@ -11,14 +13,19 @@ from repo2rlenv.spec.recipe_options import PRRecipeOptions
 
 @pytest.fixture
 def profile():
+    # [FUNCTION DOC] HELPER (fixture): PRRecipeOptions with source 'lib' and tests 'tests'.
     return PRRecipeOptions(source_paths=["lib"], test_paths=["tests"])
 
 
 def test_source_keeps_tests_separate_and_pins_head(monkeypatch, profile):
+    # [FUNCTION DOC] Fakes _run_gh and fetch_pr_diff; fetch_source returns only the source diff,
+    # lists the test file separately and records the head sha.
     source_diff = "diff --git a/lib/one.py b/lib/one.py\n--- a/lib/one.py\n+++ b/lib/one.py\n@@ -1 +1 @@\n-return 0\n+return 1\n"
     test_diff = "diff --git a/tests/test_one.py b/tests/test_one.py\n--- a/tests/test_one.py\n+++ b/tests/test_one.py\n@@ -1 +1 @@\n-assert one() == 0\n+assert one() == 1\n"
 
     def api(args):
+        # [FUNCTION DOC] HELPER: Fake gh API returning the files list for '/files?' requests and PR
+        # metadata otherwise.
         if "/files?" in args[1]:
             return json.dumps(
                 [
@@ -50,6 +57,9 @@ def test_source_keeps_tests_separate_and_pins_head(monkeypatch, profile):
 
 
 def test_multiple_references_are_private_and_restore_each_file(tmp_path, profile):
+    # [FUNCTION DOC] Exports two defective files; asserts the workspace has no tests, reference
+    # copies live under solution/reference, both build contexts are defective, solve.sh restores
+    # each file, and Harbor sees a separate verifier.
     base = tmp_path / "base"
     (base / "lib").mkdir(parents=True)
     (base / "tests").mkdir()

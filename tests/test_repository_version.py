@@ -1,3 +1,5 @@
+# [MODULE DOC] Tests for freeze_version, which pins a dynamic setuptools project version from
+# recorded PKG-INFO and drops private test packages, without modifying files on disk.
 import tomllib
 
 import pytest
@@ -6,6 +8,9 @@ from repo2rlenv.pipelines.recipes.repository.version import freeze_version
 
 
 def project(tmp_path):
+    # [FUNCTION DOC] HELPER: Writes a pyproject.toml with dynamic version/readme, setuptools-git-
+    # versioning enabled and several packages, plus some_library.egg-info/PKG-INFO with version
+    # '2.1.0+3.gabcdef.dirty'. Returns the PKG-INFO path.
     (tmp_path / "pyproject.toml").write_text("""[project]
 name = "some-library"
 dynamic = ["version", "readme"]
@@ -21,6 +26,10 @@ packages = ["lib", "lib.tests", "lib.tests.nested", "lib.tests_api"]
 
 
 def test_freeze_uses_observed_version_and_omits_private_packages(tmp_path):
+    # [FUNCTION DOC] Asserts the returned pyproject sets version 2.1.0 (local part stripped), keeps
+    # only 'readme' dynamic, disables git versioning, removes lib.tests* packages under test_paths
+    # but keeps lib.tests_api, scrubs the hash from the PKG-INFO copy, reports basis 'recorded PKG-
+    # INFO', and leaves the on-disk pyproject unchanged.
     info = project(tmp_path)
     original = (tmp_path / "pyproject.toml").read_bytes()
     files, evidence = freeze_version(tmp_path, test_paths=["lib/tests"])
@@ -35,6 +44,8 @@ def test_freeze_uses_observed_version_and_omits_private_packages(tmp_path):
 
 
 def test_freeze_rejects_missing_or_conflicting_version_evidence(tmp_path):
+    # [FUNCTION DOC] No PKG-INFO, or two PKG-INFO files with different versions, must raise
+    # ValueError matching 'unambiguous'.
     info = project(tmp_path)
     info.unlink()
     with pytest.raises(ValueError, match="unambiguous"):

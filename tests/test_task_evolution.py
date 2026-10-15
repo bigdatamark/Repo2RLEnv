@@ -1,3 +1,4 @@
+# [MODULE DOC] Tests for the seta_evol task_evolve recipe's parent loading and option validation.
 from __future__ import annotations
 
 import pytest
@@ -8,6 +9,9 @@ from repo2rlenv.spec.recipe_options import TaskEvolutionOptions
 
 
 def test_evolution_preserves_parent_identity_and_separates_variants(tmp_path):
+    # [FUNCTION DOC] load_parents yields 3 records with distinct strategies, one parent hash and
+    # parent files, without modifying the parent; editing the parent afterwards makes load_parents
+    # raise 'changed'.
     parent = write_bundle(
         TaskBundle(
             name="parent",
@@ -39,5 +43,6 @@ def test_evolution_preserves_parent_identity_and_separates_variants(tmp_path):
 
 
 def test_unknown_evolution_strategy_is_rejected():
+    # [FUNCTION DOC] An unknown strategy raises a validation ValueError.
     with pytest.raises(ValueError, match="Input should be"):
         TaskEvolutionOptions(strategies=["rename_files_only"])

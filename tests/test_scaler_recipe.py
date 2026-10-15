@@ -1,3 +1,6 @@
+# [MODULE DOC] Tests for the SCALER reasoning_synth recipe: parameter scaling and testcase parsing,
+# the model-free family controller and source hashing, and task export keeping the reference answer
+# private.
 from __future__ import annotations
 
 import json
@@ -19,6 +22,8 @@ from repo2rlenv.spec.recipe_options import ScalerOptions
 
 
 def family():
+    # [FUNCTION DOC] HELPER: Returns a minimal SCALER family dict ('Example') with a
+    # generate_testcase source, params, difficulty_dict and a solution.
     return {
         "name": "Example",
         "logic_description": "Compute the required sum.",
@@ -30,6 +35,8 @@ def family():
 
 
 def test_native_scaling_and_tuple_parser():
+    # [FUNCTION DOC] scale_parameters at difficulty 4 yields {'n': 13}; parse_testcase accepts tuple
+    # and bare-pair forms and raises ValueError when the second element is not a dict.
     assert scale_parameters(family(), 4) == {"n": 13}
     assert parse_testcase("('1 2\\n', {'a': 1, 'b': 2})") == ("1 2\n", {"a": 1, "b": 2})
     assert parse_testcase("'3 4', {\"a\": 3}") == ("3 4", {"a": 3})
@@ -38,6 +45,9 @@ def test_native_scaling_and_tuple_parser():
 
 
 def test_family_controller_requires_no_model_and_hashes_input(tmp_path):
+    # [FUNCTION DOC] Writes families.json, builds a GenerationInput for reasoning_synth/scaler
+    # without llm, and asserts ScalerPipeline.worker_configuration returns the families and
+    # source_identity's families_sha256 matches load_families.
     path = tmp_path / "families.json"
     path.write_text(json.dumps({"example": family()}))
     config = GenerationInput.model_validate(
@@ -63,6 +73,9 @@ def test_family_controller_requires_no_model_and_hashes_input(tmp_path):
 
 
 def test_reasoning_export_keeps_reference_private_and_negative_reward(tmp_path):
+    # [FUNCTION DOC] export_task writes task.toml with the catalog recipe_version, reward_min -1 and
+    # separate verifier, stores the reference only in tests/reference.json, copies UPSTREAM_NOTICE
+    # (mentioning Bytedance), and no environment file contains the reference answer.
     candidate = {
         "id": "example",
         "instruction": "Compute the sum and write the answer.",

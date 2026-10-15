@@ -1,3 +1,7 @@
+# [MODULE DOC] Tests for verifier CPU/memory resource settings on PythonRepositoryProfile:
+# validation bounds, how python_repository.test_image passes them to an offline docker container
+# (with docker faked), OOM and still-running diagnostics, effect on Harbor contract identity, and
+# Tasksmith's worker-allocation check.
 """Remote resource contracts are bounded and survive export; no target code runs."""
 
 import json
@@ -18,6 +22,8 @@ from repo2rlenv.tasksmith.runner import Tasksmith
 
 
 def profile(**changes):
+    # [FUNCTION DOC] HELPER: Builds a PythonRepositoryProfile with source_paths ['lib'], test_paths
+    # ['tests'] plus any keyword overrides. Raises pydantic ValidationError on invalid values.
     return PythonRepositoryProfile(source_paths=["lib"], test_paths=["tests"], **changes)
 
 
@@ -35,15 +41,22 @@ def profile(**changes):
     ],
 )
 def test_invalid_resource_values_are_rejected(field, value):
+    # [FUNCTION DOC] Parametrized out-of-range/wrong-type test_cpus and test_memory_mb values
+    # (including bools, floats, strings) must raise ValidationError.
     with pytest.raises(ValidationError):
         profile(**{field: value})
 
 
 def fake_docker(monkeypatch, *, state=None):
+    # [FUNCTION DOC] HELPER: Monkeypatches python_repository._run with a fake recording argv; for
+    # 'docker cp' of results.xml writes a one-testcase JUnit file to the destination, for 'docker
+    # inspect' returns JSON with the given State merged over defaults (ExitCode 0, not running, not
+    # OOM). Returns (calls list, state dict).
     calls = []
     state = {"ExitCode": 0, "Running": False, "OOMKilled": False, **(state or {})}
 
     def run(argv, **kwargs):
+        # [FUNCTION DOC] HELPER: The fake _run described above; always returns exit code 0.
         calls.append(argv)
         if argv[:2] == ["docker", "cp"] and argv[2].endswith(":/tmp/results.xml"):
             from pathlib import Path
@@ -60,6 +73,9 @@ def fake_docker(monkeypatch, *, state=None):
 
 @pytest.mark.parametrize(("cpus", "memory"), [(1, 2048), (4, 8192)])
 def test_remote_container_resources_keep_offline_execution(tmp_path, monkeypatch, cpus, memory):
+    # [FUNCTION DOC] Parametrized cpus/memory: asserts the create command has --cpus, --memory
+    # '<n>m', --network none, --pids-limit 256, no mounts/volumes, and the last call is 'docker rm
+    # -f'.
     calls, _ = fake_docker(monkeypatch)
     result = python_repository.test_image(
         "fixture-image", profile(test_cpus=cpus, test_memory_mb=memory), tmp_path / "run"
@@ -75,6 +91,9 @@ def test_remote_container_resources_keep_offline_execution(tmp_path, monkeypatch
 
 
 def test_oom_has_exact_diagnosis_and_retains_state_before_cleanup(tmp_path, monkeypatch):
+    # [FUNCTION DOC] With ExitCode 137/OOMKilled, test_image must raise ValueError mentioning 2048
+    # MiB and OOMKilled=true, write state.json, not write results.json nor run docker cp, and still
+    # remove the container.
     calls, state = fake_docker(monkeypatch, state={"ExitCode": 137, "OOMKilled": True})
     output = tmp_path / "run"
     with pytest.raises(ValueError, match=r"2048 MiB.*OOMKilled=true"):
@@ -86,6 +105,8 @@ def test_oom_has_exact_diagnosis_and_retains_state_before_cleanup(tmp_path, monk
 
 
 def test_running_state_does_not_claim_oom_or_test_completion(tmp_path, monkeypatch):
+    # [FUNCTION DOC] A Running=True state must raise ValueError 'still running' and still remove the
+    # container.
     calls, _ = fake_docker(monkeypatch, state={"Running": True})
     with pytest.raises(ValueError, match="still running"):
         python_repository.test_image("fixture-image", profile(), tmp_path / "run")
@@ -93,6 +114,9 @@ def test_running_state_does_not_claim_oom_or_test_completion(tmp_path, monkeypat
 
 
 def test_resource_change_keeps_dependency_recipe_but_changes_harbor_contract(tmp_path):
+    # [FUNCTION DOC] Default vs enlarged resources yield identical repository_build output, but
+    # exported tasks carry the respective verifier cpus/memory_mb in Harbor config and different
+    # task_identity hashes.
     from harbor.models.task.task import Task
 
     from repo2rlenv.quality.loop.artifacts import task_identity
@@ -136,6 +160,8 @@ def test_resource_change_keeps_dependency_recipe_but_changes_harbor_contract(tmp
     ],
 )
 def test_cpu_request_cannot_exceed_known_worker_allocation(changes, message):
+    # [FUNCTION DOC] Tasksmith._validate_profile_resources on a SimpleNamespace runner with 4
+    # CPUs/16384 MB must raise ValueError when the profile requests more.
     runner = SimpleNamespace(options=Options(worker_cpus=4, worker_memory_mb=16384))
     value = Profile(
         reasoning="Exercise the selected real behavior in an offline container.",

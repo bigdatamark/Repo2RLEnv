@@ -1,3 +1,6 @@
+# [MODULE DOC] Tests for the SWE-Flow repo_reconstruct recipe: dependency-ordered development
+# schedules, skeletonizing scheduled functions, specification authoring inputs, and that excluded
+# candidate schedules are skipped without execution.
 from __future__ import annotations
 
 import ast
@@ -12,6 +15,8 @@ from repo2rlenv.pipelines.recipes.swe_flow.schedule import (
 
 
 def test_schedule_groups_identical_dependencies_and_introduces_each_function_once():
+    # [FUNCTION DOC] Three traces give two steps: t1/t2 developing 'a' then t3 developing 'b' with
+    # previous tests and the b->a edge.
     traces = [
         {"test_id": "t3", "core_nodes": ["a", "b"], "target_nodes": ["b"], "edges": [["b", "a"]]},
         {"test_id": "t1", "core_nodes": ["a"], "target_nodes": ["a"], "edges": []},
@@ -27,6 +32,8 @@ def test_schedule_groups_identical_dependencies_and_introduces_each_function_onc
 
 
 def test_skeleton_preserves_interface_removes_new_dependency_and_keeps_unrelated_code(tmp_path):
+    # [FUNCTION DOC] skeletonize keeps entry's signature with the given docstring and an Ellipsis
+    # body, removes the dependent helper and its literal, and preserves unrelated functions.
     source = "def helper(x):\n    return x * 7919\n\ndef entry(x, y=1):\n    return helper(x) + y\n\ndef existing():\n    return 'preserved'\n"
     (tmp_path / "module.py").write_text(source)
     catalog = function_catalog(tmp_path, ["module.py"])
@@ -48,6 +55,9 @@ def test_skeleton_preserves_interface_removes_new_dependency_and_keeps_unrelated
 
 
 def test_specification_receives_the_same_public_contract_as_the_skeleton(monkeypatch, tmp_path):
+    # [FUNCTION DOC] With metered_complete faked, author's second call payload contains the public
+    # docstrings, test evidence and scheduled functions, and the result maps node ids to the
+    # docstrings.
     from repo2rlenv.pipelines.recipes.swe_flow import author as module
 
     calls = []
@@ -61,6 +71,8 @@ def test_specification_receives_the_same_public_contract_as_the_skeleton(monkeyp
     }
 
     def complete(*args, **kwargs):
+        # [FUNCTION DOC] HELPER: Fake returning the docstring document first and a markdown spec
+        # afterward; records kwargs.
         calls.append(kwargs)
         response = (
             documents
@@ -85,6 +97,9 @@ def test_specification_receives_the_same_public_contract_as_the_skeleton(monkeyp
 
 
 def test_excluded_schedules_are_not_executed_or_charged_again(monkeypatch, tmp_path):
+    # [FUNCTION DOC] Computes the candidate id hash of schedule 1, excludes it, fakes worker
+    # dependencies, and asserts generate attempts only schedule 2 and executes replacements only for
+    # it.
     import hashlib
 
     from repo2rlenv.pipelines.recipes.swe_flow import worker
@@ -111,6 +126,9 @@ def test_excluded_schedules_are_not_executed_or_charged_again(monkeypatch, tmp_p
     executed = []
 
     def run_tests(image, options, destination, **kwargs):
+        # [FUNCTION DOC] HELPER: Fake test_image creating the destination, writing empty traces.json
+        # for instrumented runs, recording replacement runs, and returning returncode 0 with one
+        # passing test.
         destination.mkdir(parents=True, exist_ok=True)
         if "instrumentation" in kwargs:
             (destination / "traces.json").write_text("[]")

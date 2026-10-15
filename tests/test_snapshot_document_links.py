@@ -1,3 +1,6 @@
+# [MODULE DOC] Tests for snapshot symlink handling: tasksmith worker.inspect_source reports tracked
+# symlinks without following them, and materialize_document_links replaces only explicitly selected
+# in-tree document symlinks with their bytes, rejecting unsafe links before changing anything.
 from __future__ import annotations
 
 import hashlib
@@ -10,9 +13,15 @@ from repo2rlenv.spec.recipe_options import PythonRepositoryProfile
 
 
 def test_inspection_reports_all_tracked_links_without_following_them(tmp_path, monkeypatch):
+    # [FUNCTION DOC] Fakes worker.run (git) to create symlinks in the checkout and report ls-files;
+    # asserts snapshot_links lists only tracked symlinks with raw targets, including escaping and
+    # non-document ones, and excludes untracked links.
     from repo2rlenv.tasksmith import worker
 
     def git(argv):
+        # [FUNCTION DOC] HELPER: Fake git runner. On 'checkout' creates four symlinks in
+        # tmp_path/checkout; on 'rev-parse' returns 'frozen-head'; on 'ls-files' returns NUL-
+        # separated tracked paths; otherwise ''.
         if "checkout" in argv:
             checkout = tmp_path / "checkout"
             (checkout / "AGENTS.md").symlink_to("missing-target.md")
@@ -35,12 +44,17 @@ def test_inspection_reports_all_tracked_links_without_following_them(tmp_path, m
 
 
 def profile(*links):
+    # [FUNCTION DOC] HELPER: PythonRepositoryProfile with source 'package', tests 'tests' and the
+    # given materialize_document_links entries. Raises ValidationError on invalid entries.
     return PythonRepositoryProfile(
         source_paths=["package"], test_paths=["tests"], materialize_document_links=list(links)
     )
 
 
 def test_document_link_requires_explicit_selection_and_preserves_bytes(tmp_path):
+    # [FUNCTION DOC] Without selection the link remains; selecting CONTRIBUTING.md replaces it with
+    # the target's bytes and returns a record with path, target and sha256; a second call returns []
+    # (idempotent).
     target = tmp_path / "docs/contributing.md"
     target.parent.mkdir()
     target.write_bytes(b"# Contributing\n\nRepository guidance.\n")
@@ -63,6 +77,9 @@ def test_document_link_requires_explicit_selection_and_preserves_bytes(tmp_path)
 
 @pytest.mark.parametrize("kind", ["escape", "directory", "source", "missing", "cycle"])
 def test_unsupported_link_is_rejected_before_any_materialization(tmp_path, kind):
+    # [FUNCTION DOC] Parametrized unsafe link kinds (escape, directory, Python source, missing,
+    # cycle) raise ValueError 'Document link' and leave even the valid selected README.md link
+    # untouched.
     base = tmp_path / "snapshot"
     base.mkdir()
     good = base / "guide.md"
@@ -92,5 +109,6 @@ def test_unsupported_link_is_rejected_before_any_materialization(tmp_path, kind)
 
 @pytest.mark.parametrize("links", [["source.py"], ["README.md", "README.md"], ["../README.md"]])
 def test_profile_rejects_non_document_duplicate_and_traversal_paths(links):
+    # [FUNCTION DOC] Profile validation rejects .py entries, duplicates and '..' traversal.
     with pytest.raises(ValidationError):
         profile(*links)

@@ -1,3 +1,7 @@
+# [MODULE DOC] Tests for exported repository tasks whose source roots mix directories and standalone
+# Python files: contract.json collection is narrow, optional added files may be absent, standalone
+# files must be bounded regular non-symlink files, and invalid root combinations are refused at
+# export.
 """Mixed source directories and standalone modules retain narrow collection."""
 
 import json
@@ -13,6 +17,9 @@ from repo2rlenv.spec.recipe_options import PythonRepositoryProfile
 
 @pytest.fixture
 def source_tree(tmp_path, monkeypatch):
+    # [FUNCTION DOC] HELPER (fixture): Writes a small tree (lib/existing.py, lib/new.py, example.py,
+    # unrelated.py, README.md, tests/test_api.py) under tmp_path/base and neutralizes os.chown via
+    # monkeypatch (raising=False for Windows). Returns the base Path.
     base = tmp_path / "base"
     for name, content in {
         "lib/existing.py": "value = 1\n",
@@ -32,6 +39,10 @@ def source_tree(tmp_path, monkeypatch):
 
 
 def export(base, destination, *, roots=None, example_baseline=None):
+    # [FUNCTION DOC] HELPER: Calls export_repository_task with lib/new.py absent and example.py set
+    # to example_baseline in the defective tree, reference contents for both, and roots (default
+    # ['lib','example.py']). Inputs: base, destination, roots=None, example_baseline=None. Returns
+    # the task directory. Raises ValueError for invalid roots.
     return export_repository_task(
         base=base,
         defective={"lib/new.py": None, "example.py": example_baseline},
@@ -49,6 +60,10 @@ def export(base, destination, *, roots=None, example_baseline=None):
 
 
 def test_mixed_roots_export_and_validate_absent_or_present_added_file(source_tree, tmp_path):
+    # [FUNCTION DOC] Exports and checks contract fields (submitted_roots, submitted_files,
+    # optional_files), Harbor artifacts list, that example.py and tests are absent from the
+    # workspace, and that validate_submission/submission_files accept the file absent, then present
+    # plus an extra lib helper. Requires harbor.
     from harbor.models.task.task import Task
 
     task = export(source_tree, tmp_path / "tasks")
@@ -79,6 +94,9 @@ def test_mixed_roots_export_and_validate_absent_or_present_added_file(source_tre
 
 @pytest.mark.parametrize("invalid", ["directory", "oversized", "symlink", "dangling_symlink"])
 def test_optional_standalone_source_must_be_bounded_regular_file(source_tree, tmp_path, invalid):
+    # [FUNCTION DOC] Parametrized: replaces workspace example.py with a directory, an >8 MiB file, a
+    # symlink or a dangling symlink, and expects validate_submission to raise ValueError about
+    # symlink/bounded regular file.
     task = export(source_tree, tmp_path / "tasks")
     contract = json.loads((task / "tests/contract.json").read_text())
     workspace = task / "environment/source"
@@ -95,6 +113,8 @@ def test_optional_standalone_source_must_be_bounded_regular_file(source_tree, tm
 
 
 def test_modified_standalone_source_remains_required(source_tree, tmp_path):
+    # [FUNCTION DOC] With a non-None baseline, example.py exists in the workspace and validates;
+    # deleting it makes validate_submission raise ValueError.
     task = export(source_tree, tmp_path / "tasks", example_baseline=b"example = 0\n")
     workspace = task / "environment/source"
     contract = json.loads((task / "tests/contract.json").read_text())
@@ -115,11 +135,15 @@ def test_modified_standalone_source_remains_required(source_tree, tmp_path):
     ],
 )
 def test_mixed_roots_preserve_export_boundaries(source_tree, tmp_path, roots, message):
+    # [FUNCTION DOC] Parametrized invalid roots (overlap, private test dir, non-Python file, missing
+    # file) must make export raise ValueError with the matching message.
     with pytest.raises(ValueError, match=message):
         export(source_tree, tmp_path / "tasks", roots=roots)
 
 
 def test_absent_optional_file_cannot_hide_a_linked_parent(tmp_path):
+    # [FUNCTION DOC] A workspace whose optional file's parent directory is a symlink must fail
+    # validate_submission with 'symlink', even though the file is absent.
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     (workspace / "linked").symlink_to(tmp_path / "absent", target_is_directory=True)

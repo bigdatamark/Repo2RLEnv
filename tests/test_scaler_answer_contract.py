@@ -1,3 +1,6 @@
+# [MODULE DOC] Tests for the SCALER recipe's answer contract and typed grading: numeric tolerances,
+# exact big-integer comparison, string leading zeros, array order/shape/type, and that tolerances
+# are disclosed in the instruction and validated.
 from __future__ import annotations
 
 import pytest
@@ -7,6 +10,8 @@ from repo2rlenv.pipelines.recipes.scaler.grade import typed_equal
 
 
 def test_declared_rings_tolerance_accepts_valid_rounding_and_rejects_wrong_result():
+    # [FUNCTION DOC] answer_contract with 1e-9 absolute/relative tolerance accepts a correctly
+    # rounded boxed number and rejects a wrong one and 'nan'.
     contract = answer_contract(
         {"output_type": "number", "answer_tolerance": {"absolute": "1e-9", "relative": "1e-9"}}
     )
@@ -17,6 +22,8 @@ def test_declared_rings_tolerance_accepts_valid_rounding_and_rejects_wrong_resul
 
 
 def test_numeric_integer_outputs_remain_exact_without_public_tolerance():
+    # [FUNCTION DOC] Without tolerance, number grading is exact even past 2**53 (9007199254740993 vs
+    # ...992), accepts '.0' form, and rejects 0 vs 1e-12.
     contract = {"output_type": "number"}
     assert typed_equal(r"\boxed{9007199254740993}", "9007199254740993.0", contract)
     assert not typed_equal(r"\boxed{9007199254740993}", "9007199254740992", contract)
@@ -24,6 +31,7 @@ def test_numeric_integer_outputs_remain_exact_without_public_tolerance():
 
 
 def test_string_grading_preserves_leading_zeros():
+    # [FUNCTION DOC] String outputs compare exactly; leading zeros matter.
     contract = {"output_type": "string"}
     assert typed_equal(r"\boxed{0000011000}", "0000011000", contract)
     assert not typed_equal(r"\boxed{0000011000}", "11000", contract)
@@ -32,16 +40,21 @@ def test_string_grading_preserves_leading_zeros():
 
 @pytest.mark.parametrize("wrong", ["[2, 1]", "[1]", "[[1], 2]", "[true, 2]", "[1, 2, 3]"])
 def test_array_grading_rejects_changed_order_shape_and_type(wrong):
+    # [FUNCTION DOC] Parametrized wrong arrays (reordered, shorter, nested, boolean element, longer)
+    # do not equal [1, 2].
     assert not typed_equal(r"\boxed{[1, 2]}", wrong, {"output_type": "array"})
 
 
 def test_array_grading_keeps_large_integer_precision():
+    # [FUNCTION DOC] Array grading keeps big integer precision and treats 2.0 as 2.
     contract = {"output_type": "array"}
     assert typed_equal("[9007199254740993, 2]", "[9007199254740993, 2.0]", contract)
     assert not typed_equal("[9007199254740993, 2]", "[9007199254740992, 2]", contract)
 
 
 def test_tolerance_is_public_and_explicit():
+    # [FUNCTION DOC] instruction_for states absolute and relative error bounds as 1E-9; negative,
+    # NaN or Infinity tolerances make answer_contract raise ValueError.
     family = {
         "name": "Rings",
         "logic_description": "Compute the energy.",

@@ -1,3 +1,6 @@
+# [MODULE DOC] Tests for campaigns.structured.validated_complete: schema-invalid model output is
+# repaired by follow-up calls with distinct operation ids, provider errors are not retried, and
+# repairs stop at the attempt limit. metered_complete is monkeypatched; no real LLM calls.
 from __future__ import annotations
 
 import json
@@ -12,10 +15,15 @@ from repo2rlenv.pipelines.recipes.terminal.templates import TestProgram as Gener
 def test_invalid_completed_test_program_is_corrected_without_repeating_other_stages(
     monkeypatch, tmp_path
 ):
+    # [FUNCTION DOC] First fake response is an invalid test program, second valid; asserts the valid
+    # code is returned, operation ids are initial then ':repair:1', the repair prompt includes
+    # validation_error, and a -validation.json receipt is written.
     calls = []
     valid = "\n".join(f"def test_{n}():\n    assert {n} == {n}\n" for n in range(5))
 
     def complete(*args, **kwargs):
+        # [FUNCTION DOC] HELPER: Fake metered_complete recording kwargs; returns invalid JSON code
+        # on the first call, valid afterwards.
         calls.append(kwargs)
         return SimpleNamespace(
             content=json.dumps(
@@ -46,9 +54,11 @@ def test_invalid_completed_test_program_is_corrected_without_repeating_other_sta
 
 
 def test_provider_timeout_does_not_trigger_a_new_paid_request(monkeypatch, tmp_path):
+    # [FUNCTION DOC] A TimeoutError from the provider propagates after exactly one call.
     calls = []
 
     def complete(*args, **kwargs):
+        # [FUNCTION DOC] HELPER: Fake that records the call and raises TimeoutError.
         calls.append(kwargs)
         raise TimeoutError("Uncertain provider outcome")
 
@@ -70,9 +80,11 @@ def test_provider_timeout_does_not_trigger_a_new_paid_request(monkeypatch, tmp_p
 
 
 def test_schema_repairs_stop_at_the_configured_limit(monkeypatch, tmp_path):
+    # [FUNCTION DOC] Always-invalid output raises ValueError 'exhausted 3 attempts' after 3 calls.
     calls = []
 
     def complete(*args, **kwargs):
+        # [FUNCTION DOC] HELPER: Fake always returning code with no executable tests.
         calls.append(kwargs)
         return SimpleNamespace(content=json.dumps({"code": "# no executable tests\n" * 8}))
 

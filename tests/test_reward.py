@@ -1,3 +1,6 @@
+# [MODULE DOC] Tests for repo2rlenv.reward.calculate_diff_similarity_reward (SWE-RL style diff
+# similarity): identity, empty prediction, normalization of volatile metadata, mode-only and rename-
+# only patches.
 """Diff-similarity reward function."""
 
 from __future__ import annotations
@@ -16,18 +19,21 @@ index abc..def 100644
 
 
 def test_identical_diffs_yield_one():
+    # [FUNCTION DOC] Same diff for oracle and prediction scores 1.0 with no parse_error.
     reward, meta = calculate_diff_similarity_reward(SAMPLE_DIFF, SAMPLE_DIFF)
     assert reward == 1.0
     assert meta.parse_error is None
 
 
 def test_empty_prediction_yields_zero():
+    # [FUNCTION DOC] Empty prediction scores 0.0 with parse_error 'empty prediction'.
     reward, meta = calculate_diff_similarity_reward(SAMPLE_DIFF, "")
     assert reward == 0.0
     assert meta.parse_error == "empty prediction"
 
 
 def test_normalization_ignores_index_and_hunk_numbers():
+    # [FUNCTION DOC] Diffs differing only in index hashes and hunk line numbers score 1.0.
     """Two diffs that differ only in volatile metadata should still score 1.0."""
     a = """diff --git a/x.py b/x.py
 index 1234567..89abcde 100644
@@ -54,6 +60,7 @@ index ffffff0..0000fff 100644
 
 
 def test_unrelated_diffs_score_low():
+    # [FUNCTION DOC] Diffs touching different files with different content score below 0.5.
     a = """diff --git a/foo.py b/foo.py
 --- a/foo.py
 +++ b/foo.py
@@ -73,6 +80,7 @@ def test_unrelated_diffs_score_low():
 
 
 def test_partial_match_scores_in_between():
+    # [FUNCTION DOC] Changing the added line text yields a reward strictly between 0.5 and 1.0.
     a = SAMPLE_DIFF
     b = SAMPLE_DIFF.replace("hello, world", "goodbye")
     reward, _ = calculate_diff_similarity_reward(a, b)
@@ -80,6 +88,8 @@ def test_partial_match_scores_in_between():
 
 
 def test_normalization_ignores_git_extended_headers_and_mode_changes():
+    # [FUNCTION DOC] A new-file diff with mode header and 'No newline' marker vs. one without them
+    # scores 1.0 and parses cleanly.
     """Diffs that differ only in file modes or extended git headers should score 1.0."""
     oracle = """diff --git a/script.py b/script.py
 new file mode 100755
@@ -105,6 +115,7 @@ index 0000000..abcdef1
 
 
 def test_mode_only_patch_scores_one():
+    # [FUNCTION DOC] Identical mode-only patch scores 1.0 with no parse error.
     """An identical mode-only patch (e.g. 100644 to 100755) should score 1.0."""
     diff = """diff --git a/script.sh b/script.sh
 old mode 100644
@@ -116,6 +127,7 @@ new mode 100755
 
 
 def test_mode_only_patch_mismatch():
+    # [FUNCTION DOC] Mode-only patches with different new modes score below 1.0.
     """A mode-only patch with differing target mode should score less than 1.0."""
     oracle = """diff --git a/script.sh b/script.sh
 old mode 100644
@@ -130,6 +142,7 @@ new mode 100644
 
 
 def test_rename_only_patch_scores_one():
+    # [FUNCTION DOC] Identical rename-only patch scores 1.0 with no parse error.
     """An identical rename-only patch should score 1.0."""
     oracle = """diff --git a/old.py b/new.py
 similarity index 100%
@@ -147,6 +160,8 @@ rename to new.py
 
 
 def test_multi_file_diff_with_mode_only_change():
+    # [FUNCTION DOC] An identical diff mixing a code hunk and a mode-only file scores 1.0 with no
+    # parse error.
     """Diff with both code hunks and mode-only changes should score 1.0 when identical."""
     diff = """diff --git a/foo.py b/foo.py
 --- a/foo.py

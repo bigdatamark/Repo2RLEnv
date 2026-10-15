@@ -1,3 +1,5 @@
+# [MODULE DOC] Tests for SWE-smith candidate export: separated reference, defective build contexts,
+# task.toml network/verifier settings, and Harbor parsing.
 from __future__ import annotations
 
 import json
@@ -13,6 +15,9 @@ from repo2rlenv.pipelines.recipes.swe_smith.options import SWESmithOptions
 
 @pytest.fixture
 def exported(tmp_path):
+    # [FUNCTION DOC] HELPER (fixture): Writes a base repo and candidate evidence (original/mutated
+    # value.py) under tmp_path/generation and calls export_candidate. Returns the exported task
+    # Path.
     generation = tmp_path / "generation"
     base = generation / "base"
     (base / "library").mkdir(parents=True)
@@ -43,6 +48,9 @@ def exported(tmp_path):
 
 
 def test_export_separates_reference_and_uses_defective_build_contexts(exported):
+    # [FUNCTION DOC] Checks bundle integrity, no tests in the workspace, mutated source and LICENSE
+    # in both contexts, reference in solution, recipe_version, separate verifier, no-network,
+    # artifacts and non-empty expected_passes.
     assert inspect_bundle(exported)["integrity_passed"]
     assert not (exported / "environment/source/tests").exists()
     for context in ("environment", "tests"):
@@ -62,6 +70,8 @@ def test_export_separates_reference_and_uses_defective_build_contexts(exported):
 
 
 def test_export_parses_with_pinned_harbor_contract(exported):
+    # [FUNCTION DOC] Harbor parses the task with schema 1.3, separate verifier and agent user
+    # 'learner'. Skipped without harbor.
     harbor = pytest.importorskip("harbor.models.task.task")
     task = harbor.Task(exported)
     assert task.config.schema_version == "1.3"
