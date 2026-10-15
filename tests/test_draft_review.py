@@ -1,3 +1,5 @@
+# [MODULE DOC] Test for quality/draft_review.py:review_draft: a blocking reference defect returned
+# by the reviewer model must be raised back to materialization and persisted to decision.json.
 from __future__ import annotations
 
 import json
@@ -9,6 +11,10 @@ from repo2rlenv.quality.draft_review import review_draft
 
 
 def test_concrete_reference_defect_is_returned_to_materialization(monkeypatch, tmp_path):
+    # [FUNCTION DOC] Monkeypatches campaigns.structured.metered_complete to return a JSON review
+    # with one blocking 'reference' issue, then asserts review_draft raises ValueError containing
+    # the issue's repair text and that tmp_path/decision.json records exactly that issue. Inputs:
+    # monkeypatch, tmp_path. Side effects: review_draft writes decision.json under tmp_path.
     draft = SimpleNamespace(
         instruction="Repair /workspace/tool.sh so it writes output.txt.",
         tests_python="assert open('output.txt').read() == 'ok'",

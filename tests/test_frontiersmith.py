@@ -1,3 +1,8 @@
+# [MODULE DOC] Tests for the FrontierSmith owned recipe (optimization_synth): discovery and option
+# bounds, reward validation and grading (finite_reward, grade_output, generated_cases), behavioral
+# divergence, candidate failure handling in FrontierSmithPipeline, task export (export_task), and
+# the receipted model-author call (author) with budget-ledger reservation semantics. OpenAI clients
+# and worker plumbing are faked.
 from __future__ import annotations
 
 import json
@@ -27,6 +32,9 @@ from repo2rlenv.spec.options import parse_options
 
 
 def test_discovery_and_bounded_options():
+    # [FUNCTION DOC] Asserts frontiersmith is cataloged under optimization_synth and implemented,
+    # default target is 10, max_candidates below target raises ValueError, and an approved Review
+    # with issues raises ValueError.
     from repo2rlenv.pipelines.recipes.catalog import IMPLEMENTATIONS, get_recipe
 
     assert get_recipe("frontiersmith").pipeline == "optimization_synth"
@@ -42,11 +50,15 @@ def test_discovery_and_bounded_options():
 
 @pytest.mark.parametrize("value", [True, float("nan"), float("inf"), -0.1, 1.1, "0.8"])
 def test_invalid_rewards_are_infrastructure_failures(value):
+    # [FUNCTION DOC] Parametrized over bool, NaN, inf, out-of-range and string values; asserts
+    # finite_reward raises ValueError.
     with pytest.raises(ValueError):
         finite_reward(value)
 
 
 def test_continuous_rewards_and_behavioral_diversity():
+    # [FUNCTION DOC] Asserts finite_reward passes 0.63 through and behavioral_divergence returns 1
+    # for differing score vectors, 0 for identical ones, and raises ValueError on ragged input.
     assert finite_reward(0.63) == 0.63
     assert behavioral_divergence([[0.1, 0.9], [0.9, 0.1]], 0.01) == 1
     assert behavioral_divergence([[0.5, 0.5], [0.5, 0.5]], 0.01) == 0
@@ -55,6 +67,9 @@ def test_continuous_rewards_and_behavioral_diversity():
 
 
 def test_zero_reward_does_not_mean_infeasible_and_disagreement_fails():
+    # [FUNCTION DOC] Asserts grade_output returns (score, feasible) with zero score allowed either
+    # way, raises ValueError when a positive score is infeasible, when is_feasible returns a non-
+    # bool, and when repeated scoring is not deterministic.
     zero = SimpleNamespace(score=lambda instance, output: 0.0)
     positive = SimpleNamespace(score=lambda instance, output: 0.5)
     valid = SimpleNamespace(is_feasible=lambda instance, output: True)
@@ -71,6 +86,8 @@ def test_zero_reward_does_not_mean_infeasible_and_disagreement_fails():
 
 
 def test_generator_rejects_invalid_or_unstable_case_sets():
+    # [FUNCTION DOC] Asserts generated_cases returns 8 valid cases for seed 43 and raises
+    # ValueError for empty, >16, non-dict, non-finite, or nondeterministic case sets.
     valid = SimpleNamespace(generate=lambda seed: [{"value": seed}] * 8)
     assert generated_cases(valid, 43) == [{"value": 43}] * 8
     for cases in ([], [{}] * 17, [None] * 8, [{"value": float("nan")}] * 8):
@@ -83,6 +100,13 @@ def test_generator_rejects_invalid_or_unstable_case_sets():
 
 @pytest.mark.parametrize("failure_mode", ["artifact", "connection", "timeout"])
 def test_candidate_failures_continue_to_other_seeds(tmp_path, monkeypatch, failure_mode):
+    # [FUNCTION DOC] Parametrized over artifact/connection/timeout failures. Builds a two-seed
+    # campaign (ledger, seeds JSON, running worker receipt, GenerationInput), stubs
+    # runtime/worker/docker setup, and makes either author raise InvalidArtifact or the OpenAI
+    # client raise connection/timeout errors. Runs FrontierSmithPipeline and asserts the run
+    # completes with both seeds skipped for the matching reason, the expected call count (6 or 2),
+    # and for transport failures two uncertain ledger operations with a nonzero reservation and
+    # per-seed failure.json records. Side effects: files under tmp_path, env var.
     from datetime import UTC, datetime
 
     from repo2rlenv.pipelines.recipes.frontiersmith import pipeline
@@ -141,6 +165,8 @@ def test_candidate_failures_continue_to_other_seeds(tmp_path, monkeypatch, failu
     calls = []
 
     def invalid(*args, **kwargs):
+        # [FUNCTION DOC] HELPER: Fake author; records the operation kwarg and raises
+        # InvalidArtifact.
         calls.append(kwargs["operation"])
         raise InvalidArtifact("Received malformed model artifact")
 
@@ -155,16 +181,24 @@ def test_candidate_failures_continue_to_other_seeds(tmp_path, monkeypatch, failu
         from openai import APIConnectionError, APITimeoutError
 
         class Client:
+            # [CLASS DOC] HELPER: Fake openai.OpenAI client used as a context manager; its
+            # responses attribute is itself so responses.create routes to create().
             def __init__(self, **kwargs):
+                # [FUNCTION DOC] HELPER: Accepts and ignores client kwargs; sets self.responses =
+                # self.
                 self.responses = self
 
             def __enter__(self):
+                # [FUNCTION DOC] HELPER: Returns self.
                 return self
 
             def __exit__(self, *args):
+                # [FUNCTION DOC] HELPER: Returns False so exceptions propagate.
                 return False
 
             def create(self, **kwargs):
+                # [FUNCTION DOC] HELPER: Records kwargs and raises APITimeoutError or
+                # APIConnectionError per failure_mode.
                 calls.append(kwargs)
                 error = APITimeoutError if failure_mode == "timeout" else APIConnectionError
                 raise error(request=httpx.Request("POST", "https://api.openai.com/v1/responses"))
@@ -201,6 +235,11 @@ def test_candidate_failures_continue_to_other_seeds(tmp_path, monkeypatch, failu
 
 
 def test_export_is_parseable_private_and_content_bound(tmp_path):
+    # [FUNCTION DOC] Exports a fixture design/infrastructure/solution, loads it with Harbor's Task,
+    # and asserts no-network, solver agent user, root verifier user, unverified evaluation status,
+    # private files only under tests/, explicit feasibility contract, resource limits in
+    # instruction.md, and bundle integrity. Asserts resume returns the same path, and that
+    # tampering with tests/scorer.py makes resume raise 'does not match'.
     from harbor.models.task.task import Task
 
     design = Design(
@@ -242,21 +281,31 @@ def test_export_is_parseable_private_and_content_bound(tmp_path):
 
 
 def test_model_receipt_resume_never_redispatches(tmp_path, monkeypatch):
+    # [FUNCTION DOC] Fakes a completed OpenAI response containing a Review; asserts author returns
+    # it, a resume returns the receipt without a second call, no reservation remains, and resuming
+    # with a changed payload raises 'different request'.
     calls = []
     artifact = Review(approved=True, issues=[], rationale="Consistent")
     usage = {"input_tokens": 100, "output_tokens": 100}
 
     class Client:
+        # [CLASS DOC] HELPER: Fake openai.OpenAI client used as a context manager; its responses
+        # attribute is itself so responses.create routes to create().
         def __init__(self, **kwargs):
+            # [FUNCTION DOC] HELPER: Accepts and ignores client kwargs; sets self.responses = self.
             self.responses = self
 
         def __enter__(self):
+            # [FUNCTION DOC] HELPER: Returns self.
             return self
 
         def __exit__(self, *args):
+            # [FUNCTION DOC] HELPER: Returns False so exceptions propagate.
             return False
 
         def create(self, **kwargs):
+            # [FUNCTION DOC] HELPER: Records kwargs; returns a completed response with the Review
+            # JSON and usage.
             calls.append(kwargs)
             return SimpleNamespace(
                 status="completed",
@@ -285,19 +334,28 @@ def test_model_receipt_resume_never_redispatches(tmp_path, monkeypatch):
 
 
 def test_transport_error_preserves_reservation(tmp_path, monkeypatch):
+    # [FUNCTION DOC] Fakes a client raising TimeoutError; asserts author propagates it, the ledger
+    # op is uncertain, resume raises 'Reconcile', the receipt is uncertain with the exception type,
+    # the reservation is kept and only one call was made.
     calls = []
 
     class Client:
+        # [CLASS DOC] HELPER: Fake openai.OpenAI client used as a context manager; its responses
+        # attribute is itself so responses.create routes to create().
         def __init__(self, **kwargs):
+            # [FUNCTION DOC] HELPER: Accepts and ignores client kwargs; sets self.responses = self.
             self.responses = self
 
         def __enter__(self):
+            # [FUNCTION DOC] HELPER: Returns self.
             return self
 
         def __exit__(self, *args):
+            # [FUNCTION DOC] HELPER: Returns False so exceptions propagate.
             return False
 
         def create(self, **kwargs):
+            # [FUNCTION DOC] HELPER: Records kwargs and raises TimeoutError('lost response').
             calls.append(kwargs)
             raise TimeoutError("lost response")
 
@@ -326,21 +384,31 @@ def test_transport_error_preserves_reservation(tmp_path, monkeypatch):
 
 
 def test_invalid_received_output_is_charged_and_not_redispatched(tmp_path, monkeypatch):
+    # [FUNCTION DOC] Fakes a response with an incomplete Review; asserts author raises
+    # InvalidArtifact on both fresh and resume runs with one dispatch, the ledger op settled and
+    # charged, and the receipt state invalid_output.
     from repo2rlenv.pipelines.recipes.frontiersmith.author import InvalidArtifact
 
     calls = []
 
     class Client:
+        # [CLASS DOC] HELPER: Fake openai.OpenAI client used as a context manager; its responses
+        # attribute is itself so responses.create routes to create().
         def __init__(self, **kwargs):
+            # [FUNCTION DOC] HELPER: Accepts and ignores client kwargs; sets self.responses = self.
             self.responses = self
 
         def __enter__(self):
+            # [FUNCTION DOC] HELPER: Returns self.
             return self
 
         def __exit__(self, *args):
+            # [FUNCTION DOC] HELPER: Returns False so exceptions propagate.
             return False
 
         def create(self, **kwargs):
+            # [FUNCTION DOC] HELPER: Records kwargs; returns a completed response with an
+            # incomplete Review JSON and usage.
             calls.append(kwargs)
             return SimpleNamespace(
                 status="completed",

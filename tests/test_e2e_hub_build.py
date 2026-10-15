@@ -1,3 +1,7 @@
+# [MODULE DOC] Opt-in end-to-end smoke test (skipped unless R2E_E2E_HUB_BUILD=1): pulls a published
+# runtime dataset from the HF Hub (R2E_E2E_HUB_DATASET, default AdithyaSK/repo2rlenv-pr-runtime),
+# builds one task's environment and runs Harbor's oracle agent, expecting reward 1.0. Needs docker,
+# harbor and network.
 """End-to-end Hub→build→oracle smoke test for a published runtime dataset.
 
 Gated on an env var and SKIPPED in normal CI (needs docker + harbor + network
@@ -38,10 +42,18 @@ pytestmark = pytest.mark.skipif(
 
 
 def _have(cmd: str) -> bool:
+    # [FUNCTION DOC] HELPER: Returns True if the executable cmd is on PATH (shutil.which). Input:
+    # cmd str. Output: bool.
     return shutil.which(cmd) is not None
 
 
 def test_hub_task_builds_and_oracle_resolves(tmp_path: Path) -> None:
+    # [FUNCTION DOC] Skips without docker and harbor. Downloads the dataset snapshot to
+    # tmp_path/ds, copies the first task into a one-task dataset dir, asserts the Dockerfile has a
+    # FROM line, test.sh has no base64 and tests/verifier.py exists, then runs 'harbor run -a
+    # oracle --env docker' (30 min timeout) and asserts exit 0, a reward.txt equal to 1.0, and
+    # resolved=True in reward-details.json if present. Inputs: tmp_path. Side effects: network
+    # download, subprocess, Docker builds, writes under tmp_path.
     if not (_have("docker") and _have("harbor")):
         pytest.skip("docker + harbor required")
 

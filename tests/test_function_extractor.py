@@ -1,3 +1,7 @@
+# [MODULE DOC] Unit tests for pipelines/_function_extractor.py (equivalence_tests candidate
+# selection): feeds small source strings through extract_from_module and checks acceptance, LOC
+# bounds, name filters, side-effect heuristics, module-level-only scope, decorator slicing, syntax-
+# error tolerance and walk_repo globbing.
 """AST function extractor for equivalence_tests — unit tests.
 
 Each test feeds a small Python source string through extract_from_module
@@ -15,6 +19,9 @@ from repo2rlenv.pipelines._function_extractor import (
 
 
 def _extract(source: str, *, min_loc: int = 1, max_loc: int = 200):
+    # [FUNCTION DOC] HELPER: Calls extract_from_module with a dummy /dev/null path, relative_path
+    # 'src/foo.py' and the given min_loc (default 1) / max_loc (default 200). Input: source str.
+    # Output: list of candidates.
     return extract_from_module(
         Path("/dev/null"),
         source,
@@ -30,6 +37,8 @@ def _extract(source: str, *, min_loc: int = 1, max_loc: int = 200):
 
 
 def test_extracts_simple_function():
+    # [FUNCTION DOC] Asserts a two-arg returning function is extracted with name, arg_names,
+    # docstring and source.
     source = 'def add(x, y):\n    """Sum two ints."""\n    return x + y\n'
     out = _extract(source)
     assert len(out) == 1
@@ -41,12 +50,14 @@ def test_extracts_simple_function():
 
 
 def test_skips_zero_arg_function():
+    # [FUNCTION DOC] Asserts zero-argument functions are rejected.
     """Functions with no args can't be exercised by an equivalence test."""
     source = "def get():\n    return 42\n"
     assert _extract(source) == []
 
 
 def test_skips_no_explicit_return():
+    # [FUNCTION DOC] Asserts functions without a valued return are rejected.
     """Functions without `return <expr>` give no output to compare."""
     source = 'def shout(msg):\n    """Print loudly."""\n    print(msg.upper())\n'
     out = _extract(source)
@@ -54,12 +65,14 @@ def test_skips_no_explicit_return():
 
 
 def test_skips_bare_return():
+    # [FUNCTION DOC] Asserts functions with only a bare return are rejected.
     """`return` without a value isn't useful for differential testing."""
     source = "def maybe(x):\n    if x:\n        return\n"
     assert _extract(source) == []
 
 
 def test_skips_async_functions():
+    # [FUNCTION DOC] Asserts async functions are rejected.
     source = "async def fetch(url):\n    return await get(url)\n"
     assert _extract(source) == []
 
@@ -70,17 +83,20 @@ def test_skips_async_functions():
 
 
 def test_below_min_loc_filtered():
+    # [FUNCTION DOC] Asserts a 1-line body is rejected with min_loc=5.
     source = "def f(x):\n    return x\n"  # body = 1 line
     assert _extract(source, min_loc=5, max_loc=100) == []
 
 
 def test_above_max_loc_filtered():
+    # [FUNCTION DOC] Asserts a 21-line body is rejected with max_loc=5.
     body = "\n".join(f"    x = x + {i}" for i in range(20))
     source = f"def f(x):\n{body}\n    return x\n"
     assert _extract(source, min_loc=1, max_loc=5) == []
 
 
 def test_within_loc_range_kept():
+    # [FUNCTION DOC] Asserts a 6-line body is kept with min_loc=5, max_loc=10.
     body = "\n".join(f"    x = x + {i}" for i in range(5))
     source = f"def f(x):\n{body}\n    return x\n"
     out = _extract(source, min_loc=5, max_loc=10)
@@ -93,21 +109,25 @@ def test_within_loc_range_kept():
 
 
 def test_skips_test_prefix():
+    # [FUNCTION DOC] Asserts test_-prefixed functions are rejected.
     source = "def test_add(x, y):\n    return x + y\n"
     assert _extract(source) == []
 
 
 def test_skips_underscore_prefix():
+    # [FUNCTION DOC] Asserts underscore-prefixed functions are rejected.
     source = "def _helper(x):\n    return x + 1\n"
     assert _extract(source) == []
 
 
 def test_skips_main():
+    # [FUNCTION DOC] Asserts a function named main is rejected.
     source = "def main(argv):\n    return argv[0]\n"
     assert _extract(source) == []
 
 
 def test_skips_dunder():
+    # [FUNCTION DOC] Asserts dunder-named functions are rejected.
     source = "def __getitem__(self, idx):\n    return idx\n"
     # __getitem__ is on a class technically; even at module level it starts with _
     assert _extract(source) == []
@@ -119,6 +139,7 @@ def test_skips_dunder():
 
 
 def test_skips_open():
+    # [FUNCTION DOC] Asserts functions calling open() are rejected as impure.
     source = (
         "def read_text(path):\n"
         '    """Read a file."""\n'
@@ -129,16 +150,19 @@ def test_skips_open():
 
 
 def test_skips_subprocess():
+    # [FUNCTION DOC] Asserts functions using subprocess are rejected as impure.
     source = "def run_cmd(cmd):\n    import subprocess\n    return subprocess.run(cmd).returncode\n"
     assert _extract(source) == []
 
 
 def test_skips_print():
+    # [FUNCTION DOC] Asserts functions calling print() are rejected as impure.
     source = "def logging_helper(x):\n    print(x)\n    return x\n"
     assert _extract(source) == []
 
 
 def test_pure_function_accepted():
+    # [FUNCTION DOC] Asserts a pure loop-and-return function is accepted.
     source = (
         "def total(items):\n"
         '    """Sum the items."""\n'
@@ -158,6 +182,7 @@ def test_pure_function_accepted():
 
 
 def test_picks_only_module_level():
+    # [FUNCTION DOC] Asserts only the outer function is extracted, not nested functions.
     source = "def outer(x):\n    def inner(y):\n        return y * 2\n    return inner(x)\n"
     out = _extract(source)
     # Only `outer`, not `inner`
@@ -165,12 +190,14 @@ def test_picks_only_module_level():
 
 
 def test_picks_multiple_top_level():
+    # [FUNCTION DOC] Asserts all qualifying top-level functions are extracted.
     source = "def double(x):\n    return x * 2\n\ndef triple(x):\n    return x * 3\n"
     out = _extract(source)
     assert sorted(c.name for c in out) == ["double", "triple"]
 
 
 def test_skips_class_methods_for_v0_7():
+    # [FUNCTION DOC] Asserts class methods are not extracted.
     """v0.7 scope: module-level only. Class methods need different handling."""
     source = "class Counter:\n    def inc(self, n):\n        return self.value + n\n"
     assert _extract(source) == []
@@ -182,6 +209,7 @@ def test_skips_class_methods_for_v0_7():
 
 
 def test_source_includes_decorators():
+    # [FUNCTION DOC] Asserts candidate source includes the decorator lines.
     source = "@staticmethod\n@cache\ndef add(x, y):\n    return x + y\n"
     out = _extract(source)
     assert len(out) == 1
@@ -190,6 +218,7 @@ def test_source_includes_decorators():
 
 
 def test_handles_syntax_error_gracefully():
+    # [FUNCTION DOC] Asserts unparseable source yields an empty list instead of raising.
     """Un-parseable source yields no candidates instead of raising."""
     source = "def f( :\n"  # invalid
     assert _extract(source) == []
@@ -201,6 +230,8 @@ def test_handles_syntax_error_gracefully():
 
 
 def test_walk_repo_respects_globs(tmp_path: Path):
+    # [FUNCTION DOC] Writes src/a.py and tests/test_a.py under tmp_path and asserts walk_repo with
+    # exclude 'tests/**' yields candidates only from src/a.py.
     (tmp_path / "src").mkdir()
     (tmp_path / "tests").mkdir()
     (tmp_path / "src" / "a.py").write_text("def hello(x):\n    return x\n")
@@ -220,6 +251,8 @@ def test_walk_repo_respects_globs(tmp_path: Path):
 
 
 def test_walk_repo_handles_unreadable_file(tmp_path: Path):
+    # [FUNCTION DOC] Writes a valid module and a binary .py file; asserts walk_repo yields only the
+    # valid function without raising.
     """An I/O error on one file shouldn't blow up the whole walk."""
     (tmp_path / "good.py").write_text("def x(a):\n    return a + 1\n")
     # Create a binary file with invalid utf-8 — read_text uses errors="replace"

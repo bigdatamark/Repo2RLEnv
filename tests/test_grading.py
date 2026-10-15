@@ -1,3 +1,6 @@
+# [MODULE DOC] Tests for reward.py:grade_test_execution (SWE-bench-style FAIL_TO_PASS /
+# PASS_TO_PASS grading) and the ExecutionReport it returns: rates, FULL/PARTIAL/NO resolution and
+# per-test success/failure lists.
 """SWE-bench-style FAIL_TO_PASS / PASS_TO_PASS grading."""
 
 from __future__ import annotations
@@ -6,6 +9,7 @@ from repo2rlenv.reward import ExecutionReport, grade_test_execution
 
 
 def test_all_pass_yields_full_resolution():
+    # [FUNCTION DOC] Asserts all F2P and P2P passing gives rates 1.0 and FULL.
     report = grade_test_execution(
         fail_to_pass=["t1", "t2"],
         pass_to_pass=["t3"],
@@ -17,6 +21,7 @@ def test_all_pass_yields_full_resolution():
 
 
 def test_partial_f2p_with_full_p2p_is_partial():
+    # [FUNCTION DOC] Asserts half of F2P passing with all P2P passing gives f2p 0.5 and PARTIAL.
     report = grade_test_execution(
         fail_to_pass=["t1", "t2"],
         pass_to_pass=["t3"],
@@ -28,6 +33,7 @@ def test_partial_f2p_with_full_p2p_is_partial():
 
 
 def test_failing_p2p_breaks_resolution():
+    # [FUNCTION DOC] Asserts any P2P failure gives NO even with full F2P.
     """Any P2P failure (regression) means NO, even if F2P succeeds fully."""
     report = grade_test_execution(
         fail_to_pass=["t1"],
@@ -40,6 +46,7 @@ def test_failing_p2p_breaks_resolution():
 
 
 def test_missing_test_counts_as_failure():
+    # [FUNCTION DOC] Asserts an F2P test absent from test_status counts as failed (rate 0, NO).
     """Tests not present in the parser output count as failures (silent skip)."""
     report = grade_test_execution(
         fail_to_pass=["t1"],
@@ -51,6 +58,7 @@ def test_missing_test_counts_as_failure():
 
 
 def test_empty_sets_grade_as_full_by_default():
+    # [FUNCTION DOC] Asserts empty F2P and P2P sets grade vacuously as rates 1.0 and FULL.
     """No F2P + no P2P ⇒ vacuously full. SWE-bench's grading does the same."""
     report = grade_test_execution(
         fail_to_pass=[],
@@ -63,6 +71,8 @@ def test_empty_sets_grade_as_full_by_default():
 
 
 def test_report_dataclass_shape():
+    # [FUNCTION DOC] Asserts the ExecutionReport lists split tests into F2P/P2P success and
+    # failure.
     """Caller (Harbor verifier) reads the four lists for per-test reporting."""
     report = grade_test_execution(
         fail_to_pass=["a", "b"],

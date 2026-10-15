@@ -1,3 +1,6 @@
+# [MODULE DOC] Tests for the Endless Terminals owned recipe: deterministic category/complexity
+# sampling (sampler.sample_inputs) and the staged design flow where separate author calls receive
+# prior-stage evidence. Model calls are monkeypatched.
 from __future__ import annotations
 
 import json
@@ -11,6 +14,10 @@ from repo2rlenv.pipelines.recipes.terminal import templates
 
 
 def test_native_category_complexity_context_sampling(tmp_path):
+    # [FUNCTION DOC] Writes sampler JSON configs to tmp_path and asserts sample_inputs is
+    # deterministic for a seed, yields 20 uniquely titled rows spanning >5 categories and >1
+    # complexity, honours an explicit categories filter, and raises ValueError 'Unknown' for an
+    # unknown category. Side effects: writes tmp_path file.
     source = tmp_path / "sampler.json"
     source.write_text(json.dumps({"seed": 24, "count": 20}))
     seeds = sample_inputs(source)
@@ -30,10 +37,18 @@ def test_native_category_complexity_context_sampling(tmp_path):
 
 
 def test_separate_authors_receive_prior_stage_evidence(tmp_path, monkeypatch):
+    # [FUNCTION DOC] Patches templates.metered_complete and campaigns.structured.metered_complete
+    # with a fake that returns a description/truth JSON on the first call and a test program
+    # afterwards, then calls recipe.design and asserts three calls with operation ids design,
+    # :initial, :final; that the final author receives the initial tests; stage-specific system
+    # prompts; equal initial/final tests; and core_capabilities equal to the category. Inputs:
+    # tmp_path, monkeypatch. Side effects: receipt under tmp_path.
     calls = []
     program = "\n".join(f"def test_case_{i}():\n    assert {i} == {i}\n" for i in range(5))
 
     def complete(model, **kwargs):
+        # [FUNCTION DOC] HELPER: Fake metered completion. Records kwargs; returns a SimpleNamespace
+        # whose content is JSON with description/truth on the first call, else {'code': program}.
         calls.append(kwargs)
         return SimpleNamespace(
             content=json.dumps(

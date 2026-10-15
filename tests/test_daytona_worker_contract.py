@@ -1,3 +1,7 @@
+# [MODULE DOC] Contract test for execution/daytona.py:DaytonaWorker against the installed daytona
+# SDK: verifies the sandbox-creation request uses the SDK's real parameter/resource/image model
+# types without creating a cloud sandbox (the Daytona client is monkeypatched). Skipped when the
+# daytona package is absent.
 """Use Daytona's real image and request models without creating a cloud sandbox."""
 
 from __future__ import annotations
@@ -12,11 +16,21 @@ from repo2rlenv.execution.daytona import DaytonaWorker
 
 @pytest.mark.parametrize("image", [None, "ubuntu:24.04"])
 def test_worker_request_matches_installed_sdk(monkeypatch, image):
+    # [FUNCTION DOC] Parametrized over image None (expects an SDK Image object built by the worker)
+    # and 'ubuntu:24.04' (passed through as a string). Replaces daytona.Daytona with a stub whose
+    # create() validates params and returns a fake sandbox, then calls DaytonaWorker.create with
+    # memory_mb=4097 and timeout_sec=600 and asserts the worker holds the stub client and sandbox
+    # and that create was called once. Inputs: monkeypatch, image. Side effects: monkeypatches the
+    # daytona module attribute.
     daytona = pytest.importorskip("daytona")
     sandbox = SimpleNamespace(id="sdk-contract")
     calls = []
 
     def create(params, *, timeout):
+        # [FUNCTION DOC] HELPER: Fake Daytona.create. Records params and asserts they are
+        # CreateSandboxFromImageParams with Resources memory 5 (GiB, rounded up from 4097 MB),
+        # os_user root, ephemeral, auto_stop 10, auto_delete 0, timeout 180, and the expected
+        # image. Returns the fake sandbox.
         calls.append(params)
         assert isinstance(params, daytona.CreateSandboxFromImageParams)
         assert isinstance(params.resources, daytona.Resources)

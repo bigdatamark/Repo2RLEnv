@@ -1,3 +1,6 @@
+# [MODULE DOC] Packaging test: every owned recipe with an implementation must have its upstream
+# attribution and license declared in pyproject.toml license-files and THIRD_PARTY_NOTICES.md.
+# Reads repo files only.
 """Attribution must be discoverable and declared in distribution metadata."""
 
 from __future__ import annotations
@@ -11,6 +14,12 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_every_retained_recipe_license_is_declared():
+    # [FUNCTION DOC] Parses pyproject.toml, asserts license is 'Apache-2.0 AND MIT', expands
+    # license-files globs, and for each catalog recipe present in IMPLEMENTATIONS asserts
+    # provenance.md exists, the upstream commit (or version) appears in THIRD_PARTY_NOTICES.md, and
+    # UPSTREAM_LICENSE is declared with an MIT/Apache-2.0 license when material is retained, or
+    # absent with license NOASSERTION otherwise. Also requires the scaler UPSTREAM_NOTICE to be
+    # declared. Inputs/outputs: none. Side effects: reads files.
     project = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]
     assert project["license"] == "Apache-2.0 AND MIT"
     declared = {path for pattern in project["license-files"] for path in ROOT.glob(pattern)}

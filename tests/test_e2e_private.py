@@ -1,3 +1,6 @@
+# [MODULE DOC] End-to-end pr_diff test against the private repo huggingface/trl-internal. Skipped
+# when gh is missing or the authenticated user cannot access the repo; proves the private-repo auth
+# path. Uses live GitHub.
 """End-to-end test against a private repo (huggingface/trl-internal).
 
 Requires:
@@ -33,6 +36,9 @@ pytestmark = pytest.mark.skipif(
 
 
 def _can_access(owner_name: str) -> bool:
+    # [FUNCTION DOC] HELPER: Returns True if 'gh api /repos/<owner_name> --silent' exits 0 within
+    # 10s; False on nonzero exit or subprocess/OS error. Runs at import time (skipif). Side
+    # effects: subprocess, network.
     try:
         r = subprocess.run(
             ["gh", "api", f"/repos/{owner_name}", "--silent"],
@@ -50,6 +56,10 @@ def _can_access(owner_name: str) -> bool:
     reason="no access to huggingface/trl-internal — skipping private e2e test",
 )
 def test_e2e_private_trl_internal(tmp_path: Path):
+    # [FUNCTION DOC] Runs PRDiffPipeline (limit=2, max_files_per_pr=10) on the private repo into
+    # tmp_path. Skips if nothing emitted; otherwise asserts each emitted task's solution/patch.diff
+    # self-scores reward 1.0. Inputs: tmp_path. Side effects: network/gh calls, writes tasks under
+    # tmp_path.
     """Mine 2 PRs from a private repo, prove the auth path works."""
     gen_input = GenerationInput(
         repo=RepoSpec(url="huggingface/trl-internal", access="private"),

@@ -1,3 +1,8 @@
+# [MODULE DOC] Tests for hub.py dataset-card and push metadata: _read_task_metadata reads
+# [metadata.repo2env] from task.toml, push_to_hub auto-fills pipeline/repo_source for the card
+# (caller kwargs win, pr_diff default), plus _reward_doc_for, _build_manifest, _build_registry_json
+# consistency, _composition_block rendering and preservation of an enriched manifest.json. HfApi
+# and token resolution are mocked; no network.
 """C1 fix: push_to_hub reads pipeline + repo_source from task.toml.
 
 Previously, calling push_to_hub via the standalone `repo2rlenv push` CLI
@@ -18,6 +23,10 @@ from repo2rlenv.spec.input import AuthSpec
 
 
 def _make_task(dir_path: Path, *, pipeline: str, repo: str, name: str = "task-1") -> None:
+    # [FUNCTION DOC] HELPER: Writes dir_path/<name>/ with a task.toml containing [task] and
+    # [metadata.repo2env] (spec_version 0.1.0, given pipeline and repo), instruction.md and an
+    # empty solution/patch.diff. Inputs: dir_path, keyword pipeline, repo, name (default 'task-1').
+    # Output: None. Side effects: filesystem writes.
     """Write a minimal valid task layout into dir_path/<name>/."""
     task_dir = dir_path / name
     task_dir.mkdir()
@@ -43,30 +52,41 @@ repo = "{repo}"
 
 
 class TestReadTaskMetadata:
+    # [CLASS DOC] Tests for hub._read_task_metadata, which returns the repo2env metadata dict or {}
+    # on any problem.
     def test_basic(self, tmp_path: Path) -> None:
+        # [FUNCTION DOC] Asserts pipeline and repo are read from a valid task.toml.
         _make_task(tmp_path, pipeline="pr_runtime", repo="pallets/click")
         meta = _read_task_metadata(tmp_path / "task-1" / "task.toml")
         assert meta["pipeline"] == "pr_runtime"
         assert meta["repo"] == "pallets/click"
 
     def test_missing_file_returns_empty(self, tmp_path: Path) -> None:
+        # [FUNCTION DOC] Asserts a nonexistent path yields {}.
         assert _read_task_metadata(tmp_path / "nope.toml") == {}
 
     def test_malformed_returns_empty(self, tmp_path: Path) -> None:
+        # [FUNCTION DOC] Asserts invalid TOML yields {}.
         f = tmp_path / "bad.toml"
         f.write_text("not toml at all =", encoding="utf-8")
         assert _read_task_metadata(f) == {}
 
     def test_missing_subtable_returns_empty(self, tmp_path: Path) -> None:
+        # [FUNCTION DOC] Asserts TOML without [metadata.repo2env] yields {}.
         f = tmp_path / "no_r2e.toml"
         f.write_text('version = "1.0"\n[task]\nname = "x"\n', encoding="utf-8")
         assert _read_task_metadata(f) == {}
 
 
 class TestPushAutoReadsMetadata:
+    # [CLASS DOC] Tests that push_to_hub, called without pipeline/repo_source kwargs (as cmd_push
+    # does), fills the dataset card from the first task's metadata. Token resolution, card building
+    # and HfApi are mocked.
     """C1 fix verification — `cmd_push`'s no-kwargs invocation works."""
 
     def _mock_hf_api(self) -> mock.MagicMock:
+        # [FUNCTION DOC] HELPER: Returns a MagicMock HfApi whose upload_folder returns an object
+        # with oid 'abcdef123'.
         api = mock.MagicMock()
         api.create_repo.return_value = None
         upload_op = mock.MagicMock()
@@ -80,12 +100,16 @@ class TestPushAutoReadsMetadata:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        # [FUNCTION DOC] Asserts push_to_hub reports 1 task and passes pr_runtime / pallets/click
+        # to the card builder.
         _make_task(tmp_path, pipeline="pr_runtime", repo="pallets/click")
         monkeypatch.setattr("repo2rlenv.hub.resolve_hf_token", lambda _auth: "fake-token")
 
         captured_card: dict[str, str] = {}
 
         def fake_build_card(**kwargs: str) -> str:
+            # [FUNCTION DOC] HELPER: Captures card kwargs into captured_card and returns 'fake-
+            # card'.
             captured_card.update(kwargs)
             return "fake-card"
 
@@ -105,6 +129,8 @@ class TestPushAutoReadsMetadata:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        # [FUNCTION DOC] Same as above but with tasks under a tasks/ subdirectory; asserts they are
+        # discovered.
         tasks = tmp_path / "tasks"
         tasks.mkdir()
         _make_task(tasks, pipeline="pr_runtime", repo="pallets/click")
@@ -113,6 +139,8 @@ class TestPushAutoReadsMetadata:
         captured_card: dict[str, str] = {}
 
         def fake_build_card(**kwargs: str) -> str:
+            # [FUNCTION DOC] HELPER: Captures card kwargs into captured_card and returns 'fake-
+            # card'.
             captured_card.update(kwargs)
             return "fake-card"
 
@@ -131,6 +159,8 @@ class TestPushAutoReadsMetadata:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        # [FUNCTION DOC] Asserts explicit pipeline and repo_source kwargs override the task
+        # metadata on the card.
         """Legacy callers passing pipeline explicitly should still control the card."""
         _make_task(tmp_path, pipeline="pr_runtime", repo="pallets/click")
         monkeypatch.setattr("repo2rlenv.hub.resolve_hf_token", lambda _auth: "fake-token")
@@ -138,6 +168,8 @@ class TestPushAutoReadsMetadata:
         captured_card: dict[str, str] = {}
 
         def fake_build_card(**kwargs: str) -> str:
+            # [FUNCTION DOC] HELPER: Captures card kwargs into captured_card and returns 'fake-
+            # card'.
             captured_card.update(kwargs)
             return "fake-card"
 
@@ -160,6 +192,8 @@ class TestPushAutoReadsMetadata:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        # [FUNCTION DOC] Asserts a task without [metadata.repo2env] still pushes with card pipeline
+        # 'pr_diff' and empty repo_source.
         """A pre-v0.8.2.post3 dataset without [metadata.repo2env] still pushes."""
         # Hand-roll a task without the subtable
         (tmp_path / "task-1").mkdir()
@@ -182,6 +216,8 @@ class TestPushAutoReadsMetadata:
 
 
 def test_reward_doc_is_pipeline_specific():
+    # [FUNCTION DOC] Asserts _reward_doc_for('pr_runtime') documents f2p_rate/resolved and not the
+    # diff-judge reward, while pr_diff's mentions 6-component or LLM-judge.
     """pr_runtime card must document F2P/P2P, not pr_diff's LLM-judge."""
     from repo2rlenv.hub import _reward_doc_for
 
@@ -193,6 +229,8 @@ def test_reward_doc_is_pipeline_specific():
 
 
 def test_build_manifest_from_task_tomls(tmp_path: Path):
+    # [FUNCTION DOC] Writes two task.toml files with pr_runtime and calibration metadata and
+    # asserts _build_manifest JSON has task_count 2, both task ids, and repo/difficulty per row.
     """manifest.json is built from staged task.toml metadata, one row per task."""
     import json
 
@@ -218,6 +256,8 @@ def test_build_manifest_from_task_tomls(tmp_path: Path):
 
 
 def test_registry_and_manifest_cover_same_tasks(tmp_path: Path):
+    # [FUNCTION DOC] Asserts the task ids in _build_manifest equal the task dir names and the task
+    # names in _build_registry_json.
     """Schema/consistency guard: registry.json, manifest.json, and the task
     dirs must all reference the exact same task set."""
     import json
@@ -244,6 +284,9 @@ def test_registry_and_manifest_cover_same_tasks(tmp_path: Path):
 
 
 def test_composition_block_renders_validation_and_skew():
+    # [FUNCTION DOC] Asserts _composition_block(None) is empty and a summary renders validation
+    # counts (tracked, command, eval_grade), a repo distribution table with GitHub links, and
+    # strict-eval guidance.
     """An enriched manifest summary renders tracked/command resolution + skew."""
     from repo2rlenv.hub import _composition_block
 
@@ -274,6 +317,9 @@ def test_composition_block_renders_validation_and_skew():
 def test_push_preserves_enriched_manifest(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, title: str
 ):
+    # [FUNCTION DOC] Parametrized ASCII/non-ASCII titles. Writes an enriched manifest.json (UTF-8),
+    # mocks HfApi with a stub capturing staged manifest.json and README.md, pushes, and asserts the
+    # validation block and title are preserved and the README contains the composition section.
     """A source manifest.json with a `validation` block is preserved verbatim,
     not clobbered by push's auto-generated minimal manifest. Audit P1."""
     import json
@@ -294,18 +340,28 @@ def test_push_preserves_enriched_manifest(
     uploaded: dict[str, str] = {}
 
     class _Api:
-        def create_repo(self, *a, **k): ...
+        # [CLASS DOC] HELPER: Minimal HfApi stub; create_repo/upload_file are no-ops, upload_folder
+        # captures staged files.
+        def create_repo(self, *a, **k):
+            # [FUNCTION DOC] HELPER: No-op; returns None.
+            ...
+
         def upload_folder(self, *, folder_path, **k):
+            # [FUNCTION DOC] HELPER: Reads manifest.json and README.md from the staging folder_path
+            # into the uploaded dict and returns an object with oid 'deadbeef'.
             staging = Path(folder_path)
             uploaded["manifest"] = (staging / "manifest.json").read_text(encoding="utf-8")
             uploaded["readme"] = (staging / "README.md").read_text(encoding="utf-8")
 
             class _Op:
+                # [CLASS DOC] HELPER: Fake commit-info object exposing oid 'deadbeef'.
                 oid = "deadbeef"
 
             return _Op()
 
-        def upload_file(self, *a, **k): ...
+        def upload_file(self, *a, **k):
+            # [FUNCTION DOC] HELPER: No-op; returns None.
+            ...
 
     monkeypatch.setattr("huggingface_hub.HfApi", lambda token=None: _Api())
     push_to_hub(tmp_path, "owner/ds", AuthSpec())

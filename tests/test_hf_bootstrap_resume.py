@@ -1,3 +1,7 @@
+# [MODULE DOC] Tests for tasksmith bootstrap resumption: tasksmith/matrix_runner cached CPU
+# reports, the GPU batch stop-on-first-failure in tasksmith/cli._bootstrap, and
+# bootstrap_inputs.apply_cpu_bootstrap validation of cached snapshot evidence (expiry, ref binding,
+# provider) while preserving explicit option limits.
 from __future__ import annotations
 
 import json
@@ -10,6 +14,11 @@ from repo2rlenv.tasksmith import matrix_runner
 
 
 def test_cpu_cached_report_requires_same_runtime_and_terminated_worker(tmp_path, monkeypatch):
+    # [FUNCTION DOC] Runs run_cpu_matrix with provision_worker stubbed to raise (first run must
+    # fail), then writes a completed report and a terminated worker receipt and asserts the cached
+    # report is returned; a running receipt raises ValueError 'Incomplete bootstrap'; a changed
+    # runtime wheel hash raises 'inputs changed'. Inputs: tmp_path, monkeypatch. Side effects:
+    # files and a budget ledger under tmp_path.
     config = tmp_path / "config.json"
     config.write_text(json.dumps([{"name": "peft", "ref": "a" * 40}]))
     output, campaign = tmp_path / "matrix/cpu", tmp_path / "campaign"
@@ -17,6 +26,8 @@ def test_cpu_cached_report_requires_same_runtime_and_terminated_worker(tmp_path,
     monkeypatch.setattr(matrix_runner, "check_runtime_wheel", lambda _: "runtime-a")
 
     def offline(*args, **kwargs):
+        # [FUNCTION DOC] HELPER: Stub provision_worker that raises RuntimeError('fixture stops
+        # before provider creation').
         raise RuntimeError("fixture stops before provider creation")
 
     monkeypatch.setattr(matrix_runner, "provision_worker", offline)
@@ -39,6 +50,8 @@ def test_cpu_cached_report_requires_same_runtime_and_terminated_worker(tmp_path,
 
 
 def test_gpu_batch_stops_after_first_failed_attempt(tmp_path, monkeypatch):
+    # [FUNCTION DOC] Stubs run_gpu_repository to record names and report failure; asserts
+    # _bootstrap on a two-repo GPU matrix returns exit code 1 after attempting only the first repo.
     from repo2rlenv.tasksmith.cli import _bootstrap
 
     config = tmp_path / "config.json"
@@ -46,6 +59,8 @@ def test_gpu_batch_stops_after_first_failed_attempt(tmp_path, monkeypatch):
     seen = []
 
     def failed(spec, *args, **kwargs):
+        # [FUNCTION DOC] HELPER: Stub run_gpu_repository; records spec.name and returns a failed
+        # GPU result dict.
         seen.append(spec.name)
         return {"source": spec.model_dump(), "resource": "gpu", "status": "failed"}
 
@@ -64,6 +79,9 @@ def test_gpu_batch_stops_after_first_failed_attempt(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("invalid", ["expired", "ref", "provider"])
 def test_bootstrap_options_reject_unusable_cache_evidence(tmp_path, invalid):
+    # [FUNCTION DOC] Parametrized over expired snapshot, mismatched hint ref, and daytona provider;
+    # writes a CPU report and asserts apply_cpu_bootstrap raises ValueError matching 'expired',
+    # 'bound' or 'Modal' respectively.
     from datetime import UTC, datetime, timedelta
 
     from repo2rlenv.tasksmith.bootstrap_inputs import apply_cpu_bootstrap
@@ -99,6 +117,9 @@ def test_bootstrap_options_reject_unusable_cache_evidence(tmp_path, invalid):
 
 
 def test_bootstrap_options_keep_explicit_model_and_spend_limits(tmp_path):
+    # [FUNCTION DOC] Asserts apply_cpu_bootstrap returns a new Options keeping max_spend_usd and
+    # author_turns, setting worker_snapshot and a bootstrap hint keyed by the peft GitHub URL,
+    # without mutating the input options.
     from datetime import UTC, datetime
 
     from repo2rlenv.tasksmith.bootstrap_inputs import apply_cpu_bootstrap

@@ -1,3 +1,6 @@
+# [MODULE DOC] Tests for git_local.py (list_commits, show_diff, changed_files, CommitInfo,
+# GitError) against real temporary git repos built with the git CLI. No network. Skipped when git
+# is not installed.
 """`git_local` helpers — tested against a tmp in-tree git repo.
 
 We create a tiny repo with 3 commits + a merge in a temp directory and
@@ -25,6 +28,10 @@ pytestmark = pytest.mark.skipif(shutil.which("git") is None, reason="git CLI not
 
 
 def _git(*args: str, cwd: Path) -> None:
+    # [FUNCTION DOC] HELPER: Runs 'git <args>' in cwd with a fixed author/committer identity,
+    # GIT_CONFIG_NOSYSTEM, HOME set to cwd (ignoring the user's gitconfig) and a minimal PATH.
+    # Inputs: args (str varargs), cwd (Path, keyword). Output: None. Raises AssertionError with
+    # stderr on nonzero exit. Side effects: subprocess.
     """Helper to run git with sensible defaults for tests."""
     env = {
         "GIT_AUTHOR_NAME": "Test",
@@ -49,6 +56,9 @@ def _git(*args: str, cwd: Path) -> None:
 
 @pytest.fixture
 def tiny_repo(tmp_path: Path) -> Path:
+    # [FUNCTION DOC] Fixture: creates tmp_path/tiny on branch main with three commits (add foo.txt,
+    # add bar.txt, modify foo.txt with a subject+body message). Input: tmp_path. Output: Path to
+    # the repo.
     """Build a tiny repo with: init → 1st commit → 2nd commit → 3rd commit."""
     repo = tmp_path / "tiny"
     repo.mkdir()
@@ -78,6 +88,8 @@ def tiny_repo(tmp_path: Path) -> Path:
 
 
 def test_list_commits_returns_newest_first(tiny_repo: Path):
+    # [FUNCTION DOC] Asserts list_commits returns 3 commits, newest (fix: greet) first and initial
+    # commit last.
     commits = list_commits(tiny_repo, limit=10)
     assert len(commits) == 3
     # Most recent first (the "fix: greet" commit)
@@ -87,11 +99,14 @@ def test_list_commits_returns_newest_first(tiny_repo: Path):
 
 
 def test_list_commits_respects_limit(tiny_repo: Path):
+    # [FUNCTION DOC] Asserts limit=2 returns two commits.
     commits = list_commits(tiny_repo, limit=2)
     assert len(commits) == 2
 
 
 def test_list_commits_parses_parent_sha(tiny_repo: Path):
+    # [FUNCTION DOC] Asserts parent_sha links to the previous commit and the root has empty
+    # parent_sha and parents.
     commits = list_commits(tiny_repo, limit=10)
     # 3rd commit's parent is the 2nd commit's SHA
     assert commits[0].parent_sha == commits[1].sha
@@ -101,6 +116,7 @@ def test_list_commits_parses_parent_sha(tiny_repo: Path):
 
 
 def test_list_commits_parses_subject_and_body(tiny_repo: Path):
+    # [FUNCTION DOC] Asserts subject and body of the newest commit are split correctly.
     commits = list_commits(tiny_repo, limit=10)
     top = commits[0]
     assert top.subject == "fix: greet the world properly"
@@ -108,12 +124,14 @@ def test_list_commits_parses_subject_and_body(tiny_repo: Path):
 
 
 def test_list_commits_parses_author(tiny_repo: Path):
+    # [FUNCTION DOC] Asserts author name and email are parsed.
     commits = list_commits(tiny_repo, limit=10)
     assert commits[0].author_name == "Test"
     assert commits[0].author_email == "test@example.com"
 
 
 def test_list_commits_authored_at_is_iso8601(tiny_repo: Path):
+    # [FUNCTION DOC] Asserts authored_at begins with a 4-digit year followed by '-'.
     commits = list_commits(tiny_repo, limit=10)
     # ISO8601 strict: starts with year + "-" + month
     assert commits[0].authored_at[:4].isdigit()
@@ -121,6 +139,8 @@ def test_list_commits_authored_at_is_iso8601(tiny_repo: Path):
 
 
 def test_list_commits_is_merge_detection(tmp_path: Path):
+    # [FUNCTION DOC] Builds a repo with a --no-ff merge of a feature branch and asserts the newest
+    # commit is_merge with two parents. Side effects: git subprocesses in tmp_path.
     """Construct a merge commit + verify CommitInfo.is_merge."""
     repo = tmp_path / "merger"
     repo.mkdir()
@@ -143,6 +163,7 @@ def test_list_commits_is_merge_detection(tmp_path: Path):
 
 
 def test_list_commits_empty_when_outside_range(tiny_repo: Path):
+    # [FUNCTION DOC] Asserts since=2030-01-01 returns no commits.
     from datetime import date
 
     commits = list_commits(tiny_repo, since=date(2030, 1, 1), limit=10)
@@ -153,6 +174,8 @@ def test_list_commits_empty_when_outside_range(tiny_repo: Path):
 
 
 def test_show_diff_returns_unified_diff(tiny_repo: Path):
+    # [FUNCTION DOC] Asserts show_diff of the newest commit is a git diff for foo.txt without a
+    # commit header.
     commits = list_commits(tiny_repo, limit=10)
     top_sha = commits[0].sha
     diff = show_diff(tiny_repo, top_sha)
@@ -166,6 +189,7 @@ def test_show_diff_returns_unified_diff(tiny_repo: Path):
 
 
 def test_show_diff_handles_initial_commit(tiny_repo: Path):
+    # [FUNCTION DOC] Asserts show_diff of the root commit shows the added line.
     commits = list_commits(tiny_repo, limit=10)
     root_sha = commits[-1].sha
     # The initial commit has all-additions
@@ -177,12 +201,14 @@ def test_show_diff_handles_initial_commit(tiny_repo: Path):
 
 
 def test_changed_files_one_per_line(tiny_repo: Path):
+    # [FUNCTION DOC] Asserts changed_files of the newest commit is ['foo.txt'].
     commits = list_commits(tiny_repo, limit=10)
     files = changed_files(tiny_repo, commits[0].sha)
     assert files == ["foo.txt"]
 
 
 def test_changed_files_multi_file(tmp_path: Path):
+    # [FUNCTION DOC] Asserts a commit adding a.txt and b.txt lists both files.
     """A commit that touches 2 files should list both."""
     repo = tmp_path / "multi"
     repo.mkdir()
@@ -200,11 +226,13 @@ def test_changed_files_multi_file(tmp_path: Path):
 
 
 def test_show_diff_unknown_sha_raises(tiny_repo: Path):
+    # [FUNCTION DOC] Asserts show_diff with an all-zero SHA raises GitError.
     with pytest.raises(GitError):
         show_diff(tiny_repo, "0" * 40)
 
 
 def test_commit_info_message_property():
+    # [FUNCTION DOC] Asserts CommitInfo.message joins subject and body with a blank line.
     """`.message` joins subject + body the way `git show -s` would."""
     ci = CommitInfo(
         sha="x",
@@ -220,6 +248,7 @@ def test_commit_info_message_property():
 
 
 def test_commit_info_message_no_body():
+    # [FUNCTION DOC] Asserts CommitInfo.message is just the subject when body is empty.
     ci = CommitInfo(
         sha="x",
         parent_sha="",

@@ -1,3 +1,6 @@
+# [MODULE DOC] Tests for gitlab.py merge-request client: mocked HTTP for list_merged_prs,
+# fetch_pr_diff, fetch_issue and _project_id, plus an opt-in live gitlab.com test gated by
+# R2E_LIVE_GITLAB.
 """GitLab MR client — mocked HTTP unit tests + an opt-in live gitlab.com test."""
 
 from __future__ import annotations
@@ -12,6 +15,9 @@ from repo2rlenv.github import PullRequestSummary
 
 @pytest.fixture
 def mock_api(monkeypatch):
+    # [FUNCTION DOC] Fixture: monkeypatches gitlab._request with a fake routing by URL to canned MR
+    # list (one merged, one draft), /changes (diff_refs + paths), .diff text and issue JSON. Input:
+    # monkeypatch. Output: None.
     """Stub `gitlab._request` with canned list/changes/diff responses."""
     list_rows = [
         {
@@ -32,6 +38,9 @@ def mock_api(monkeypatch):
     }
 
     def fake_request(url, token, *, accept_json=True):
+        # [FUNCTION DOC] HELPER: Fake _request(url, token, accept_json). Returns diff text for
+        # '.diff' URLs, the changes dict, issue dict, or MR list by URL substring; raises
+        # AssertionError for any other URL.
         if url.endswith(".diff"):
             return "diff --git a/src/foo.py b/src/foo.py\n@@ -1 +1 @@\n-x\n+y\n"
         if "/changes" in url:
@@ -46,6 +55,8 @@ def mock_api(monkeypatch):
 
 
 def test_list_merged_prs_shape_and_draft_skip(mock_api):
+    # [FUNCTION DOC] Asserts drafts are skipped and the merged MR maps to a PullRequestSummary with
+    # number, base_sha from diff_refs, base_ref, changed_files and URL.
     prs = gitlab.list_merged_prs("o", "n", limit=10)
     assert len(prs) == 1  # the draft MR is skipped
     pr = prs[0]
@@ -58,15 +69,18 @@ def test_list_merged_prs_shape_and_draft_skip(mock_api):
 
 
 def test_fetch_pr_diff_is_git_format(mock_api):
+    # [FUNCTION DOC] Asserts fetch_pr_diff returns the git-format diff text.
     diff = gitlab.fetch_pr_diff("o", "n", 107)
     assert diff.startswith("diff --git a/src/foo.py b/src/foo.py")
 
 
 def test_fetch_issue(mock_api):
+    # [FUNCTION DOC] Asserts fetch_issue returns a (title, description) tuple.
     assert gitlab.fetch_issue("o", "n", 10) == ("Issue title", "issue body")
 
 
 def test_project_id_url_encodes():
+    # [FUNCTION DOC] Asserts _project_id URL-encodes 'owner/name' as 'owner%2Fname'.
     assert (
         gitlab._project_id("python-devs", "importlib_resources")
         == "python-devs%2Fimportlib_resources"
@@ -78,6 +92,8 @@ def test_project_id_url_encodes():
     reason="set R2E_LIVE_GITLAB=1 to hit the real gitlab.com API",
 )
 def test_live_gitlab_mr_mining():
+    # [FUNCTION DOC] Opt-in live test: lists 2 merged MRs of python-devs/importlib_resources and
+    # asserts base_sha, changed files and a git-format diff. Side effects: network.
     prs = gitlab.list_merged_prs("python-devs", "importlib_resources", limit=2)
     assert prs and prs[0].base_sha and prs[0].changed_files
     diff = gitlab.fetch_pr_diff("python-devs", "importlib_resources", prs[0].number)

@@ -1,3 +1,7 @@
+# [MODULE DOC] Tests for the DataArc owned terminal recipe (recipes/dataarc/recipe.py): seed
+# loading from a reference task directory, strategy fan-out, prompt rendering, the authoring
+# adapter and lineage hashing. Uses tmp_path task fixtures and monkeypatching; no model, network or
+# sandbox calls.
 from __future__ import annotations
 
 from collections import Counter
@@ -10,6 +14,16 @@ from repo2rlenv.spec.options import DataArcOptions
 
 
 def test_seed_strategy_context_and_lineage(tmp_path):
+    # [FUNCTION DOC] Builds a minimal reference task (task.toml, long instruction.md containing a
+    # canary string, solution/solve.sh, environment/Dockerfile) in tmp_path and asserts that
+    # load_seeds yields 12 rows (3 few_shot, 3 self_instruct, 6 evol_instruct) with unique titles
+    # and one shared parent_bundle_hash; that instruction.md is truncated to 3500 chars with the
+    # canary scrubbed; that the Dockerfile goes into environment_context rather than seed_files;
+    # that design() wraps the seed; that every built prompt is fully rendered and names the source
+    # seed and model. It then monkeypatches recipe.metered_complete to record kwargs and calls
+    # materialize once, asserting a single TerminalDraft-schema call carrying the feedback text.
+    # Finally it edits solve.sh and asserts the parent_bundle_hash changes. Inputs: tmp_path
+    # fixture. Output: none. Side effects: writes files under tmp_path.
     (tmp_path / "solution").mkdir()
     (tmp_path / "environment").mkdir()
     (tmp_path / "task.toml").write_text('version = "1.0"')
@@ -72,6 +86,8 @@ def test_seed_strategy_context_and_lineage(tmp_path):
 
 
 def test_missing_reference_is_not_an_augmentation_seed(tmp_path):
+    # [FUNCTION DOC] Asserts load_seeds raises ValueError mentioning 'reference' when the task dir
+    # has only task.toml (no solution). Inputs: tmp_path. Side effects: writes task.toml.
     (tmp_path / "task.toml").write_text('version = "1.0"')
     with pytest.raises(ValueError, match="reference"):
         recipe.load_seeds(tmp_path, DataArcOptions())
