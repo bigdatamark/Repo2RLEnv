@@ -1,3 +1,9 @@
+# [MODULE DOC] Tests for citation-path validation in the quality loop:
+# EvidenceContext.validate_review and protocol.citation_path_error must reject a Review whose
+# Citation quote does not appear verbatim in the cited document, report which supplied documents
+# contain the exact quote (bounded list and quote length), never relocate a citation automatically,
+# and feed that message back so QualityLoop._review can obtain a corrected review from the model.
+# Uses tmp_path; the last test needs `harbor` installed.
 from __future__ import annotations
 
 import json
@@ -13,6 +19,9 @@ from repo2rlenv.quality.loop.runner import QualityLoop
 
 
 def decision(citation):
+    # [FUNCTION DOC] HELPER: Builds a passing Review whose task/verifier/leakage Assessments (status pass, score 3)
+    # all cite the given Citation, with rollout 'not_run' and empty issues/probes/read_requests.
+    # Input: citation. Output: Review.
     assessment = Assessment(
         status="pass", score=3, explanation="Check state restoration.", evidence=[citation]
     )
@@ -30,6 +39,8 @@ def decision(citation):
 
 @pytest.fixture
 def context(tmp_path):
+    # [FUNCTION DOC] Fixture: writes instruction.md ('Restore the original state.') into tmp_path and returns an
+    # EvidenceContext over tmp_path with no extra paths and a 16000-char limit.
     (tmp_path / "instruction.md").write_text("Restore the original state.\n")
     return EvidenceContext(tmp_path, [], limit=16000)
 
@@ -45,6 +56,9 @@ def context(tmp_path):
     ],
 )
 def test_absent_citations_report_exact_source_miss_without_inference(context, quote, other_text):
+    # [FUNCTION DOC] For quotes absent from every document (only near-misses exist in other.txt), asserts
+    # validate_review raises ValueError naming the cited path, the repr of the invalid quote and '0
+    # supplied document(s): []', and leaves the Review unmodified.
     context.documents["other.txt"] = other_text
     value = decision(Citation(path="evidence/task-context.json", quote=quote))
     before = value.model_dump()
@@ -58,6 +72,8 @@ def test_absent_citations_report_exact_source_miss_without_inference(context, qu
 
 
 def test_ambiguous_path_feedback_lists_bounded_exact_sources(context):
+    # [FUNCTION DOC] With the quote present in 12 documents and a wrong cited path, asserts the error lists only
+    # the first 8 sources plus '4 additional paths omitted' and the citation path is unchanged.
     citation = Citation(path="wrong.json", quote="a specific unchanged claim")
     context.documents.update({f"source-{index:02}.txt": citation.quote for index in range(12)})
     with pytest.raises(ValueError) as error:
@@ -72,6 +88,8 @@ def test_ambiguous_path_feedback_lists_bounded_exact_sources(context):
 
 
 def test_unique_wrong_path_is_reported_without_automatic_relocation(context):
+    # [FUNCTION DOC] Asserts a quote found only in instruction.md but cited from wrong.md raises naming
+    # instruction.md, does not rewrite the path, and that a corrected copy validates.
     citation = Citation(path="wrong.md", quote="Restore the original state.")
     with pytest.raises(ValueError) as error:
         context.validate_review(decision(citation))
@@ -82,6 +100,8 @@ def test_unique_wrong_path_is_reported_without_automatic_relocation(context):
 
 
 def test_supplied_matching_path_remains_valid_with_duplicate_text(context):
+    # [FUNCTION DOC] Asserts a correct citation stays valid even when the same text also exists in another
+    # document.
     context.documents["duplicate.md"] = "Restore the original state."
     context.validate_review(
         decision(Citation(path="instruction.md", quote="Restore the original state."))
@@ -89,6 +109,7 @@ def test_supplied_matching_path_remains_valid_with_duplicate_text(context):
 
 
 def test_feedback_bounds_the_repeated_quote(context):
+    # [FUNCTION DOC] Asserts citation_path_error truncates the echoed quote to 250 characters.
     citation = Citation(path="wrong.md", quote="x" * 1000)
     feedback = citation_path_error(citation, context.documents)
     assert repr("x" * 250) in feedback
@@ -96,6 +117,11 @@ def test_feedback_bounds_the_repeated_quote(context):
 
 
 def test_precise_citation_feedback_uses_existing_review_correction(tmp_path):
+    # [FUNCTION DOC] Skips without harbor. Writes a minimal task bundle, runs QualityLoop._review with a scripted
+    # model that first returns a bad citation then (after checking protocol_feedback in the JSON
+    # user prompt) a correct one; asserts the final review is sound, the model was called twice and
+    # the evidence path is instruction.md. Side effects: files and a sqlite budget ledger in
+    # tmp_path.
     pytest.importorskip("harbor")
     task = write_bundle(
         TaskBundle(
@@ -113,9 +139,14 @@ def test_precise_citation_feedback_uses_existing_review_correction(tmp_path):
     )
 
     class Model:
+        # [CLASS DOC] Fake model client for QualityLoop; class attribute `calls` counts ask() invocations.
         calls = 0
 
         def ask(self, schema, model, system, user, key):
+            # [FUNCTION DOC] Increments calls; on the first call returns a Review with an invalid citation,
+            # otherwise asserts the last protocol_feedback entry in the JSON `user` message
+            # describes the miss and returns a Review citing instruction.md. Other params (schema,
+            # model, system, key) are ignored.
             self.calls += 1
             if self.calls == 1:
                 return decision(

@@ -1,3 +1,9 @@
+# [MODULE DOC] Tests that EvidenceContext (repo2rlenv.quality.loop.context) prioritizes private
+# verifier assertion evidence selected by tests/contract.json over generic, lower-priority task
+# machinery (reference patch, grading driver, Dockerfile), keeps task text within budget, exposes
+# selected_verifier_files in the payload, keeps lower-priority files readable via read_more, and
+# rejects reads of paths not in the evidence inventory with exact-basename suggestions. Uses
+# tmp_path only.
 """Private assertion evidence cannot be crowded out by generic task machinery."""
 
 from __future__ import annotations
@@ -15,6 +21,14 @@ from repo2rlenv.quality.loop.models import ReadRequest, TrialRecord
 def test_selected_assertions_precede_long_reference_patch_and_grading_driver(
     tmp_path, selected_class
 ):
+    # [FUNCTION DOC] Parametrized on whether the contract selects a class ('::TestConversion') or the whole file.
+    # Builds a task with large core files and a private tests/source behavior file, an oracle
+    # TrialRecord, and asserts: the assertion block is included verbatim, contract.json is ordered
+    # before the private file, non-evidence task text <= 35000 chars, total within limit, payload
+    # lists the private file as selected verifier file, inventory includes the machinery; then
+    # read_more of tests/grade.py L1-L2 adds an excerpt without altering existing documents, and
+    # reading the unprefixed basename path raises ValueError 'not in evidence inventory' with an
+    # 'Exact basename matches' hint.
     task = tmp_path / "task"
     task.mkdir()
     # Match the real task's large core contract and generic top-level files.
@@ -105,6 +119,10 @@ def test_selected_assertions_precede_long_reference_patch_and_grading_driver(
 
 
 def test_primary_verifier_paths_survive_a_large_inventory_and_suggest_exact_reads(tmp_path):
+    # [FUNCTION DOC] Adds 1600 synthetic inventory entries to a small task; asserts the payload reports omitted
+    # inventory directories but still lists the selected verifier file, that reading the short path
+    # raises with the exact-path suggestion, and that reading the suggested path succeeds and
+    # contains the assertion.
     task = tmp_path / "task"
     task.mkdir()
     (task / "instruction.md").write_text("Restore the public numerical behavior.\n")

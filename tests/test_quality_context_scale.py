@@ -1,3 +1,8 @@
+# [MODULE DOC] Scale tests for EvidenceContext (repo2rlenv.quality.loop.context): large file
+# inventories stay addressable within a bounded payload (grouped by directory, or moved to a
+# searchable inventory document when too large), rejected oversized reads leave the context
+# reusable, and a selected small test suite keeps its helper and final assertions within the
+# character budget. Uses tmp_path only.
 from __future__ import annotations
 
 import json
@@ -10,6 +15,10 @@ from repo2rlenv.quality.loop.models import ReadRequest
 
 @pytest.mark.parametrize("count", [800, 2400])
 def test_large_inventory_retains_every_addressable_file(tmp_path, count):
+    # [FUNCTION DOC] For 800 or 2400 generated source files, asserts the JSON payload stays <= 86000 chars; at 800
+    # the inventory_by_directory map reconstructs exactly the full inventory, at 2400 the
+    # inventory_document catalogue is searchable for the last module; finally reads line 1 of the
+    # last module and checks its content.
     task = tmp_path / "task"
     task.mkdir()
     (task / "instruction.md").write_text("Repair the package behavior.")
@@ -39,6 +48,8 @@ def test_large_inventory_retains_every_addressable_file(tmp_path, count):
 
 
 def test_rejected_large_read_does_not_poison_next_review(tmp_path):
+    # [FUNCTION DOC] Asserts an over-budget 100-line read raises 'context budget' without mutating documents, a
+    # subsequent 1-line read succeeds, and payload() still works.
     task = tmp_path / "task"
     task.mkdir()
     (task / "instruction.md").write_text("Repair the package behavior.")
@@ -55,6 +66,10 @@ def test_rejected_large_read_does_not_poison_next_review(tmp_path):
 
 @pytest.mark.parametrize("limit", [16000, 64000])
 def test_selected_small_suite_keeps_helpers_and_final_assertions_within_budget(tmp_path, limit):
+    # [FUNCTION DOC] For limits 16000 and 64000, writes a contract-selected test file with a helper, long filler
+    # and a final test; asserts the helper is always present, the whole file is included at 64000,
+    # and at 16000 the file is marked partial in context.omitted while total size stays within the
+    # limit.
     (tmp_path / "instruction.md").write_text("Implement the requested public behavior.")
     tests = tmp_path / "tests/source/tests"
     tests.mkdir(parents=True)

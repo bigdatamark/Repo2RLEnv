@@ -1,7 +1,14 @@
+# [MODULE DOC] Test for repo2rlenv.quality.python_evidence.test_excerpts (imported as `excerpts`):
+# the author-evidence excerpt for a parametrized test id must keep the parametrize decorator binding
+# the alias and exclude unrelated tests in the same file. Uses tmp_path only.
 from repo2rlenv.quality.python_evidence import test_excerpts as excerpts
 
 
 def test_parametrized_alias_keeps_its_binding_in_author_evidence(tmp_path):
+    # [FUNCTION DOC] Writes tests/test_access.py with a parametrized test and an unrelated test, requests excerpts
+    # for the dotted id 'tests.test_access::test_access[get_in]', and asserts the excerpt for
+    # tests/test_access.py contains the decorator and the test def but not test_unrelated. Side
+    # effect: files in tmp_path.
     (tmp_path / "tests").mkdir()
     (tmp_path / "tests/test_access.py").write_text(
         "import pytest\nfrom package import get_in, get_lax\n\n"

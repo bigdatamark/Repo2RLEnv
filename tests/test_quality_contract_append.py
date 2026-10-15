@@ -1,3 +1,10 @@
+# [MODULE DOC] Tests for Repair.append_expected_passes handled by
+# repo2rlenv.quality.loop.artifacts.apply_repair: appending test ids to tests/contract.json must
+# preserve the existing contract exactly (field order, other fields, original ids first), write the
+# result to a new revision directory with an 'unverified' evaluation label and a repair.json
+# receipt, leave the original task untouched, and reject invalid ids, malformed/absent/duplicate-key
+# contracts, ids already present, simultaneous text edits of the contract, and a contract path that
+# is a directory. Writes Harbor task bundles under tmp_path.
 """Manifest registration preserves the existing verifier contract exactly."""
 
 from __future__ import annotations
@@ -14,7 +21,13 @@ from repo2rlenv.quality.loop.models import Edit, Repair
 
 @pytest.fixture
 def task_factory(tmp_path):
+    # [FUNCTION DOC] Fixture returning a factory that writes a minimal task bundle (Dockerfile, solve.sh, test.sh,
+    # optional tests/contract.json text) under tmp_path/tasks. Output: callable(contract: str |
+    # None) -> task directory Path.
     def create(contract):
+        # [FUNCTION DOC] HELPER: Builds and writes the 'case-registration' TaskBundle; includes tests/contract.json
+        # only when `contract` is not None. Returns the written task path. Side effect: writes
+        # files.
         files = {
             "environment/Dockerfile": TaskFile.text("FROM python:3.12-slim\n"),
             "solution/solve.sh": TaskFile.text("#!/bin/sh\nexit 0\n", executable=True),
@@ -41,6 +54,9 @@ def task_factory(tmp_path):
 
 
 def repair(ids, **kwargs):
+    # [FUNCTION DOC] HELPER: Builds a Repair with fixed explanation/issues, no edits and
+    # append_expected_passes=ids; extra kwargs are forwarded. Raises ValueError (pydantic) for
+    # invalid ids.
     return Repair(
         explanation="Register additional independently specified behavior checks.",
         addressed_issues=["New tests are not registered in the reward manifest."],
@@ -53,6 +69,10 @@ def repair(ids, **kwargs):
 def test_append_preserves_old_order_fields_original_and_creates_unverified_revision(
     task_factory, tmp_path
 ):
+    # [FUNCTION DOC] Applies an append repair and asserts the new contract equals the old with ids appended in
+    # order, the original file and identity hash are unchanged while the destination hash differs,
+    # task.toml evaluation label is unverified with reason task_changed, and repair.json records
+    # parent_hash, bundle_hash and the appended ids.
     contract = {
         "expected_passes": ["tests/test_api.py::test_z", "tests/test_api.py::test_a"],
         "submitted_files": ["src/package.py"],
@@ -81,6 +101,8 @@ def test_append_preserves_old_order_fields_original_and_creates_unverified_revis
 
 @pytest.mark.parametrize("ids", [[""], [" \n"], ["case", "case"], [12], [None]])
 def test_invalid_append_ids_are_rejected(ids):
+    # [FUNCTION DOC] Asserts Repair construction raises ValueError for empty/whitespace, duplicate, or non-string
+    # ids.
     with pytest.raises(ValueError):
         repair(ids)
 
@@ -104,6 +126,9 @@ def test_invalid_append_ids_are_rejected(ids):
 def test_invalid_or_absent_contract_and_existing_ids_are_not_repaired_implicitly(
     task_factory, tmp_path, contract
 ):
+    # [FUNCTION DOC] For absent, malformed, non-object, missing/invalid expected_passes, already-present id, or
+    # duplicate-key contracts, asserts apply_repair raises ValueError or FileNotFoundError, the task
+    # identity is unchanged, and no destination or receipt is created.
     task = task_factory(contract)
     before = task_identity(task)
     destination = tmp_path / "r1" / task.name
@@ -115,6 +140,8 @@ def test_invalid_or_absent_contract_and_existing_ids_are_not_repaired_implicitly
 
 
 def test_simultaneous_text_edit_of_contract_is_rejected(task_factory, tmp_path):
+    # [FUNCTION DOC] Asserts combining an append with a text Edit of tests/contract.json raises ValueError 'Cannot
+    # append expected passes and text-edit'.
     task = task_factory('{"expected_passes": ["existing"]}')
     proposal = repair(["new"]).model_copy(
         update={
@@ -133,6 +160,8 @@ def test_simultaneous_text_edit_of_contract_is_rejected(task_factory, tmp_path):
 
 
 def test_contract_directory_is_a_bounded_validation_failure(task_factory, tmp_path):
+    # [FUNCTION DOC] Replaces tests/contract.json with a directory, refreshes the identity, and asserts
+    # apply_repair raises ValueError requiring an existing contract file.
     task = task_factory(None)
     path = task / "tests/contract.json"
     path.mkdir()
@@ -143,6 +172,8 @@ def test_contract_directory_is_a_bounded_validation_failure(task_factory, tmp_pa
 
 
 def test_unrelated_legacy_repair_defaults_to_no_append():
+    # [FUNCTION DOC] Asserts a legacy Repair payload without append_expected_passes validates with that field
+    # defaulting to an empty list.
     proposal = Repair.model_validate(
         {
             "explanation": "Clarify the public contract.",

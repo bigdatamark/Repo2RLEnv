@@ -1,3 +1,12 @@
+# [MODULE DOC] End-to-end and unit tests for the evidence-based quality loop
+# (repo2rlenv.quality.loop): QualityLoop review -> controls (baseline/oracle) -> semantic probes
+# (wrong_solution / valid_alternative) -> optional blind rollout -> bounded repair, plus artifacts
+# (apply_repair, probe_variant, import_trial, task identity), protocol citation/path resolution,
+# EvidenceContext budgeting, JsonModel/RunBudget paid-call accounting and probe requirement
+# metadata. Uses a scripted fake model (Model) and fake trial runner (Trials) writing local
+# receipts, so no LLM or Docker is needed. Skips entirely without `harbor`. Side effects: files,
+# sqlite budget ledgers and a few bash subprocesses under tmp_path; monkeypatches LLM key resolution
+# and campaigns.llm.complete in client tests.
 from __future__ import annotations
 
 import json
@@ -53,6 +62,9 @@ from repo2rlenv.quality.loop.runner import (
 
 @pytest.fixture
 def task(tmp_path):
+    # [FUNCTION DOC] Fixture: writes a minimal 'example' Harbor task bundle (sum-of-two-integers instruction,
+    # solve.sh printing 4 to /workspace/answer.txt, a deliberately weak tests/test.sh containing
+    # 'weak check') under tmp_path/tasks and returns its directory.
     return write_bundle(
         TaskBundle(
             name="example",
@@ -74,6 +86,8 @@ def task(tmp_path):
 
 
 def probes():
+    # [FUNCTION DOC] HELPER: Returns two SemanticProbes citing instruction.md: 'wrong-sum' (wrong_solution, writes
+    # 7) and 'valid-format' (valid_alternative, writes '4' plus newline).
     evidence = [Citation(path="instruction.md", quote="sum of two integers")]
     return [
         SemanticProbe(
@@ -94,6 +108,9 @@ def probes():
 
 
 def review(*, broken=False, propose=False, rollout="not_run"):
+    # [FUNCTION DOC] HELPER: Builds a Review with passing task/leakage assessments; keyword-only broken=False makes
+    # the verifier fail and adds one blocking verifier Issue citing 'weak check'; propose=False adds
+    # probes() when True; rollout sets the rollout verdict (default 'not_run'). Output: Review.
     assessment = Assessment(
         status="pass",
         score=3,
@@ -123,10 +140,20 @@ def review(*, broken=False, propose=False, rollout="not_run"):
 
 
 class Model:
+    # [CLASS DOC] Fake JSON model client used by QualityLoop. Records each request key in self.calls and returns
+    # scripted Repair or Review objects.
     def __init__(self, *, honest=True, solver_failure=False):
+        # [FUNCTION DOC] Inputs: keyword-only honest=True (report the weak check as broken) and
+        # solver_failure=False (classify rollouts as legitimate failures). Initializes calls to an
+        # empty list.
         self.calls, self.honest, self.solver_failure = [], honest, solver_failure
 
     def ask(self, schema, model, system, user, key):
+        # [FUNCTION DOC] Appends key to calls. For schema Repair returns an edit replacing 'weak check' with
+        # 'strong check' in tests/test.sh. Otherwise parses the JSON user payload and returns
+        # review(): broken when honest and tests/test.sh still contains 'weak check', probes
+        # proposed when probe_limit > 0, and a rollout verdict when a rollout result document is
+        # present.
         self.calls.append(key)
         if schema is Repair:
             return Repair(
@@ -150,11 +177,19 @@ class Model:
 
 
 class Trials:
+    # [CLASS DOC] Fake trial runner: writes an empty result.json per key under root and returns TrialRecords
+    # bound by receipt.
     def __init__(self, root, *, solver_failure=False):
+        # [FUNCTION DOC] Inputs: root (Path for results), keyword-only solver_failure=False. Initializes calls list
+        # and closed=False.
         self.root, self.calls, self.closed = root, [], False
         self.solver_failure = solver_failure
 
     def run(self, task, role, key):
+        # [FUNCTION DOC] Records (role, key, task identity), writes root/key/result.json, and returns a TrialRecord
+        # with reward 0 for baseline (and for rollout when solver_failure), 0 for probe0 once
+        # tests/test.sh contains 'strong check', else 1. probe_installed is True for probes. Side
+        # effect: writes files.
         self.calls.append((role, key, task_identity(task)))
         path = self.root / key / "result.json"
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -180,10 +215,14 @@ class Trials:
         )
 
     def close(self):
+        # [FUNCTION DOC] Sets closed=True so tests can assert the loop closed the runner.
         self.closed = True
 
 
 def make_loop(tmp_path, *, model=None, remote=None, **options):
+    # [FUNCTION DOC] HELPER: Constructs a QualityLoop with LoopOptions(**options), output tmp_path/quality, a $20
+    # BudgetLedger at tmp_path/budget.sqlite3, the given model (default Model()) and trial runner
+    # `remote` (None means review only).
     return QualityLoop(
         LoopOptions(**options),
         tmp_path / "quality",
@@ -194,6 +233,9 @@ def make_loop(tmp_path, *, model=None, remote=None, **options):
 
 
 def test_repairs_copy_and_revalidate_everything(task, tmp_path):
+    # [FUNCTION DOC] Asserts a repair run ends usable with one repair, the original task untouched and a new bundle
+    # hash, 9 trials total, no after-rollout model call, the r1 revision re-running
+    # baseline/oracle/two probes/rollout, and the runner closed.
     before = task_identity(task)
     remote = Trials(tmp_path / "evidence")
     loop = make_loop(tmp_path, remote=remote, repair=True)
@@ -216,12 +258,18 @@ def test_repairs_copy_and_revalidate_everything(task, tmp_path):
 def test_append_only_registration_revalidates_new_task_and_preserves_existing_probes(
     task, tmp_path
 ):
+    # [FUNCTION DOC] Uses a model whose repair only appends 'new-case' to contract.json expected_passes and trials
+    # where probe0 fails once it is registered; asserts usable after one repair, original contract
+    # untouched, full revalidation of r1, 9 trials, and the probe definitions preserved.
     contract_path = task / "tests/contract.json"
     contract_path.write_text('{"expected_passes": ["old-case"]}')
     original_hash = refresh_identity(task)
 
     class AppendModel(Model):
+        # [CLASS DOC] Model variant whose Repair appends an expected pass instead of editing text.
         def ask(self, schema, model, system, user, key):
+            # [FUNCTION DOC] Records key; returns an append-only Repair for schema Repair, else a review that is
+            # broken until 'new-case' appears in the contract document.
             self.calls.append(key)
             if schema is Repair:
                 return Repair(
@@ -240,7 +288,11 @@ def test_append_only_registration_revalidates_new_task_and_preserves_existing_pr
             )
 
     class AppendTrials(Trials):
+        # [CLASS DOC] Trials variant where probe0's reward depends on whether 'new-case' is registered in the
+        # contract.
         def run(self, current, role, key):
+            # [FUNCTION DOC] Delegates to Trials.run, then for probe0 sets reward 0 when 'new-case' is in
+            # expected_passes, else 1.
             trial = super().run(current, role, key)
             if role == "probe" and "probe0" in key:
                 registered = json.loads((current / "tests/contract.json").read_text())[
@@ -269,6 +321,8 @@ def test_append_only_registration_revalidates_new_task_and_preserves_existing_pr
 
 
 def test_false_positive_cannot_be_outvoted_by_model(task, tmp_path):
+    # [FUNCTION DOC] With a dishonest model, asserts a wrong_solution probe earning reward 1 forces status
+    # needs_repair regardless of the model's pass verdict.
     result = make_loop(
         tmp_path, remote=Trials(tmp_path / "evidence"), model=Model(honest=False), run_rollout=True
     ).run(task)
@@ -277,13 +331,19 @@ def test_false_positive_cannot_be_outvoted_by_model(task, tmp_path):
 
 
 def test_budget_denied_control_does_not_trigger_paid_diagnosis(task, tmp_path):
+    # [FUNCTION DOC] Asserts a BudgetExceeded control trial yields status budget_exhausted after only the baseline
+    # trial, with no model calls and the runner closed.
     class DeniedTrials(Trials):
+        # [CLASS DOC] Trials variant whose every trial reports exception_type BudgetExceeded with no reward.
         def run(self, task, role, key):
+            # [FUNCTION DOC] Returns a copy of the base trial with exception_type 'BudgetExceeded' and reward None.
             trial = super().run(task, role, key)
             return trial.model_copy(update={"exception_type": "BudgetExceeded", "reward": None})
 
     class NoModel:
+        # [CLASS DOC] Model stub that must never be called.
         def ask(self, *args):
+            # [FUNCTION DOC] Fails the test via pytest.fail if invoked.
             pytest.fail("A budget denial does not need model diagnosis or repair")
 
     remote = DeniedTrials(tmp_path / "evidence")
@@ -295,6 +355,8 @@ def test_budget_denied_control_does_not_trigger_paid_diagnosis(task, tmp_path):
 
 
 def test_legitimate_solver_failure_keeps_a_sound_task(task, tmp_path):
+    # [FUNCTION DOC] Asserts a rollout with reward 0 judged a legitimate solver failure still leaves the task
+    # usable.
     remote = Trials(tmp_path / "evidence", solver_failure=True)
     result = make_loop(tmp_path, remote=remote, model=Model(solver_failure=True), repair=True).run(
         task
@@ -305,15 +367,24 @@ def test_legitimate_solver_failure_keeps_a_sound_task(task, tmp_path):
 
 @pytest.mark.parametrize("solver_failure", [False, True])
 def test_post_probe_review_can_unlock_one_rollout_on_same_revision(task, tmp_path, solver_failure):
+    # [FUNCTION DOC] Parametrized on solver_failure: a model that flags the task before probes but clears it after
+    # passing probes; asserts usable with no repair, trials baseline/oracle/probe/probe/rollout, and
+    # exactly three model calls (before, after, after-rollout).
     class PassingProbes(Trials):
+        # [CLASS DOC] Trials variant where probe0 (the wrong solution) is rejected with reward 0.
         def run(self, task, role, key):
+            # [FUNCTION DOC] Delegates to Trials.run and sets probe0's reward to 0.
             trial = super().run(task, role, key)
             if role == "probe" and "probe0" in key:
                 trial.reward = 0.0
             return trial
 
     class ClearedAfterProbes(Model):
+        # [CLASS DOC] Model variant scripted by request key: broken and proposing probes on 'r0-before', clean
+        # afterwards, rollout verdict on 'r0-after-rollout'.
         def ask(self, schema, model, system, user, key):
+            # [FUNCTION DOC] Records key, asserts the schema is Review, and returns review() configured from the
+            # key prefix and the enclosing solver_failure parameter.
             self.calls.append(key)
             assert schema is Review
             outcome = "legitimate_failure" if solver_failure else "legitimate_success"
@@ -341,10 +412,16 @@ def test_post_probe_review_can_unlock_one_rollout_on_same_revision(task, tmp_pat
 
 @pytest.mark.parametrize("cpu_denial", [False, True])
 def test_post_probe_rollout_budget_denial_skips_further_model_calls(task, tmp_path, cpu_denial):
+    # [FUNCTION DOC] Parametrized on cpu_denial: the rollout either raises BudgetExceeded or returns a
+    # BudgetExceeded trial; asserts budget_exhausted (with the raised reason surfaced when raised)
+    # and no model call after 'r0-after-0'.
     reason = "Budget scope batch-child-quality: requested $3, remaining $1 (reservation_pressure)"
 
     class DeniedRollout(Trials):
+        # [CLASS DOC] Trials variant that denies the rollout for budget reasons and rejects probe0.
         def run(self, task, role, key):
+            # [FUNCTION DOC] Raises BudgetExceeded(reason) for rollout when cpu_denial; otherwise sets probe0
+            # reward 0 and marks rollout trials as BudgetExceeded with no reward.
             if role == "rollout" and cpu_denial:
                 raise BudgetExceeded(reason)
             trial = super().run(task, role, key)
@@ -355,7 +432,10 @@ def test_post_probe_rollout_budget_denial_skips_further_model_calls(task, tmp_pa
             return trial
 
     class ClearedAfterProbes(Model):
+        # [CLASS DOC] Model variant that only expects the before/after review keys.
         def ask(self, schema, model, system, user, key):
+            # [FUNCTION DOC] Records key, asserts it is 'r0-before-0' or 'r0-after-0', and returns a broken-with-
+            # probes review before probes and a clean one after.
             self.calls.append(key)
             assert key in {"r0-before-0", "r0-after-0"}
             return review(broken=key.startswith("r0-before"), propose=key.startswith("r0-before"))
@@ -371,6 +451,8 @@ def test_post_probe_rollout_budget_denial_skips_further_model_calls(task, tmp_pa
 
 
 def test_review_only_is_never_validated(task, tmp_path):
+    # [FUNCTION DOC] Asserts a loop without a trial runner ends 'reviewed' with no trials and reasons mentioning
+    # missing evidence.
     result = make_loop(tmp_path, model=Model(honest=False)).run(task)
     assert result.status == "reviewed"
     assert result.trials == []
@@ -378,6 +460,7 @@ def test_review_only_is_never_validated(task, tmp_path):
 
 
 def test_max_repairs_keeps_bad_task_unselected(task, tmp_path):
+    # [FUNCTION DOC] Asserts max_repairs=0 leaves a broken task at needs_repair with zero repairs.
     result = make_loop(
         tmp_path, remote=Trials(tmp_path / "evidence"), repair=True, max_repairs=0
     ).run(task)
@@ -386,8 +469,13 @@ def test_max_repairs_keeps_bad_task_unselected(task, tmp_path):
 
 
 def test_invalid_patch_gets_one_correction_without_an_extra_execution_revision(task, tmp_path):
+    # [FUNCTION DOC] Asserts a Repair whose edit 'old' text does not match gets one correction round with 'exactly
+    # once' feedback, then yields usable with one repair, two repair calls and 9 trials.
     class Correcting(Model):
+        # [CLASS DOC] Model variant that corrupts the first Repair edit and checks the correction feedback.
         def ask(self, schema, model, system, user, key):
+            # [FUNCTION DOC] Calls Model.ask; for Repair with empty patch_feedback replaces the edit's old text
+            # with invented text, otherwise asserts the feedback mentions 'exactly once'.
             result = super().ask(schema, model, system, user, key)
             if schema is Repair:
                 payload = json.loads(user)
@@ -407,8 +495,12 @@ def test_invalid_patch_gets_one_correction_without_an_extra_execution_revision(t
 
 
 def test_repeated_invalid_patch_stops_without_changing_task(task, tmp_path):
+    # [FUNCTION DOC] Asserts a Repair that never matches stops after two repair calls with needs_evidence, no
+    # repairs and an unchanged bundle hash.
     class Invalid(Model):
+        # [CLASS DOC] Model variant whose every Repair edit has non-matching old text.
         def ask(self, schema, *args):
+            # [FUNCTION DOC] Calls Model.ask and, for Repair, sets the first edit's old text to 'invented text'.
             result = super().ask(schema, *args)
             if schema is Repair:
                 result.edits[0].old = "invented text"
@@ -423,6 +515,9 @@ def test_repeated_invalid_patch_stops_without_changing_task(task, tmp_path):
 
 
 def test_probe_collisions_preserve_distinct_scripts_and_retained_controls():
+    # [FUNCTION DOC] Asserts distinct_probes drops proposals duplicating a retained probe's script, renames a name-
+    # colliding new script, dedupes repeats, is deterministic, and does not mutate the retained
+    # list.
     retained = probes()
     collision = retained[0].model_copy(update={"script": "printf '8' > /workspace/answer.txt"})
     repeated = retained[1].model_copy(update={"name": "renamed-repeat"})
@@ -446,6 +541,9 @@ def test_probe_collisions_preserve_distinct_scripts_and_retained_controls():
     ],
 )
 def test_json_citation_resolution_keeps_decisions_and_uses_actual_bytes(quote, data):
+    # [FUNCTION DOC] Asserts resolve_json_citations rewrites a JSON-ish quote to text actually present in the
+    # pretty-printed document (one change), preserving status/explanation and not mutating the input
+    # review.
     decision = review()
     decision.verifier = decision.verifier.model_copy(deep=True)
     decision.verifier.evidence = [Citation(path="evidence/checks.json", quote=quote)]
@@ -469,6 +567,8 @@ def test_json_citation_resolution_keeps_decisions_and_uses_actual_bytes(quote, d
     ],
 )
 def test_json_citations_do_not_resolve_ambiguous_or_unsupported_claims(data):
+    # [FUNCTION DOC] Asserts resolve_json_citations makes no change for ambiguous matches, contradicting values,
+    # different keys, or text only inside a string value.
     decision = review()
     decision.verifier.evidence = [
         Citation(path="evidence/checks.json", quote='"test_result": "failed"')
@@ -480,6 +580,8 @@ def test_json_citations_do_not_resolve_ambiguous_or_unsupported_claims(data):
 
 
 def test_markdown_citation_restores_only_missing_inline_formatting():
+    # [FUNCTION DOC] Asserts resolve_markdown_citations restores missing backticks so the quote matches
+    # instruction.md, changing only task evidence and not mutating the input.
     quote = "MetaClip2TextModel – text encoder; `pooler_output` selects the first EOS token."
     document = (
         "- `MetaClip2TextModel` – text encoder; `pooler_output` selects the first EOS token.\n"
@@ -512,6 +614,8 @@ def test_markdown_citation_restores_only_missing_inline_formatting():
     ],
 )
 def test_markdown_citations_keep_unsupported_or_ambiguous_quotes(path, document):
+    # [FUNCTION DOC] Asserts no Markdown citation rewrite for differing text, duplicates, fenced/indented code,
+    # escaped or double backticks, or non-Markdown files.
     decision = review()
     decision.task.evidence = [
         Citation(path=path, quote="First selects 1 token from the incoming sequence.")
@@ -521,6 +625,9 @@ def test_markdown_citations_keep_unsupported_or_ambiguous_quotes(path, document)
 
 
 def test_large_private_pr_context_is_bounded_and_remains_searchable(task, tmp_path):
+    # [FUNCTION DOC] With a huge merged_pr source_diff, asserts the task-context excerpt is <= 4000 chars ending
+    # with 'Excerpt ends', omits the tail marker, is in the inventory, and that a search read
+    # retrieves the marker; payload has documents.
     context_data = {
         "kind": "merged_pr",
         "source_diff": "unchanged line\n" * 30000 + "UNIQUE_CONTRACT: correct behavior",
@@ -551,6 +658,9 @@ def test_large_private_pr_context_is_bounded_and_remains_searchable(task, tmp_pa
 
 
 def test_saved_repair_findings_precede_long_pr_patch_without_more_context(task, tmp_path):
+    # [FUNCTION DOC] Asserts campaign_design_guidance diagnosis is placed in the bounded task-context excerpt ahead
+    # of the long diff, total context <= 16000, the input dict is not mutated, and the diff tail is
+    # still searchable.
     context_data = {
         "kind": "merged_pr",
         "source_diff": "unchanged line\n" * 30000 + "UNIQUE_SOURCE: retained patch",
@@ -586,6 +696,9 @@ def test_saved_repair_findings_precede_long_pr_patch_without_more_context(task, 
 
 
 def test_short_verifier_path_requires_unique_exact_match(task):
+    # [FUNCTION DOC] Asserts resolve_verifier_paths maps a short tests/ path to the unique tests/source/tests file
+    # containing the old text exactly, without mutating the input or the file, and leaves the repair
+    # unchanged when ambiguous, unmatched, or old is empty.
     path = task / "tests/source/tests/contract.py"
     path.parent.mkdir(parents=True)
     path.write_text("assert actual == expected\n")
@@ -617,6 +730,8 @@ def test_short_verifier_path_requires_unique_exact_match(task):
 
 
 def test_path_resolution_never_redirects_to_source_or_outside_task(task, tmp_path):
+    # [FUNCTION DOC] Asserts resolution does not follow a symlink outside the task or redirect a missing path, and
+    # raises ValueError for a path traversing into solution/.
     outside = tmp_path / "contract.py"
     outside.write_text("original")
     (task / "tests/contract.py").symlink_to(outside)
@@ -642,6 +757,8 @@ def test_path_resolution_never_redirects_to_source_or_outside_task(task, tmp_pat
     "path", ["../escape", "/tmp/escape", "environment/../../escape", "task.toml"]
 )
 def test_repair_cannot_escape_or_rewrite_execution_policy(task, tmp_path, path):
+    # [FUNCTION DOC] Asserts apply_repair raises ValueError for paths escaping the task or targeting task.toml and
+    # creates no revision directory.
     patch = Repair(
         explanation="bad edit",
         addressed_issues=["test"],
@@ -653,6 +770,8 @@ def test_repair_cannot_escape_or_rewrite_execution_policy(task, tmp_path, path):
 
 
 def test_ambiguous_edit_is_atomic(task, tmp_path):
+    # [FUNCTION DOC] Asserts an edit whose old text is not found raises ValueError 'exactly once' and creates no
+    # revision.
     patch = Repair(
         explanation="bad match",
         addressed_issues=["test"],
@@ -664,6 +783,8 @@ def test_ambiguous_edit_is_atomic(task, tmp_path):
 
 
 def test_probe_keeps_task_and_verifier_bytes(task, tmp_path):
+    # [FUNCTION DOC] Asserts probe_variant keeps instruction, tests and Dockerfile bytes, wraps solve.sh with the
+    # completion marker, and saves the original as quality-original-solve.sh.
     revised = probe_variant(task, probes()[0], tmp_path / "probe" / task.name)
     for file in ["instruction.md", "tests/test.sh", "environment/Dockerfile"]:
         assert (task / file).read_bytes() == (revised / file).read_bytes()
@@ -674,6 +795,9 @@ def test_probe_keeps_task_and_verifier_bytes(task, tmp_path):
 
 
 def test_repository_probe_audits_the_collected_submission(task, tmp_path):
+    # [FUNCTION DOC] With submitted_files in the contract, asserts the probe wrapper snapshots before the script
+    # and after it before printing the marker, ships quality-probe-audit.py and a boundary contract
+    # with only submitted_files, and keeps tests/contract.json bytes.
     contract = task / "tests/contract.json"
     contract.write_text(
         json.dumps({"submitted_files": ["answer.txt"], "expected_passes": ["private"]})
@@ -702,6 +826,10 @@ def test_repository_probe_audits_the_collected_submission(task, tmp_path):
 def test_probe_shell_exit_cannot_bypass_the_change_audit(task, tmp_path, ending, change, success):
     # Execute only this owned wrapper and audit against a tiny text fixture.
     # Target repositories and their tests are never imported locally.
+    # [FUNCTION DOC] Executes the generated probe wrapper locally via bash with paths rewritten into tmp_path;
+    # asserts success (exit 0, completed and changed-files markers, before/after JSON) only when the
+    # script exits 0 and actually changed answer.txt. Side effect: subprocess with PATH prefixed by
+    # the current interpreter dir.
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     contract = task / "tests/contract.json"
@@ -742,6 +870,7 @@ def test_probe_shell_exit_cannot_bypass_the_change_audit(task, tmp_path, ending,
 
 
 def test_fabricated_citation_is_rejected(task):
+    # [FUNCTION DOC] Asserts EvidenceContext.validate_review raises 'not grounded' for an invented quote.
     context = EvidenceContext(task, [], limit=16000)
     value = review()
     value.task.evidence[0].quote = "invented evidence"
@@ -750,6 +879,9 @@ def test_fabricated_citation_is_rejected(task):
 
 
 def raw_trial(task, tmp_path, *, agent="terminus-2"):
+    # [FUNCTION DOC] HELPER: Writes tmp_path/raw/result.json mimicking a native Harbor trial (task checksum from
+    # harbor Task, agent name, reward 1) and returns its path. Input: keyword-only agent (default
+    # 'terminus-2').
     from harbor.models.task.task import Task
 
     path = tmp_path / "raw" / "result.json"
@@ -767,6 +899,8 @@ def raw_trial(task, tmp_path, *, agent="terminus-2"):
 
 
 def test_native_harbor_rollout_is_bound_by_checksum(task, tmp_path):
+    # [FUNCTION DOC] Asserts import_trial binds a native result by harbor_checksum and raises 'checksum' once the
+    # checksum is altered.
     path = raw_trial(task, tmp_path)
     evidence = import_trial(path, task, "rollout")
     assert evidence.binding == "harbor_checksum"
@@ -778,12 +912,14 @@ def test_native_harbor_rollout_is_bound_by_checksum(task, tmp_path):
 
 
 def test_oracle_cannot_be_imported_as_blind_solver(task, tmp_path):
+    # [FUNCTION DOC] Asserts importing an oracle-agent result as a rollout raises ValueError mentioning solver.
     path = raw_trial(task, tmp_path, agent="oracle")
     with pytest.raises(ValueError, match="solver"):
         import_trial(path, task, "rollout")
 
 
 def test_receipt_cannot_redirect_to_another_directory(task, tmp_path):
+    # [FUNCTION DOC] Asserts a receipt whose trial_id contains '..' raises 'invalid trial ID'.
     receipt = tmp_path / "trial.json"
     receipt.write_text(
         json.dumps(
@@ -799,6 +935,8 @@ def test_receipt_cannot_redirect_to_another_directory(task, tmp_path):
 
 
 def test_oracle_exit_failure_and_probe_install_failure_are_not_valid_controls(task, tmp_path):
+    # [FUNCTION DOC] Asserts control_failures flags an oracle with nonzero agent exit code and probe_failures flags
+    # a probe that was not installed.
     item = Trials(tmp_path / "results").run(task, "oracle", "one")
     assert "oracle did not execute cleanly" in control_failures(
         [item.model_copy(update={"agent_exit_code": 1})], 1
@@ -810,6 +948,8 @@ def test_oracle_exit_failure_and_probe_install_failure_are_not_valid_controls(ta
 
 
 def test_run_budget_preserves_campaign_and_uncertain_holds(tmp_path):
+    # [FUNCTION DOC] Asserts an uncertain reservation stays held so a further reservation beyond the $2 run cap
+    # raises BudgetExceeded, with $1.50 still reserved.
     ledger = BudgetLedger(tmp_path / "budget.sqlite3", limit_usd="10")
     budget = RunBudget(ledger, "quality-example", "2")
     budget.reserve("quality-example:one", "1.50", "review")
@@ -820,12 +960,14 @@ def test_run_budget_preserves_campaign_and_uncertain_holds(tmp_path):
 
 
 def test_changed_options_cannot_resume(task, tmp_path):
+    # [FUNCTION DOC] Asserts resuming a run with different LoopOptions raises ValueError 'identical'.
     make_loop(tmp_path).run(task)
     with pytest.raises(ValueError, match="identical"):
         make_loop(tmp_path, max_repairs=1).run(task, resume=True)
 
 
 def test_boolean_reward_is_invalid(task, tmp_path):
+    # [FUNCTION DOC] Asserts import_trial rejects a boolean reward value with ValueError.
     path = raw_trial(task, tmp_path)
     data = json.loads(path.read_text())
     data["verifier_result"]["rewards"]["reward"] = True
@@ -835,12 +977,17 @@ def test_boolean_reward_is_invalid(task, tmp_path):
 
 
 def test_completed_model_response_is_reused_without_another_paid_call(tmp_path, monkeypatch):
+    # [FUNCTION DOC] Monkeypatches key resolution and llm.complete; asserts JsonModel caches a completed response
+    # by key (one call, $0.01 accounted) and that reusing the key with a different prompt raises
+    # ModelRequestError without calling again.
     from repo2rlenv.llm import LLMResponse
 
     calls = []
     monkeypatch.setattr("repo2rlenv.quality.loop.client.resolve_llm_api_key", lambda *args: "test")
 
     def complete(*args, **kwargs):
+        # [FUNCTION DOC] Fake LLM completion: records kwargs and returns an LLMResponse with a serialized review
+        # and cost 0.01.
         calls.append(kwargs)
         return LLMResponse(
             content=review().model_dump_json(), usage={"prompt_tokens": 10}, cost_usd=0.01
@@ -861,10 +1008,13 @@ def test_completed_model_response_is_reused_without_another_paid_call(tmp_path, 
 
 
 def test_uncertain_model_request_is_never_dispatched_again(tmp_path, monkeypatch):
+    # [FUNCTION DOC] Asserts a request that timed out is marked uncertain: both attempts raise ModelRequestError,
+    # only one dispatch happens, and $1 stays reserved.
     monkeypatch.setattr("repo2rlenv.quality.loop.client.resolve_llm_api_key", lambda *args: "test")
     calls = []
 
     def complete(*args, **kwargs):
+        # [FUNCTION DOC] Fake LLM completion that records kwargs and raises TimeoutError.
         calls.append(kwargs)
         raise TimeoutError("uncertain provider response")
 
@@ -881,6 +1031,8 @@ def test_uncertain_model_request_is_never_dispatched_again(tmp_path, monkeypatch
 
 
 def test_missing_credentials_do_not_reserve_money(tmp_path, monkeypatch):
+    # [FUNCTION DOC] Asserts a missing API key raises ValueError 'No API key' before any budget operation is
+    # recorded.
     monkeypatch.setattr("repo2rlenv.quality.loop.client.resolve_llm_api_key", lambda *args: None)
     ledger = BudgetLedger(tmp_path / "budget.sqlite3", limit_usd="10")
     client = JsonModel(
@@ -892,8 +1044,12 @@ def test_missing_credentials_do_not_reserve_money(tmp_path, monkeypatch):
 
 
 def test_fake_citations_cannot_trigger_a_repair(task, tmp_path):
+    # [FUNCTION DOC] With zero read rounds, asserts a review citing invented text ends needs_evidence with no
+    # repair after one model call.
     class Ungrounded(Model):
+        # [CLASS DOC] Model variant that replaces the task evidence quote with invented text.
         def ask(self, *args):
+            # [FUNCTION DOC] Calls Model.ask and overwrites the first task evidence quote.
             value = super().ask(*args)
             value.task.evidence[0].quote = "invented requirement"
             return value
@@ -906,6 +1062,8 @@ def test_fake_citations_cannot_trigger_a_repair(task, tmp_path):
 
 
 def test_trial_artifact_symlink_cannot_escape_evidence_root(task, tmp_path):
+    # [FUNCTION DOC] Asserts EvidenceContext raises 'symlinks' when a trial artifact directory is a symlink
+    # pointing outside.
     item = Trials(tmp_path / "results").run(task, "rollout", "one")
     outside = tmp_path / "outside"
     outside.mkdir()
@@ -916,6 +1074,8 @@ def test_trial_artifact_symlink_cannot_escape_evidence_root(task, tmp_path):
 
 
 def test_bounded_search_finds_relevant_code_without_loading_whole_repository(task):
+    # [FUNCTION DOC] Asserts a search read finds 'printf' in solve.sh and a path outside the inventory raises
+    # 'inventory'.
     context = EvidenceContext(task, [], limit=16000)
     context.read_more(
         [ReadRequest(path="solution/solve.sh", query="printf", start_line=1, end_line=1)]
@@ -926,6 +1086,7 @@ def test_bounded_search_finds_relevant_code_without_loading_whole_repository(tas
 
 
 def test_prior_revision_controls_cannot_validate_current_task(task, tmp_path):
+    # [FUNCTION DOC] Asserts _context rejects a trial bound to another bundle hash with 'another task revision'.
     evidence = Trials(tmp_path / "results").run(task, "oracle", "one")
     evidence.bundle_hash = "sha256:" + "0" * 64
     loop = make_loop(tmp_path)
@@ -934,6 +1095,9 @@ def test_prior_revision_controls_cannot_validate_current_task(task, tmp_path):
 
 
 def test_generic_probes_cannot_cover_explicit_laziness(task, tmp_path):
+    # [FUNCTION DOC] After adding 'Yield lazily' to the instruction, asserts required_probe_focus is
+    # {'lazy_output'} and generic probes leave the task needs_evidence without running probes or
+    # rollout.
     patch = Repair(
         explanation="Add an output contract",
         addressed_issues=["contract"],
@@ -960,6 +1124,7 @@ def test_generic_probes_cannot_cover_explicit_laziness(task, tmp_path):
 
 
 def test_generator_input_does_not_imply_lazy_output(task, tmp_path):
+    # [FUNCTION DOC] Asserts mentioning generator inputs does not create a lazy_output probe requirement.
     patch = Repair(
         explanation="Document inputs",
         addressed_issues=["contract"],
@@ -978,6 +1143,8 @@ def test_generator_input_does_not_imply_lazy_output(task, tmp_path):
 
 @pytest.mark.parametrize("focus", ["compiled_execution", "model_behavior"])
 def test_explicit_requirement_rejects_generic_probes(task, tmp_path, focus):
+    # [FUNCTION DOC] For each focus, asserts with_probe_requirements adds the requirement only to the copy, and
+    # generic probes yield needs_evidence naming the focus with no probe/rollout trials.
     revised = with_probe_requirements(task, tmp_path / "input" / task.name, [focus])
     assert required_probe_focus(task) == set()
     assert required_probe_focus(revised) == {focus}
@@ -995,6 +1162,8 @@ def test_explicit_requirement_rejects_generic_probes(task, tmp_path, focus):
 
 @pytest.mark.parametrize("focus", ["compiled_execution", "model_behavior"])
 def test_explicit_probe_requirement_survives_task_repair(task, tmp_path, focus):
+    # [FUNCTION DOC] Asserts QualityLoop._repair produces a new revision that still requires the focus and returns
+    # the retained probes unchanged.
     revised = with_probe_requirements(task, tmp_path / "input" / task.name, [focus])
     loop = make_loop(tmp_path, repair=True)
     retained = probes()
@@ -1009,6 +1178,8 @@ def test_explicit_probe_requirement_survives_task_repair(task, tmp_path, focus):
 
 @pytest.mark.parametrize("focus", ["compiled_execution", "model_behavior"])
 def test_repair_cannot_remove_explicit_probe_metadata(task, tmp_path, focus):
+    # [FUNCTION DOC] Asserts editing task.toml to drop the focus raises ValueError, keeps the requirement and
+    # creates no revision.
     revised = with_probe_requirements(task, tmp_path / "input" / task.name, [focus])
     repair = Repair(
         explanation="Try to bypass the requirement",
@@ -1022,6 +1193,8 @@ def test_repair_cannot_remove_explicit_probe_metadata(task, tmp_path, focus):
 
 
 def test_known_counterexamples_are_bound_and_replayed(task, tmp_path):
+    # [FUNCTION DOC] Asserts a probes.json bound to the task hash is replayed (usable after one repair) and one
+    # bound to another hash raises 'match the task'.
     path = tmp_path / "probes.json"
     path.write_text(
         json.dumps(
@@ -1043,6 +1216,8 @@ def test_known_counterexamples_are_bound_and_replayed(task, tmp_path):
 
 
 def test_openai_schema_requires_focus_even_for_legacy_read_defaults():
+    # [FUNCTION DOC] Asserts response_schema(Review) marks SemanticProbe.focus required and without a default
+    # (strict structured outputs).
     schema = response_schema(Review)
     assert "focus" in schema["$defs"]["SemanticProbe"]["required"]
     assert "default" not in schema["$defs"]["SemanticProbe"]["properties"]["focus"]
@@ -1051,6 +1226,8 @@ def test_openai_schema_requires_focus_even_for_legacy_read_defaults():
 def test_wrong_solution_proposal_requires_runtime_evidence_authorization():
     # The schema accepts a proposal; only the loop can inspect its execution
     # history. Missing proof and installed controls are rejected in protocol tests.
+    # [FUNCTION DOC] Asserts the Repair schema itself accepts a wrong_solution probe replacement (authorization is
+    # enforced by the loop elsewhere).
     proposal = Repair(
         explanation="Correct a control whose installation failed",
         addressed_issues=["probe"],
@@ -1061,7 +1238,11 @@ def test_wrong_solution_proposal_requires_runtime_evidence_authorization():
 
 
 class AlternativeRepairModel(Model):
+    # [CLASS DOC] Model variant whose repair replaces only the valid_alternative probe (adds a '# corrected'
+    # script) and whose post-probe review raises a blocking issue in a configurable category.
     def __init__(self, *, category="probe", replacement=None):
+        # [FUNCTION DOC] Inputs: keyword-only category='probe' (issue category after probes) and replacement
+        # (SemanticProbe; default a corrected copy of probes()[1]).
         super().__init__()
         self.category = category
         self.replacement = replacement or probes()[1].model_copy(
@@ -1069,6 +1250,8 @@ class AlternativeRepairModel(Model):
         )
 
     def ask(self, schema, model, system, user, key):
+        # [FUNCTION DOC] Records key; returns a probe-replacement-only Repair for schema Repair, else a review
+        # proposing probes when allowed, with a blocking issue on 'r0-after' keys.
         self.calls.append(key)
         if schema is Repair:
             return Repair(
@@ -1097,7 +1280,11 @@ class AlternativeRepairModel(Model):
 
 
 class AlternativeTrials(Trials):
+    # [CLASS DOC] Trials variant where only a corrected valid_alternative earns reward and results are written
+    # in the real adapters' receipt layout.
     def run(self, task, role, key):
+        # [FUNCTION DOC] Delegates to Trials.run; for probes sets reward 1.0 only for probe1 whose solve.sh
+        # contains 'corrected', else 0; then bind_result.
         result = super().run(task, role, key)
         if role == "probe":
             correct_alternative = "corrected" in (task / "solution/solve.sh").read_text()
@@ -1105,6 +1292,10 @@ class AlternativeTrials(Trials):
         return self.bind_result(task, result, key)
 
     def bind_result(self, task, result, key):
+        # [FUNCTION DOC] HELPER: Rewrites the trial into the real receipt layout: sets agent name and exit code 0,
+        # writes root/key/test-<key>/<task>/result.json, agent/exit-code.txt, the probe completion
+        # marker for probes, and root/key/trial.json receipt; updates result path and sha256.
+        # Returns the mutated TrialRecord.
         """Preserve the same local receipt layout as both real trial adapters."""
         role = result.role
         result.agent = {"baseline": "nop", "oracle": "oracle", "probe": "oracle"}.get(
@@ -1149,6 +1340,9 @@ class AlternativeTrials(Trials):
 
 
 def test_probe_only_repair_reuses_controls_and_preserves_counterexample(task, tmp_path):
+    # [FUNCTION DOC] Asserts a probe-only repair keeps the bundle hash, reruns only probe1 and rollout in r1,
+    # reuses the r0 wrong-solution trial (reward 0), and writes revisions/r1/repair.json without an
+    # r1-probe0 directory.
     remote = AlternativeTrials(tmp_path / "results")
     result = make_loop(tmp_path, remote=remote, model=AlternativeRepairModel(), repair=True).run(
         task
@@ -1172,8 +1366,13 @@ def test_probe_only_repair_reuses_controls_and_preserves_counterexample(task, tm
 
 
 def test_task_repair_invalidates_previously_successful_probes(task, tmp_path):
+    # [FUNCTION DOC] Asserts that when the repair also edits the task, all r1 controls and probes rerun and every
+    # trial result is from r1.
     class TaskRepairModel(AlternativeRepairModel):
+        # [CLASS DOC] AlternativeRepairModel variant whose Repair also edits tests/test.sh.
         def ask(self, schema, *args):
+            # [FUNCTION DOC] Calls the parent and, for Repair, sets edits to replace 'weak check' with 'strong
+            # check'.
             response = super().ask(schema, *args)
             if schema is Repair:
                 response.edits = [
@@ -1202,8 +1401,13 @@ def test_task_repair_invalidates_previously_successful_probes(task, tmp_path):
 
 @pytest.mark.parametrize("failure", ["reward", "infrastructure", "uninstalled", "exit"])
 def test_probe_only_repair_reruns_unchanged_failed_probes(task, tmp_path, failure):
+    # [FUNCTION DOC] For each failure mode of the original probe0 (reward 1, infrastructure error, not installed,
+    # nonzero exit), asserts a probe-only repair reruns probe0 as well as probe1 and rollout.
     class RecoveringTrials(AlternativeTrials):
+        # [CLASS DOC] AlternativeTrials variant that damages the r0-probe0 trial according to `failure`.
         def run(self, task, role, key):
+            # [FUNCTION DOC] For key r0-probe0 applies the failure (reward 1, exception type, not installed, or
+            # exit code 1 written to exit-code.txt) and rebinds the result.
             result = super().run(task, role, key)
             if key == "r0-probe0":
                 if failure == "reward":
@@ -1234,6 +1438,8 @@ def test_probe_only_repair_reruns_unchanged_failed_probes(task, tmp_path, failur
 
 @pytest.mark.parametrize("kind", ["wrong_solution", "valid_alternative"])
 def test_probe_reuse_requires_the_entire_unchanged_definition(task, tmp_path, kind):
+    # [FUNCTION DOC] Asserts _reusable_probe_trial accepts an unchanged probe trial and rejects any change to
+    # script, rationale, focus or evidence.
     probe = next(item for item in probes() if item.kind == kind)
     if kind == "valid_alternative":
         probe = probe.model_copy(update={"script": probe.script + " # corrected"})
@@ -1257,6 +1463,9 @@ def test_probe_reuse_requires_the_entire_unchanged_definition(task, tmp_path, ki
     "tamper", ["result", "parent", "definition", "variant", "marker", "receipt", "symlink"]
 )
 def test_successful_probe_reuse_checks_original_bound_evidence(task, tmp_path, tamper):
+    # [FUNCTION DOC] For each tampering (result bytes, probe.json parent hash or definition, variant verifier,
+    # completion marker, receipt state, symlinked result), asserts _reusable_probe_trial raises
+    # ValueError.
     probe = probes()[0]
     variant = probe_variant(task, probe, tmp_path / "variants" / task.name)
     trial = AlternativeTrials(tmp_path / "results").run(variant, "probe", "r0-probe0")
@@ -1291,6 +1500,9 @@ def test_successful_probe_reuse_checks_original_bound_evidence(task, tmp_path, t
 
 @pytest.mark.parametrize("defect", ["diagnosis", "name", "focus", "evidence"])
 def test_alternative_repair_requires_grounding_and_stable_identity(task, tmp_path, defect):
+    # [FUNCTION DOC] Asserts a replacement probe is rejected (needs_evidence, no revision) when the diagnosis is
+    # not a probe issue or the name, focus or evidence changed; for evidence the reason names the
+    # invalid citation.
     replacement = probes()[1]
     category = "verifier" if defect == "diagnosis" else "probe"
     updates = {
@@ -1316,13 +1528,20 @@ def test_alternative_repair_requires_grounding_and_stable_identity(task, tmp_pat
 
 @pytest.mark.parametrize("defect", ["unknown_path", "traceback"])
 def test_alternative_repair_corrects_citation_once_with_source_context(task, tmp_path, defect):
+    # [FUNCTION DOC] Asserts a replacement probe with a bad citation (unknown path, or traceback quote missing the
+    # 'E   ' prefix) gets one correction round with precise feedback and the source excerpt, then
+    # succeeds.
     actual = "assert False is True\nE   AssertionError: assert False is True\n"
     bad_quote = actual.replace("E   ", "")
     citation_path = "evidence/3-probe/verifier/stdout.txt"
     bad_path = "evidence/3-probe/not-an-artifact.txt" if defect == "unknown_path" else citation_path
 
     class LoggedTrials(AlternativeTrials):
+        # [CLASS DOC] AlternativeTrials variant that writes a verifier stdout.txt with a pytest traceback for
+        # r0-probe1.
         def run(self, *args):
+            # [FUNCTION DOC] Delegates to the parent and, for key r0-probe1, writes verifier/stdout.txt beside the
+            # result.
             result = super().run(*args)
             if args[2] == "r0-probe1":
                 directory = Path(result.result).parent / "verifier"
@@ -1331,7 +1550,12 @@ def test_alternative_repair_corrects_citation_once_with_source_context(task, tmp
             return result
 
     class CorrectingModel(AlternativeRepairModel):
+        # [CLASS DOC] AlternativeRepairModel variant that first returns a badly cited replacement and checks the
+        # correction feedback.
         def ask(self, schema, model, system, user, key):
+            # [FUNCTION DOC] For Repair: on the correction key asserts feedback names the evidence slot, bad path
+            # and quote (and the traceback excerpt is supplied); otherwise replaces the evidence
+            # with the bad citation.
             response = super().ask(schema, model, system, user, key)
             if schema is Repair:
                 if key.endswith("-correction1"):
@@ -1363,6 +1587,8 @@ def test_alternative_repair_corrects_citation_once_with_source_context(task, tmp
 
 
 def test_review_contains_actual_repository_test_failure(task, tmp_path):
+    # [FUNCTION DOC] Asserts verifier stdout from a trial appears in the context under
+    # evidence/0-oracle/verifier/stdout.txt.
     item = Trials(tmp_path / "results").run(task, "oracle", "one")
     verifier = Path(item.result).parent / "verifier"
     verifier.mkdir()
@@ -1374,6 +1600,8 @@ def test_review_contains_actual_repository_test_failure(task, tmp_path):
 
 
 def test_large_baseline_inventory_cannot_hide_later_probe_failure(task, tmp_path):
+    # [FUNCTION DOC] Asserts huge baseline artifacts do not crowd out a later probe's failure output, and the probe
+    # script is readable as evidence/1-probe/probe-script.sh.
     remote = Trials(tmp_path / "results")
     baseline = remote.run(task, "baseline", "baseline")
     alternative = remote.run(task, "probe", "alternative").model_copy(
@@ -1394,8 +1622,13 @@ def test_large_baseline_inventory_cannot_hide_later_probe_failure(task, tmp_path
 
 
 def test_immutable_oracle_cannot_be_changed_by_component_repair(task, tmp_path):
+    # [FUNCTION DOC] Asserts a repair editing solution/solve.sh with protected_paths set ends needs_evidence citing
+    # the immutable oracle, with the task unchanged and no revision.
     class OracleEditingModel(Model):
+        # [CLASS DOC] Model variant whose Repair edits the protected oracle script.
         def ask(self, schema, model, system, user, key):
+            # [FUNCTION DOC] Returns a Repair editing solution/solve.sh for schema Repair, else delegates to
+            # Model.ask.
             if schema is Repair:
                 return Repair(
                     explanation="Attempt to alter the oracle",
@@ -1428,6 +1661,8 @@ def test_immutable_oracle_cannot_be_changed_by_component_repair(task, tmp_path):
 
 
 def test_selected_unittest_methods_are_in_initial_review_context(task):
+    # [FUNCTION DOC] Asserts an expected-pass test method id pulls the private test file containing it into the
+    # initial context.
     path = task / "tests/source/tests/test_large.py"
     path.parent.mkdir(parents=True)
     path.write_text(
@@ -1443,6 +1678,8 @@ def test_selected_unittest_methods_are_in_initial_review_context(task):
 
 
 def test_real_build_failure_text_is_available_without_guessing(task, tmp_path):
+    # [FUNCTION DOC] Asserts a trial result.json with an exception message is included verbatim under
+    # evidence/0-oracle/result.json.
     path = tmp_path / "evidence/result.json"
     path.parent.mkdir()
     path.write_text(
@@ -1473,6 +1710,8 @@ def test_real_build_failure_text_is_available_without_guessing(task, tmp_path):
 
 
 def test_selected_class_wins_over_generic_method_names_and_source_copies(task, tmp_path):
+    # [FUNCTION DOC] Asserts a class selector in test_paths brings the selected class's assertions into context
+    # despite 250 same-named methods, and excludes unrelated library source.
     private = task / "tests/source/tests/test_large.py"
     private.parent.mkdir(parents=True)
     private.write_text(
@@ -1501,8 +1740,13 @@ def test_selected_class_wins_over_generic_method_names_and_source_copies(task, t
 
 
 def test_review_reads_missing_evidence_before_demanding_probe_scripts(task, tmp_path):
+    # [FUNCTION DOC] Asserts _review honors a model read request (one round) and the second call sees the search
+    # excerpt; the final review has no pending read requests.
     class Reader(Model):
+        # [CLASS DOC] Model variant that first requests a read, then reviews.
         def ask(self, schema, model, system, user, key):
+            # [FUNCTION DOC] Appends the parsed payload to calls; first call returns a review with a ReadRequest,
+            # later calls assert the excerpt exists and return review(propose=True).
             payload = json.loads(user)
             self.calls.append(payload)
             if len(self.calls) == 1:
@@ -1526,8 +1770,13 @@ def test_review_reads_missing_evidence_before_demanding_probe_scripts(task, tmp_
 
 
 def test_review_reserves_a_slot_for_valid_alternative(task, tmp_path):
+    # [FUNCTION DOC] Asserts that when the model proposes only wrong_solution probes, protocol feedback demands the
+    # missing kind and the second answer covers both kinds.
     class WrongOnly(Model):
+        # [CLASS DOC] Model variant that first proposes two wrong_solution probes.
         def ask(self, schema, model, system, user, key):
+            # [FUNCTION DOC] Asserts required_probe_kinds; first call returns two wrong-solution probes, later
+            # calls assert 'missing control kinds' feedback and return both kinds.
             payload = json.loads(user)
             self.calls.append(payload)
             assert payload["required_probe_kinds"] == ["valid_alternative", "wrong_solution"]
@@ -1545,8 +1794,12 @@ def test_review_reserves_a_slot_for_valid_alternative(task, tmp_path):
 
 
 def test_blocking_task_defect_can_be_repaired_before_authoring_probes(task, tmp_path):
+    # [FUNCTION DOC] Asserts a review with a blocking issue and no probes is accepted by _review (repair may
+    # precede probe authoring).
     class Defect(Model):
+        # [CLASS DOC] Model variant that always reports a broken task without probes.
         def ask(self, *args):
+            # [FUNCTION DOC] Returns review(broken=True, propose=False).
             return review(broken=True, propose=False)
 
     value, _ = make_loop(tmp_path, model=Defect())._review(task, [], "defect", probe_limit=2)
@@ -1554,6 +1807,8 @@ def test_blocking_task_defect_can_be_repaired_before_authoring_probes(task, tmp_
 
 
 def test_review_inventory_preserves_readable_paths_without_duplicate_hash_tokens(task):
+    # [FUNCTION DOC] Asserts a 600-entry inventory is grouped by directory losslessly, budget omissions are
+    # counted, and sha256 hashes are kept in the inventory but not emitted in the payload.
     context = EvidenceContext(task, [], limit=100000)
     for index in range(600):
         key = f"evidence/3-probe/artifacts/workspace/large_package/module_{index:04}.py"
@@ -1573,8 +1828,12 @@ def test_review_inventory_preserves_readable_paths_without_duplicate_hash_tokens
 
 
 def test_original_task_intent_and_protected_paths_reach_reviewer(task, tmp_path):
+    # [FUNCTION DOC] Asserts the reviewer payload includes protected_paths and the original task_context as
+    # evidence/task-context.json.
     class IntentModel(Model):
+        # [CLASS DOC] Model variant asserting protected paths and task context reach the reviewer.
         def ask(self, schema, model, system, user, key):
+            # [FUNCTION DOC] Asserts payload protected_paths and the merged_pr task context, then returns review().
             payload = json.loads(user)
             assert payload["protected_paths"] == ["solution"]
             context = json.loads(payload["documents"]["evidence/task-context.json"])

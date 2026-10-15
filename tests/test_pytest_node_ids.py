@@ -1,3 +1,9 @@
+# [MODULE DOC] Parity tests ensuring pytest node ids (including parametrized ids with spaces,
+# brackets and status words) are parsed identically by the canonical
+# repo2rlenv.log_parsers.pytest_parser.parse_pytest and the standalone copy shipped in
+# repo2rlenv.pipelines._pr_runtime_verifier. Also runs real pytest subprocesses over generated test
+# files in tmp_path and the standalone verifier script with `python -I` to prove F2P/P2P discovery
+# and grading survive end-to-end. Side effects: spawns subprocesses.
 """Node identities must survive generation-time and standalone pytest parsing."""
 
 from __future__ import annotations
@@ -16,6 +22,8 @@ from repo2rlenv.pipelines import _pr_runtime_verifier as verifier
 
 @pytest.fixture(params=[parse_pytest, verifier.parse_pytest], ids=["canonical", "standalone"])
 def parser(request):
+    # [FUNCTION DOC] Pytest fixture parametrized over the two parser implementations (ids 'canonical' and
+    # 'standalone'). Input: request. Output: the parse_pytest callable for this param.
     return request.param
 
 
@@ -34,6 +42,8 @@ def parser(request):
 )
 @pytest.mark.parametrize("style", ["verbose", "progress", "summary"])
 def test_preserves_complete_parameter_id(parser, parameter, style):
+    # [FUNCTION DOC] For tricky parameter strings and three log styles (verbose, progress with percentage, summary
+    # 'FAILED id - msg'), asserts the parser returns the full node id mapped to FAILED.
     node = f"tests/test_calc.py::test_eval[{parameter}]"
     if style == "summary":
         log = f"FAILED {node} - AssertionError: [message] - more detail\n"
@@ -44,6 +54,8 @@ def test_preserves_complete_parameter_id(parser, parameter, style):
 
 @pytest.mark.parametrize("status", ["PASSED", "FAILED", "SKIPPED", "ERROR"])
 def test_summary_and_verbose_statuses_with_spaces(parser, status):
+    # [FUNCTION DOC] For each status word, asserts both summary-prefix and verbose-suffix forms parse a node id
+    # containing spaces to that status.
     node = "tests/test_calc.py::test_eval[1 + 1]"
     assert parser(f"{status} {node}\n") == {node: status}
     assert parser(f"{node} {status} [100%]\n") == {node: status}
@@ -53,6 +65,8 @@ def test_summary_and_verbose_statuses_with_spaces(parser, status):
     "suffix", ["[ 8/17]", "[ 17 / 17 ]", "415.6us", "12.3ms", "1.234s", "2m 3s", "1h 2m"]
 )
 def test_count_and_duration_suffixes(parser, suffix):
+    # [FUNCTION DOC] Asserts verbose lines followed by count suffixes ('[ 8/17]') or durations ('12.3ms', '2m 3s'),
+    # and optional skip reasons, still parse to the expected statuses including a file-level ERROR.
     nodes = {
         "tests/test_calc.py::test_plain": "PASSED",
         "tests/test_calc.py::test_eval[1 + 1]": "FAILED",
@@ -72,6 +86,9 @@ def test_large_assertion_diff_does_not_stall_parsing():
     # Isolate the timeout so a backtracking regression cannot hang the suite.
     # Both parsers should skip this ~130 KB non-test line in milliseconds;
     # the previous regex takes tens of seconds even on a fast machine.
+    # [FUNCTION DOC] Regression guard against regex catastrophic backtracking: runs both parsers in a subprocess
+    # (10 s timeout) on a ~130 KB noise line plus one PASSED node and asserts success. Side effect:
+    # subprocess; raises TimeoutExpired on hang.
     result = subprocess.run(
         [
             sys.executable,
@@ -92,6 +109,8 @@ def test_large_assertion_diff_does_not_stall_parsing():
 
 
 def test_skipped_reason_and_count_prefix(parser):
+    # [FUNCTION DOC] Asserts a SKIPPED line with a parenthesized reason parses, and that the '-ra' style 'SKIPPED
+    # [2] file:line: reason' maps the 'file:line:' token to SKIPPED.
     node = "tests/test_calc.py::test_eval[a PASSED (b)]"
     assert parser(f"{node} SKIPPED (requires optional dependency) [100%]\n") == {node: "SKIPPED"}
     assert parser("SKIPPED [2] tests/test_calc.py:10: optional dependency\n") == {
@@ -100,6 +119,8 @@ def test_skipped_reason_and_count_prefix(parser):
 
 
 def test_distinct_parameters_and_last_write_wins(parser):
+    # [FUNCTION DOC] Asserts different parameter ids stay distinct and a later ERROR summary line for the same node
+    # overrides an earlier PASSED.
     first = "tests/test_calc.py::test_eval[1 + 1]"
     second = "tests/test_calc.py::test_eval[1 + 2]"
     log = (
@@ -115,6 +136,7 @@ def test_distinct_parameters_and_last_write_wins(parser):
     ["", "FAILED", "PASSED ", "SKIPPED [2]", "Some output PASSED [100%]"],
 )
 def test_empty_malformed_and_unrelated_lines(parser, log):
+    # [FUNCTION DOC] Asserts empty, bare-status or unrelated lines produce an empty mapping.
     assert parser(log) == {}
 
 
@@ -124,6 +146,12 @@ def test_empty_malformed_and_unrelated_lines(parser, log):
 def test_real_pytest_logs_preserve_oracle_and_standalone_grading(
     tmp_path: Path, report_flag, output_style, verbosity
 ):
+    # [FUNCTION DOC] End-to-end matrix over report flag, console output style and verbosity: writes a parametrized
+    # test file and a conftest that records true outcomes to outcomes.json, runs real pytest before
+    # (exit 1) and after (exit 0) the 'fix', asserts both parsers agree with the true outcomes,
+    # derives F2P/P2P, then copies the verifier module to tmp_path and runs it isolated (-I)
+    # asserting reward 1.0, resolved, parse_status ok and pass counts. Side effects: files in
+    # tmp_path and several subprocesses with a modified env (plugin autoload disabled).
     """Discover F2P/P2P from actual logs, then grade using the shipped verifier."""
     parameters = ["1 + 1", "1 + 2", "left - right", "PASSED or FAILED"]
     test_file = tmp_path / "test_calc.py"

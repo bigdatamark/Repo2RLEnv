@@ -1,3 +1,10 @@
+# [MODULE DOC] Tests that pytest-xdist output (lines like '[gw1] [ 20%] PASSED <nodeid>', with the
+# worker label and progress counter in front of the status) is parsed correctly by both the
+# canonical log_parsers.pytest_parser.parse_pytest and the standalone copy in _pr_runtime_verifier.
+# Uses captured real xdist logs (percent/classic/count styles, serial -n 0) as module constants, a
+# backtracking guard run in a subprocess, and an end-to-end F2P/P2P derivation graded by the
+# verifier script run isolated with `python -I`. Side effects: subprocesses and files under tmp_path
+# only.
 """pytest-xdist worker labels must not hide results from either parser."""
 
 from __future__ import annotations
@@ -15,6 +22,8 @@ from repo2rlenv.pipelines import _pr_runtime_verifier as verifier
 
 @pytest.fixture(params=[parse_pytest, verifier.parse_pytest], ids=["canonical", "standalone"])
 def parser(request):
+    # [FUNCTION DOC] Pytest fixture parametrized over the canonical and standalone parse_pytest implementations.
+    # Output: the parser callable.
     return request.param
 
 
@@ -169,21 +178,28 @@ _SERIAL = (
     "log", [_XDIST_PERCENT, _XDIST_CLASSIC, _XDIST_COUNT], ids=["percent", "classic", "count"]
 )
 def test_worker_labelled_results_are_recorded(parser, log):
+    # [FUNCTION DOC] Asserts each xdist log style parses to _EXPECTED, ignoring status-less dispatch announcement
+    # lines and the summary footer.
     assert parser(log) == _EXPECTED
 
 
 def test_serial_output_is_unchanged(parser):
+    # [FUNCTION DOC] Asserts the non-xdist serial (-n 0) verbose log still parses to _EXPECTED.
     assert parser(_SERIAL) == _EXPECTED
 
 
 @pytest.mark.parametrize("counter", ["", "[ 20%] ", "[1/5] ", "[ 17 / 17 ] "])
 def test_worker_label_shapes(parser, counter):
+    # [FUNCTION DOC] Asserts a '[gwN]' label followed by various (or no) progress counters then 'PASSED <nodeid>'
+    # parses to that node PASSED.
     node = "tests/test_calc.py::test_eval[1 + 1]"
     assert parser(f"[gw11] {counter}PASSED {node} \n") == {node: "PASSED"}
 
 
 def test_unlabelled_lines_keep_their_meaning(parser):
     # A test id that merely starts with a bracket is not a worker label.
+    # [FUNCTION DOC] Asserts a bracketed prefix that is not a real worker label ('[gwen]') yields nothing, while an
+    # ordinary verbose line still parses.
     assert parser("[gwen] PASSED tests/test_a.py::test_x\n") == {}
     assert parser("tests/test_a.py::test_x PASSED [ 50%]\n") == {
         "tests/test_a.py::test_x": "PASSED"
@@ -192,6 +208,8 @@ def test_unlabelled_lines_keep_their_meaning(parser):
 
 def test_long_worker_labels_do_not_stall_parsing():
     # Isolate the timeout so a backtracking regression cannot hang the suite.
+    # [FUNCTION DOC] Backtracking guard: in a subprocess with a 10 s timeout, runs both parsers over pathological
+    # worker-label noise lines and asserts the trailing real node is parsed PASSED.
     result = subprocess.run(
         [
             sys.executable,
@@ -302,6 +320,9 @@ _SCENARIO_POST = (
 
 
 def test_distributed_fix_yields_an_oracle_and_grades_it(tmp_path: Path):
+    # [FUNCTION DOC] Derives F2P/P2P from captured xdist pre/post logs, asserts the expected sets, then runs a copy
+    # of the verifier isolated (with --test-cmds 'pytest -v -n 2') and asserts reward 1.0, resolved,
+    # f2p_passed 2. Side effects: files in tmp_path, subprocess.
     pre, post = parse_pytest(_SCENARIO_PRE), parse_pytest(_SCENARIO_POST)
     f2p = sorted(name for name, st in pre.items() if st == "FAILED" and post.get(name) == "PASSED")
     p2p = sorted(name for name, st in pre.items() if st == "PASSED" and post.get(name) == "PASSED")
