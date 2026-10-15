@@ -1,3 +1,8 @@
+# [MODULE DOC] Best-effort GHCR package visibility changes via the GitHub REST API through the gh
+# CLI. GHCR creates packages private by default; this PATCHes /user/packages/container/<name>
+# (personal namespace) or /orgs/<owner>/packages/container/<name> (org) to set visibility. Needs the
+# write:packages scope. Failures are returned (with a manual settings URL), never raised. Exports
+# VisibilityResult, VisibilityValue ("public" | "private" | "internal"), ensure_ghcr_visibility.
 """GHCR-specific package visibility helpers.
 
 GHCR creates packages as private by default. To make a public dataset's
@@ -29,6 +34,9 @@ VisibilityValue = Literal["public", "private", "internal"]
 
 @dataclass(slots=True)
 class VisibilityResult:
+    # [CLASS DOC] Dataclass (slots) for a visibility change attempt: package ("owner/name", or the
+    # raw ref when unparseable), target visibility, success flag, error message (or None),
+    # manual_url (GitHub package settings page for doing it by hand, or None).
     package: str
     target: VisibilityValue
     success: bool
@@ -37,10 +45,14 @@ class VisibilityResult:
 
 
 def _gh_available() -> bool:
+    # [FUNCTION DOC] HELPER: True if the "gh" executable is on PATH.
     return shutil.which("gh") is not None
 
 
 def _gh_user() -> str | None:
+    # [FUNCTION DOC] HELPER: Returns the authenticated GitHub login from "gh api user --jq .login"
+    # (15s timeout), or None if gh is missing, the command fails, or output is empty. Side effect:
+    # subprocess and network call. Raises subprocess.TimeoutExpired on timeout.
     """Return the authenticated GitHub user login, or None if `gh` unavailable."""
     if not _gh_available():
         return None
@@ -58,6 +70,9 @@ def _gh_user() -> str | None:
 
 
 def _parse_ghcr_package(remote_ref: str) -> tuple[str, str] | None:
+    # [FUNCTION DOC] HELPER: Parses "ghcr.io/<owner>/<name>[:tag|@digest]" into (owner, name), where
+    # name may contain further "/" segments. Returns None if not a ghcr.io ref or there is no "/"
+    # after the owner.
     """From `ghcr.io/<owner>/<name>:<tag>` return (owner, name).
 
     Returns None if the ref isn't a GHCR ref.
@@ -78,6 +93,14 @@ def ensure_ghcr_visibility(
     remote_ref: str,
     target: VisibilityValue = "public",
 ) -> VisibilityResult:
+    # [FUNCTION DOC] Sets a GHCR package's visibility (best effort, idempotent). Inputs: remote_ref
+    # (GHCR tag or digest ref); target (default "public"). Returns a failed VisibilityResult if the
+    # ref is not GHCR or gh is unavailable (with a user-namespace manual URL). Picks the user
+    # endpoint if the gh login equals owner (case-insensitive), else the org endpoint, then runs "gh
+    # api -X PATCH <path> -f visibility=<target>" (30s timeout). On non-zero exit, extracts the JSON
+    # "message" from stderr/stdout when it looks like JSON, truncates to 400 chars, and returns
+    # success=False with the matching manual URL. Output: VisibilityResult. Side effects: gh
+    # subprocesses, GitHub API mutation. Raises subprocess.TimeoutExpired on timeout.
     """Flip the GHCR package's visibility (best-effort).
 
     `remote_ref` can be a full registry ref (`ghcr.io/owner/name:tag` or

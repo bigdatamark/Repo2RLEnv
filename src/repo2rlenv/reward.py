@@ -1,3 +1,8 @@
+# [MODULE DOC] Stdlib-only reward helpers. (1) Diff-similarity reward in [0, 1] (SWE-RL-inspired,
+# independent reimplementation): both unified diffs are normalized (volatile index/similarity/mode
+# metadata and hunk line numbers dropped) and compared with difflib.SequenceMatcher over lines. (2)
+# SWE-bench-style test-execution grading from FAIL_TO_PASS/PASS_TO_PASS oracles and a parsed test-
+# status map into an ExecutionReport. No I/O or global state.
 """Diff-similarity reward.
 
 Computes a [0, 1] score by comparing a predicted unified diff against an oracle
@@ -40,6 +45,9 @@ _NO_NEWLINE_RE = re.compile(r"^\\ No newline at end of file")
 
 @dataclass(slots=True)
 class DiffRewardMetadata:
+    # [CLASS DOC] Dataclass (slots) with diff-reward details: similarity (the ratio), pred_lines and
+    # oracle_lines (normalized line counts), matched_lines (sum of matching block sizes),
+    # parse_error (short reason string such as "empty prediction", or None).
     similarity: float
     pred_lines: int
     oracle_lines: int
@@ -48,6 +56,9 @@ class DiffRewardMetadata:
 
 
 def _split_diff_sections(diff: str) -> list[list[str]]:
+    # [FUNCTION DOC] HELPER: Splits a diff into per-file sections of lines, starting a new section
+    # at each "diff --git " line. Lines before the first such header form their own section. Output:
+    # list of lists of lines (empty list for empty input).
     sections: list[list[str]] = []
     current: list[str] = []
     for line in diff.splitlines():
@@ -63,6 +74,11 @@ def _split_diff_sections(diff: str) -> list[list[str]]:
 
 
 def _normalize_diff(diff: str) -> list[str]:
+    # [FUNCTION DOC] HELPER: Normalizes a unified diff into comparable lines, per section: drops
+    # "index", similarity/dissimilarity, and "No newline at end of file" lines; keeps "diff --git"
+    # (stripped) only when the section has no ---/+++ headers; keeps mode/rename/copy extended
+    # headers only when the section has no hunks; replaces hunk headers with "@@"; truncates ---/+++
+    # headers at the first tab; keeps all other lines verbatim. Output: list of str.
     """Strip volatile metadata while preserving mode-only and rename-only changes."""
     lines: list[str] = []
     for section in _split_diff_sections(diff):
@@ -101,6 +117,13 @@ def _normalize_diff(diff: str) -> list[str]:
 def calculate_diff_similarity_reward(
     oracle_diff: str, predicted_diff: str
 ) -> tuple[float, DiffRewardMetadata]:
+    # [FUNCTION DOC] Scores predicted_diff against oracle_diff. Returns (reward,
+    # DiffRewardMetadata). Empty/whitespace prediction -> 0.0 with "empty prediction"; oracle empty
+    # after normalization -> 0.0 with "empty oracle after normalization"; otherwise reward is
+    # SequenceMatcher(oracle_lines, pred_lines, autojunk off).ratio(), equal to 1.0 for identical
+    # normalized diffs. Raises nothing.
+    # KNOWN ISSUE: the docstring says unparseable predictions score 0.0, but there is no parse
+    # check; any non-empty text is normalized and scored by similarity.
     """Score a predicted diff against an oracle diff.
 
     Returns (reward, metadata) where reward ∈ [0, 1]:
@@ -138,6 +161,9 @@ def calculate_diff_similarity_reward(
 
 @dataclass(slots=True)
 class ExecutionReport:
+    # [CLASS DOC] Dataclass (slots) mirroring SWE-bench's per-task report: lists of test names in
+    # fail_to_pass_success/failure and pass_to_pass_success/failure, with derived rate and status
+    # properties.
     """Per-task report after running the model patch through the eval script.
 
     Mirrors SWE-bench's report shape so we can interop with their tooling.
@@ -150,16 +176,22 @@ class ExecutionReport:
 
     @property
     def f2p_rate(self) -> float:
+        # [FUNCTION DOC] Property: fraction of FAIL_TO_PASS tests that passed; 1.0 when the F2P set
+        # is empty.
         total = len(self.fail_to_pass_success) + len(self.fail_to_pass_failure)
         return 1.0 if total == 0 else len(self.fail_to_pass_success) / total
 
     @property
     def p2p_rate(self) -> float:
+        # [FUNCTION DOC] Property: fraction of PASS_TO_PASS tests that passed; 1.0 when the P2P set
+        # is empty.
         total = len(self.pass_to_pass_success) + len(self.pass_to_pass_failure)
         return 1.0 if total == 0 else len(self.pass_to_pass_success) / total
 
     @property
     def resolution_status(self) -> str:
+        # [FUNCTION DOC] Property: "FULL" if both rates are 1.0; "PARTIAL" if 0 < F2P rate < 1 and
+        # P2P rate is 1.0; otherwise "NO".
         """SWE-bench's FULL / PARTIAL / NO labelling."""
         f2p, p2p = self.f2p_rate, self.p2p_rate
         if f2p == 1.0 and p2p == 1.0:
@@ -174,6 +206,11 @@ def grade_test_execution(
     pass_to_pass: list[str],
     test_status: dict[str, str],
 ) -> ExecutionReport:
+    # [FUNCTION DOC] Builds an ExecutionReport from oracle lists and a test status map. Inputs:
+    # fail_to_pass, pass_to_pass (lists of test ids); test_status (test id -> "PASSED"/"FAILED"/
+    # "SKIPPED"/"ERROR"). A test succeeds only if its status is exactly "PASSED"; missing tests
+    # count as failures. Order of the input lists is preserved. Output: ExecutionReport. No side
+    # effects.
     """Compute the per-task report from the post-prediction test status map.
 
     Args:

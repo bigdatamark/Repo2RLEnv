@@ -1,3 +1,8 @@
+# [MODULE DOC] Standalone smoke check for an installed repo2rlenv CLI, run outside the checkout (not
+# a pytest module). Invokes the installed console script in a temp dir, exercises --version/--help,
+# each subcommand's help, pipelines list/describe for implemented recipes, JSON error output, and
+# validates a written Unicode Harbor task with --deep. Run as a script it prints the JSON result via
+# console.json. No cloud calls.
 """Smoke-test an installed CLI from outside the checkout, without cloud calls."""
 
 from __future__ import annotations
@@ -16,6 +21,16 @@ from repo2rlenv.ui import console
 
 
 def check() -> dict:
+    # [FUNCTION DOC] Locates the repo2rlenv executable in the interpreter's scripts dir
+    # (repo2rlenv.exe on Windows), creates a temp directory (name contains a space) and runs:
+    # --version (must contain the installed package version), --help, '<cmd> --help' for
+    # generate/validate/push/pull/tasksmith/quality/pipelines, 'pipelines list --json' and
+    # 'pipelines describe' for each implemented recipe (ids must match), 'tasksmith|quality show
+    # missing.json --json' expecting exit 2 with exactly {error, message}. Then writes a pr_diff
+    # HarborTask containing non-ASCII text, checks instruction.md round-trips, and runs 'validate
+    # --deep' on it. Returns {status: 'passed', version, recipes: count}. Raises AssertionError on
+    # any failure and subprocess.TimeoutExpired after 60s per call. Side effects: subprocesses, temp
+    # files.
     executable = Path(sysconfig.get_path("scripts")) / (
         "repo2rlenv.exe" if sys.platform == "win32" else "repo2rlenv"
     )
@@ -23,6 +38,10 @@ def check() -> dict:
         root = Path(directory)
 
         def cli(*args: str, expected: int = 0) -> str:
+            # [FUNCTION DOC] HELPER: Runs the installed executable with args in the temp dir with
+            # PYTHON_DOTENV_DISABLED=1 and PYTHONUTF8=1 added to the environment, UTF-8 captured
+            # output, 60s timeout. Asserts the return code equals expected (default 0, message is
+            # stderr+stdout) and returns stdout.
             result = subprocess.run(
                 [str(executable), *args],
                 cwd=root,

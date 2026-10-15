@@ -1,3 +1,7 @@
+# [MODULE DOC] Fallback for reversing a PR source patch whose target files use CRLF line endings
+# while the fetched diff was newline-normalized to LF. It rebuilds exact CRLF hunks, proves the
+# result with git blob IDs from the frozen diff, and only then swaps the reconstructed tree into
+# place.
 """Recover newline-normalized PR patches without changing pinned source bytes."""
 
 from __future__ import annotations
@@ -12,10 +16,15 @@ from pathlib import Path, PurePosixPath
 
 
 def _blob(content: bytes) -> str:
+    # [FUNCTION DOC] HELPER: Returns the git blob SHA-1 hex id for the given bytes (sha1 over 'blob
+    # <len>\0' + content).
     return hashlib.sha1(b"blob " + str(len(content)).encode() + b"\0" + content).hexdigest()
 
 
 def _crlf_text(content: bytes) -> bool:
+    # [FUNCTION DOC] HELPER: Returns True when content is valid UTF-8, contains at least one CRLF,
+    # and after removing all CRLF pairs contains no stray CR, LF or NUL bytes (i.e. purely CRLF
+    # text). Else False.
     try:
         content.decode("utf-8")
     except UnicodeDecodeError:
@@ -25,6 +34,21 @@ def _crlf_text(content: bytes) -> bool:
 
 
 def reverse_crlf_patch(root: Path, patch: Path) -> bool:
+    # [FUNCTION DOC] Attempts to reverse-apply patch to root after an ordinary `git apply --reverse`
+    # failed.
+    # Inputs: root (directory to modify, replaced in place on success); patch (Path to the LF diff).
+    # Behavior: splits the diff into per-file blocks with identical a/b paths; rejects absolute or
+    # '..' paths (ValueError). For each existing non-symlink file that is pure CRLF text, requires
+    # an 'index pre..post' line whose post id prefixes the file's current blob id (else ValueError),
+    # then converts LF-terminated context/added/removed hunk lines to CRLF, except a line followed
+    # by the 'No newline at end of file' marker. Returns False if no block changed. Otherwise copies
+    # root into a temporary directory beside patch, runs `git -c core.autocrlf=false apply
+    # --reverse` there (120 s), raises ValueError if it fails or any file's resulting blob does not
+    # match the preimage id (an all-zero preimage means the file must be absent). On success writes
+    # source-crlf.diff and source-crlf-fallback.json (original/applied patch SHA-256, operation,
+    # files) next to patch, then swaps the staged tree into root (renaming root to a backup and
+    # restoring it if the swap fails).
+    # Output: True on success. Side effects: subprocess git, filesystem writes, directory renames.
     """Try exact CRLF hunk bytes after ordinary reverse application failed.
 
     Git blob IDs in the frozen diff must identify both the original CRLF head

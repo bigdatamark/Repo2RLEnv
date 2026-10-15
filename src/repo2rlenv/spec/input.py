@@ -1,3 +1,9 @@
+# [MODULE DOC] Top-level generation input contract shared by every pipeline (GenerationInput), plus
+# its parts: repo/source specs (a discriminated union on "kind": repository, pr, seeds, task,
+# recording, family), LLM, QA, sandbox, GPU, output, auth, bootstrap, pipeline and remote recipe
+# execution specs. RepoSpec canonicalizes local paths to absolute file:// URLs and bare owner/name
+# to GitHub URLs. Ends by calling model_rebuild on models with forward references. Reads os.name and
+# R2E_CACHE_DIR.
 """Top-level input contract — same shape across every pipeline."""
 
 from __future__ import annotations
@@ -11,6 +17,10 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 
 class PipelineName(StrEnum):
+    # [CLASS DOC] StrEnum of registered pipeline names. Mined: pr_diff, pr_runtime, commit_runtime,
+    # cve_patches. LLM-synthesized: code_instruct, equivalence_tests. Owned-recipe families:
+    # pr_to_env, repo_mutate, repo_reconstruct, terminal_synth, terminal_reconstruct, task_evolve,
+    # env_repair, reasoning_synth, optimization_synth.
     # Mined from upstream history
     PR_DIFF = "pr_diff"  # text-only PR mining (was: pr_mining_lite)
     PR_RUNTIME = "pr_runtime"  # PR mining w/ sandbox verification (was: pr_mining)
@@ -32,6 +42,9 @@ class PipelineName(StrEnum):
 
 
 def _is_local_path(v: str, *, windows: bool) -> bool:
+    # [FUNCTION DOC] HELPER: True if a --repo value names a local path rather than a remote: starts
+    # with "/", "~", "./" or "../"; or, when windows is True, has a drive letter or contains a
+    # backslash.
     """Whether a `--repo` value names a local checkout rather than a git remote."""
     if v.startswith(("/", "~", "./", "../")):
         return True
@@ -42,6 +55,8 @@ def _is_local_path(v: str, *, windows: bool) -> bool:
 
 
 def _file_url_path(url: str, *, windows: bool) -> str:
+    # [FUNCTION DOC] HELPER: Returns the path part of a file:// URL. On Windows, strips the leading
+    # "/" of "/C:/x" style paths (RFC 8089). Input: url, keyword windows flag. Output: str.
     """The path in a file:// URL.
 
     On Windows, RFC 8089's `file:///C:/x` (what `Path.as_uri()` returns) means
@@ -54,6 +69,9 @@ def _file_url_path(url: str, *, windows: bool) -> str:
 
 
 class RepoSpec(BaseModel):
+    # [CLASS DOC] Pydantic model for a repository input: url (normalized by validator), ref (default
+    # "HEAD"), access ("public"/"private"/"auto"), auth_token_env (env var name holding a token,
+    # optional), sparse_paths (optional list for sparse checkout).
     url: str
     ref: str = "HEAD"
     access: Literal["public", "private", "auto"] = "auto"
@@ -63,6 +81,11 @@ class RepoSpec(BaseModel):
     @field_validator("url")
     @classmethod
     def normalize_url(cls, v: str) -> str:
+        # [FUNCTION DOC] Field validator for url. Strips whitespace. file:// URLs and local paths
+        # become "file://" + the expanded, resolved absolute path (filesystem-dependent resolution).
+        # Remote values must contain "/" (else ValueError); values without an http(s):// or git@
+        # prefix are treated as GitHub owner/name and prefixed with https://github.com/; trailing
+        # "/" and ".git" are removed.
         v = v.strip()
         windows = os.name == "nt"
         # Local checkout — canonicalize to an absolute file:// URL.
@@ -82,12 +105,18 @@ class RepoSpec(BaseModel):
 
     @property
     def source_kind(self):  # -> sources.SourceKind
+        # [FUNCTION DOC] Property: the SourceKind for url via sources.detect_source_kind (lazy
+        # import).
         from repo2rlenv.sources import detect_source_kind
 
         return detect_source_kind(self.url)
 
     @property
     def owner_name(self) -> tuple[str, str]:
+        # [FUNCTION DOC] Property: returns (owner, name). Local repos give ("local", directory
+        # name). Otherwise removes GitHub/GitLab https or ssh prefixes and returns the last two path
+        # segments, so nested GitLab groups return only the innermost group as owner. Raises
+        # ValueError if fewer than two segments remain.
         """Return (owner, name). Local repos get a synthetic ('local', <dir>)."""
         u = self.url
         if u.startswith("file://"):
@@ -105,12 +134,15 @@ class RepoSpec(BaseModel):
 
 
 class RepositorySource(BaseModel):
+    # [CLASS DOC] Source variant kind="repository" wrapping a RepoSpec. Extra fields forbidden.
     model_config = ConfigDict(extra="forbid")
     kind: Literal["repository"] = "repository"
     repo: RepoSpec
 
 
 class PRSource(BaseModel):
+    # [CLASS DOC] Source variant kind="pr": explicit list (min 1) of PR/MR URLs. Extra fields
+    # forbidden.
     model_config = ConfigDict(extra="forbid")
     kind: Literal["pr"] = "pr"
     urls: list[str] = Field(min_length=1)
@@ -118,6 +150,10 @@ class PRSource(BaseModel):
     @field_validator("urls")
     @classmethod
     def validate_urls(cls, values: list[str]) -> list[str]:
+        # [FUNCTION DOC] Field validator: strips trailing "/" from each URL, requires each to be a
+        # GitHub pull URL (https://github.com/o/r/pull/N) or GitLab MR URL
+        # (https://gitlab.com/.../-/merge_requests/N), and rejects duplicates. Returns the cleaned
+        # list; raises ValueError otherwise.
         import re
 
         values = [value.rstrip("/") for value in values]
@@ -132,24 +168,31 @@ class PRSource(BaseModel):
 
 
 class SeedSource(BaseModel):
+    # [CLASS DOC] Source variant kind="seeds" pointing to a seed path. Extra fields forbidden.
     model_config = ConfigDict(extra="forbid")
     kind: Literal["seeds"] = "seeds"
     path: Path
 
 
 class TaskSource(BaseModel):
+    # [CLASS DOC] Source variant kind="task" pointing to an existing task path. Extra fields
+    # forbidden.
     model_config = ConfigDict(extra="forbid")
     kind: Literal["task"] = "task"
     path: Path
 
 
 class RecordingSource(BaseModel):
+    # [CLASS DOC] Source variant kind="recording" pointing to a terminal recording path. Extra
+    # fields forbidden.
     model_config = ConfigDict(extra="forbid")
     kind: Literal["recording"] = "recording"
     path: Path
 
 
 class FamilySource(BaseModel):
+    # [CLASS DOC] Source variant kind="family" pointing to a problem-family path. Extra fields
+    # forbidden.
     model_config = ConfigDict(extra="forbid")
     kind: Literal["family"] = "family"
     path: Path
@@ -162,6 +205,9 @@ SourceSpec = Annotated[
 
 
 class LLMSpec(BaseModel):
+    # [CLASS DOC] LLM configuration: provider, model, api_key_env (optional env var name), endpoint
+    # (optional self-hosted base URL), max_concurrent (default 5), timeout_sec (default 120),
+    # fallback (optional nested LLMSpec).
     provider: str
     model: str
     api_key_env: str | None = None
@@ -172,6 +218,9 @@ class LLMSpec(BaseModel):
 
     @property
     def qualified_name(self) -> str:
+        # [FUNCTION DOC] Property: LiteLLM model string "<provider>/<model>".
+        # KNOWN ISSUE: the comment says some providers use a different format, but both branches of
+        # the conditional return the identical string, so the special case is dead code.
         """LiteLLM-compatible 'provider/model' string."""
         # Some providers (huggingface) use a different format
         if self.provider in ("openai", "anthropic", "huggingface"):
@@ -180,6 +229,8 @@ class LLMSpec(BaseModel):
 
 
 class QALayer(StrEnum):
+    # [CLASS DOC] StrEnum of QA check layers: determinism, oracle_consistency, llm_judge,
+    # false_negative, diff_parse (lite pipelines: the oracle diff must apply cleanly).
     DETERMINISM = "determinism"
     ORACLE_CONSISTENCY = "oracle_consistency"
     LLM_JUDGE = "llm_judge"
@@ -188,6 +239,9 @@ class QALayer(StrEnum):
 
 
 class QASpec(BaseModel):
+    # [CLASS DOC] QA configuration: enabled (default True), layers (default [DIFF_PARSE]), judge_llm
+    # (optional LLMSpec), determinism_runs and oracle_runs (default 3 each), skip_on_fail (default
+    # True).
     enabled: bool = True
     layers: list[QALayer] = Field(default_factory=lambda: [QALayer.DIFF_PARSE])
     judge_llm: LLMSpec | None = None
@@ -197,6 +251,10 @@ class QASpec(BaseModel):
 
 
 class SandboxSpec(BaseModel):
+    # [CLASS DOC] Records sandbox needs at generation time (the project ships no runtime): provider
+    # "none" (default) or "harbor"; harbor_provider (local/modal/daytona/e2b/runloop, default
+    # local); concurrency (10); network policy (open / build_open_run_restricted (default) / none);
+    # optional GPUSpec; image_registry; timeout_sec (600).
     """Sandbox config — describes what a pipeline needs at generation time.
 
     Repo2RLEnv ships NO sandbox runtime. This spec just records what the
@@ -221,6 +279,8 @@ class SandboxSpec(BaseModel):
 
 
 class GPUSpec(BaseModel):
+    # [CLASS DOC] GPU request for sandboxed pipelines, lowered to the Harbor provider's config:
+    # count (default 1) and kind (any/a10g/a100/h100/l4/t4, default any).
     """GPU request, lowered to the Harbor provider's native config.
 
     Only meaningful for full sandbox-required pipelines (`pr_runtime` etc.)
@@ -238,6 +298,8 @@ class GPUSpec(BaseModel):
 
 
 class OutputSpec(BaseModel):
+    # [CLASS DOC] Output dataset target: destination, org, dataset_name, visibility (public default
+    # or private).
     destination: str
     org: str
     dataset_name: str
@@ -245,6 +307,9 @@ class OutputSpec(BaseModel):
 
 
 class AuthSpec(BaseModel):
+    # [CLASS DOC] Auth configuration: github_token_env ("GITHUB_TOKEN"), use_gh_cli (True),
+    # hf_token_env ("HF_TOKEN"), use_hf_cli (True), build_secrets_env (mapping of secret names to
+    # env var names).
     github_token_env: str = "GITHUB_TOKEN"
     use_gh_cli: bool = True
     hf_token_env: str = "HF_TOKEN"
@@ -253,6 +318,11 @@ class AuthSpec(BaseModel):
 
 
 class BootstrapSpec(BaseModel):
+    # [CLASS DOC] Bootstrap (Docker env build) config for sandboxed pipelines: enabled,
+    # max_iterations (20), max_seconds (1800), base_image override, user_dockerfile (skips the
+    # agent), cache_dir (default from env R2E_CACHE_DIR or ./workspace/bootstrap, read at
+    # instantiation), image_registry, max_llm_spend_usd (5.0, None = unlimited), platform
+    # (linux/amd64 or linux/arm64), languages_hint.
     """Bootstrap phase config — only used by sandbox-required pipelines.
 
     Lite pipelines (text-only) ignore this entirely. For full pipelines, the
@@ -278,12 +348,17 @@ class BootstrapSpec(BaseModel):
 
 
 class PipelineSpec(BaseModel):
+    # [CLASS DOC] Selected pipeline: name (PipelineName), recipe (default "native"), raw options
+    # dict (parsed later by spec.options.parse_options).
     name: PipelineName
     recipe: str = "native"
     options: dict[str, Any] = Field(default_factory=dict)
 
 
 class RecipeExecutionSpec(BaseModel):
+    # [CLASS DOC] Remote execution context for an owned recipe: worker_receipt, runtime_wheel,
+    # campaign_dir paths; run_id (lowercase slug, starts with a letter, max 61 chars); timeout_sec
+    # (1800, range 60-14400); resume flag. Extra fields forbidden.
     """An owned recipe's explicit, recoverable remote execution context."""
 
     model_config = ConfigDict(extra="forbid")
@@ -296,6 +371,9 @@ class RecipeExecutionSpec(BaseModel):
 
 
 class GenerationInput(BaseModel):
+    # [CLASS DOC] Complete generation request: spec_version "0.1.0", optional repo, optional typed
+    # source, pipeline, optional llm, output, qa/sandbox/bootstrap/auth (defaulted), optional
+    # execution. A model validator reconciles repo and source.
     spec_version: Literal["0.1.0"] = "0.1.0"
     repo: RepoSpec | None = None
     source: SourceSpec | None = None
@@ -310,6 +388,10 @@ class GenerationInput(BaseModel):
 
     @model_validator(mode="after")
     def normalize_source(self) -> GenerationInput:
+        # [FUNCTION DOC] After-validator that mutates self: with no source, requires repo and wraps
+        # it in a RepositorySource; with a RepositorySource, requires any given repo to equal it and
+        # copies it into repo; with any other source kind, forbids repo. Then native pipelines
+        # (recipe "native") must have a repo. Returns self; raises ValueError on each violation.
         if self.source is None:
             if self.repo is None:
                 raise ValueError("Provide a repository or a typed source")
@@ -328,6 +410,8 @@ class GenerationInput(BaseModel):
 
     @property
     def source_label(self) -> str:
+        # [FUNCTION DOC] Property: human-readable input label: repo URL if present; for a PR source,
+        # its single URL or "<n> PRs"; otherwise str(source.path).
         if self.repo is not None:
             return self.repo.url
         if isinstance(self.source, PRSource):

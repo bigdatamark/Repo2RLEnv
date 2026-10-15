@@ -1,3 +1,7 @@
+# [MODULE DOC] Per-pipeline options models (the kwargs each pipeline accepts) for the native
+# pipelines, plus registries mapping pipeline names (OPTIONS_REGISTRY) and owned recipe names
+# (RECIPE_OPTIONS_REGISTRY) to options classes from here and spec.recipe_options. parse_options
+# turns a raw dict into the right validated model. All native options forbid unknown keys.
 """Per-pipeline options (the "kwargs" each pipeline accepts)."""
 
 from __future__ import annotations
@@ -26,10 +30,16 @@ from repo2rlenv.spec.recipe_options import (
 
 
 class _BaseOptions(BaseModel):
+    # [CLASS DOC] HELPER: Base Pydantic model for native options; config forbids extra fields.
     model_config = ConfigDict(extra="forbid")
 
 
 class PRRuntimeOptions(_BaseOptions):
+    # [CLASS DOC] Options for pr_runtime (sandbox-verified PR mining with F2P/P2P oracle). Mining:
+    # limit 50, since/until dates, state "merged", skip_drafts, require_linked_issue, languages
+    # ["python"]. Validation: require_fail_to_pass, min_fail_to_pass 1, validation_timeout_sec 600,
+    # skip_validation. Quality: lite_filter, max_source_files_per_pr 50, min_problem_statement_words
+    # 0. Structural: require_new_test_funcs, skip_ci_only (skip PRs touching only .github/).
     """Sandbox-verified PR mining: clones, applies diff, runs tests in bootstrap image.
 
     The pipeline runs each candidate PR's tests inside the bootstrap container
@@ -66,6 +76,10 @@ class PRRuntimeOptions(_BaseOptions):
 
 
 class PRDiffOptions(_BaseOptions):
+    # [CLASS DOC] Options for pr_diff (text-only PR mining with a diff-similarity verifier): limit
+    # 50, since/until, state merged|all, context_window_loc 200, diff_format unified|search_replace,
+    # max_files_per_pr 5, skip_drafts, emit_harbor_env (True: emit Dockerfile + tests/test.sh),
+    # min_loc_changed 3 (minimum +/- lines in oracle diff).
     """SWE-RL-style PR mining with a Harbor-runnable diff-similarity verifier.
 
     Each emitted task includes an environment/Dockerfile (python:3.12-slim +
@@ -97,6 +111,13 @@ class PRDiffOptions(_BaseOptions):
 
 
 class CommitRuntimeOptions(_BaseOptions):
+    # [CLASS DOC] Options for commit_runtime (git-log mining validated like pr_runtime). Mining:
+    # limit 50, since/until, branch "HEAD", clone_depth 200. Filters: skip_merge_commits,
+    # min_message_words 5, max_source_files_per_commit 10, exclude_authors, require_new_test_funcs,
+    # skip_ci_only. Validation: require_fail_to_pass, min_fail_to_pass 1, validation_timeout_sec
+    # 600, skip_validation, max_pass_to_pass 50 (0 = no cap). Instruction synthesis:
+    # synthesize_with_llm True, min_problem_statement_words 8, llm_temperature 0.3, max_llm_tokens
+    # 1024.
     """Commit-level mining (R2E-Gym SWE-GEN style).
 
     Walks `git log` instead of `gh pr list`. Same validation harness as
@@ -143,6 +164,11 @@ class CommitRuntimeOptions(_BaseOptions):
 
 
 class CodeInstructOptions(_BaseOptions):
+    # [CLASS DOC] Options for code_instruct (OSS-Instruct-style tasks anchored to repo seeds and
+    # verified in the sandbox): limit 50, seed snippet size seed_min_loc 30 / seed_max_loc 200,
+    # file_glob "**/*.py", exclude_glob (tests, docs, examples, __init__), seed (RNG),
+    # max_attempts_per_seed 3, llm_temperature 0.7, max_llm_tokens 2048, require test fail without /
+    # pass with oracle, validation_timeout_sec 180, skip_validation, skip_decontamination.
     """Magicoder-OSS-Instruct-style, anchored to a target repo + verified by execution.
 
     Samples a seed snippet from the repo, asks the LLM for a self-contained
@@ -187,6 +213,12 @@ class CodeInstructOptions(_BaseOptions):
 
 
 class CVEPatchesOptions(_BaseOptions):
+    # [CLASS DOC] Options for cve_patches (OSV vulns -> GitHub fix commits -> tasks): osv_ecosystem
+    # and osv_package (None = auto), min_severity, limit 50; PoC synthesis (synthesize_poc_test,
+    # poc_agent, poc_agent_max_spend_usd 1.5, poc_max_attempts 2); validation (require_fail_to_pass,
+    # min_fail_to_pass 1, max_pass_to_pass 50, validation_timeout_sec 600, skip_validation);
+    # llm_temperature 0.3, max_llm_tokens 4096; require_new_test_funcs False,
+    # max_source_files_per_fix 50.
     """Map OSV vulnerability records to fixing commits in the target repo.
 
     For each vuln returned by OSV's `/v1/query`, find a `references[]` URL
@@ -228,6 +260,11 @@ class CVEPatchesOptions(_BaseOptions):
 
 
 class EquivalenceTestsOptions(_BaseOptions):
+    # [CLASS DOC] Options for equivalence_tests (R2E-style tests comparing a stubbed function with a
+    # reference_<name> oracle): limit 50, function body size min_loc 5 / max_loc 60, file_glob,
+    # exclude_glob (tests, conftest, docs, examples, __init__, setup.py), seed,
+    # max_attempts_per_function 3, llm_temperature 0.5, max_llm_tokens 1500, require fail with stub
+    # / pass with oracle, validation_timeout_sec 90, skip_validation.
     """R2E-style function-level equivalence-test synthesis.
 
     Extracts module-level Python functions from the target repo, asks the
@@ -301,6 +338,10 @@ RECIPE_OPTIONS_REGISTRY: dict[str, type[BaseModel]] = {
 
 
 def parse_options(pipeline_name: str, raw: dict, *, recipe: str = "native") -> BaseModel:
+    # [FUNCTION DOC] Validates raw options for a pipeline. Lookup: RECIPE_OPTIONS_REGISTRY[recipe]
+    # first (only seven named recipes), else OPTIONS_REGISTRY[pipeline_name]. Inputs: pipeline_name,
+    # raw dict, keyword recipe (default "native"). Output: validated BaseModel instance. Raises
+    # ValueError if no class is registered, and pydantic ValidationError for invalid/unknown keys.
     cls = RECIPE_OPTIONS_REGISTRY.get(recipe) or OPTIONS_REGISTRY.get(pipeline_name)
     if cls is None:
         raise ValueError(

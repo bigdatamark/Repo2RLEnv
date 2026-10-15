@@ -1,3 +1,8 @@
+# [MODULE DOC] Remote-only Tasksmith worker entry point (run as `python -m
+# repo2rlenv.tasksmith.worker CONFIG OUTPUT` on a provider worker). Implements the deterministic
+# stages that need the target code and Docker: dependencies, inspect, bootstrap, prepare_native and
+# construct. It never holds provider or model credentials. Results go to OUTPUT/stage-result.json
+# and OUTPUT.tar.gz.
 """Remote-only deterministic Tasksmith stages; no provider or model credentials."""
 
 from __future__ import annotations
@@ -32,6 +37,12 @@ from repo2rlenv.tasksmith.source_patch import reverse_crlf_patch
 
 
 def run(argv, *, cwd=None, timeout=120, build_log: Path | None = None):
+    # [FUNCTION DOC] HELPER: Runs a subprocess with captured UTF-8 text output.
+    # Inputs: argv (list); cwd (optional); timeout (seconds, default 120); build_log (optional path
+    # prefix for save_build_logs). Output: stdout string. Raises subprocess.TimeoutExpired on
+    # timeout without build_log, ValueError on timeout with build_log (including saved log detail),
+    # and ValueError on a non-zero exit (log detail, or last 6000 chars of stderr and 2000 of
+    # stdout).
     try:
         result = subprocess.run(
             argv,
@@ -61,6 +72,10 @@ def run(argv, *, cwd=None, timeout=120, build_log: Path | None = None):
 
 
 def inspect_source(source: dict, root: Path) -> dict:
+    # [FUNCTION DOC] Shallow-fetches the frozen head into root/checkout (git init, fetch --depth=1
+    # repo head, detached checkout) and verifies HEAD equals source['head'] (ValueError otherwise).
+    # Records every tracked symlink with its target. Output: {checkout, head, snapshot_links}. Side
+    # effects: network git fetch, filesystem.
     checkout = root / "checkout"
     checkout.mkdir()
     run(["git", "init", "-q", str(checkout)])
@@ -77,6 +92,9 @@ def inspect_source(source: dict, root: Path) -> dict:
 
 
 def dependency_image(profile: Profile, output: Path) -> dict:
+    # [FUNCTION DOC] Builds or reuses the dependency image for a Profile by delegating to
+    # build_dependency_image with the profile's base image, dependencies, system-site-packages flag
+    # and hub assets. Output: the dependency cache record dict.
     """Materialize a source-independent prefix, using the same Docker layer recipe as bootstrap."""
     return build_dependency_image(
         profile.options.base_image,
@@ -95,6 +113,14 @@ def build_dependency_image(
     use_system_site_packages: bool = False,
     hub_assets=(),
 ) -> dict:
+    # [FUNCTION DOC] Builds the source-independent dependency Docker image shared by bootstrap and
+    # construction.
+    # Inputs: base_image; dependencies (list); output (dir); use_system_site_packages (bool, default
+    # False); hub_assets (default empty). Renders dependency_recipe, ensures the base image exists
+    # (docker pull on miss, 300 s), tags 'tasksmith-deps:<24 hex>' from SHA-256 of recipe + base
+    # image id, and builds it only if absent (600 s, logs under output/dependency-build). Output and
+    # saved dependency-cache.json: key, image, image_id, cache_hit, scope, recipe, base_id. Raises
+    # ValueError on docker failures.
     """Shared prefix for repository bootstrap and per-PR construction."""
     recipe = dependency_recipe(
         base_image,
@@ -146,6 +172,14 @@ def build_dependency_image(
 
 
 def bootstrap(source: dict, profile: Profile, output: Path, *, checkout: Path) -> dict:
+    # [FUNCTION DOC] Bootstrap stage: validates readiness paths on a fresh archive of the checkout
+    # (temp dir), builds the dependency image, bootstraps the snapshot image, and runs the readiness
+    # tests (ValueError if they fail). Then builds the public learner image from the snapshot minus
+    # private assets ('tasksmith-public:<20 hex>') and records `pip freeze` (offline) to pip-
+    # freeze.txt.
+    # Inputs: source, profile, output dir, checkout (keyword). Output: {image digest, base snapshot
+    # path, readiness statuses, dependency_cache record, public_image tag}. Side effects: Docker
+    # builds/runs.
     with tempfile.TemporaryDirectory(prefix=".readiness-input-", dir=output) as temporary:
         materialize_source(source, profile, checkout, Path(temporary))
     cached = dependency_image(profile, output)
@@ -203,6 +237,12 @@ def bootstrap(source: dict, profile: Profile, output: Path, *, checkout: Path) -
 
 
 def reverse_source(source: dict, base: Path, output: Path) -> tuple[Path, tuple[str, ...]]:
+    # [FUNCTION DOC] Creates output/defective-source with copies of the PR source files from base
+    # and reverse-applies the frozen source diff with core.autocrlf=false, falling back to
+    # reverse_crlf_patch on failure (re-raising if the fallback does not apply). Verifies the files
+    # that disappeared equal the PR's 'added' source files (ValueError otherwise). Output:
+    # (defective dir Path, tuple of removed paths).
+    # Side effects: writes output/source.diff and files; subprocess git.
     """Reverse the complete frozen production patch, preserving genuine absence."""
     defective = output / "defective-source"
     defective.mkdir()
@@ -232,6 +272,9 @@ def reverse_source(source: dict, base: Path, output: Path) -> tuple[Path, tuple[
 
 
 def materialize_source(source: dict, profile: Profile, checkout: Path, output: Path) -> Path:
+    # [FUNCTION DOC] Exports the pinned head of checkout with git archive into output/snapshot
+    # (data-filtered tar extraction), cleans it with clean_snapshot and checks readiness paths.
+    # Raises ValueError if checkout HEAD differs from source['head']. Output: snapshot Path.
     """Archive the pinned head; author-created files cannot satisfy readiness."""
     if run(["git", "-C", str(checkout), "rev-parse", "HEAD"]).strip() != source["head"]:
         raise ValueError("Source preparation requires the frozen PR checkout")
@@ -258,6 +301,9 @@ def materialize_source(source: dict, profile: Profile, checkout: Path, output: P
 
 
 def prepare_native(source: dict, profile: Profile, checkout: Path, output: Path) -> dict:
+    # [FUNCTION DOC] prepare_native stage: materializes the snapshot and reverse-patches the source
+    # without any CPU image build. Output: {base_relative 'snapshot', defective_relative 'defective-
+    # source', removed list}.
     """Export a pinned clean snapshot on the remote builder, without a CPU build."""
     base = materialize_source(source, profile, checkout, output)
     _, removed = reverse_source(source, base, output)
@@ -269,6 +315,15 @@ def prepare_native(source: dict, profile: Profile, checkout: Path, output: Path)
 
 
 def construct(source: dict, profile: Profile, design: Design, ready: dict, output: Path) -> dict:
+    # [FUNCTION DOC] Construct stage: builds the task from a Design.
+    # Inputs: source; profile; design; ready (bootstrap value with base and image); output dir.
+    # Reverses the source; copies options and clears test_selectors if design.upstream_test_policy
+    # is 'replace'. If the design has additional_tests, writes them as tests/tasksmith_behavior.py
+    # (requires an existing tests/ dir and an unused path, else ValueError) and selects it. Runs
+    # tests on the merged image (must pass, else ValueError) and on the defective
+    # replacement/removal set, computes the execution contrast (ValueError if no PASS_TO_PASS), and
+    # exports a Harbor repository task with tasksmith metadata. Output: {task, task_relative,
+    # contrast, test_evidence (FAIL_TO_PASS excerpts), options dump, strategy}.
     base = Path(ready["base"])
     defective, removed = reverse_source(source, base, output)
     options = profile.options.model_copy(deep=True)
@@ -354,6 +409,12 @@ def construct(source: dict, profile: Profile, design: Design, ready: dict, outpu
 
 
 def main():
+    # [FUNCTION DOC] CLI entry: parses CONFIG and OUTPUT paths; raises RuntimeError unless
+    # REPO2RLENV_REMOTE_WORKER=1. Creates OUTPUT (must not exist), dispatches on config 'stage'
+    # (dependencies, inspect, bootstrap, prepare_native, construct; unknown -> ValueError captured).
+    # On failure records status 'failed', error and log tails (stdout/stderr/results files, build
+    # excerpts) and writes traceback.txt. Saves stage-result.json with elapsed seconds, then tars
+    # OUTPUT into OUTPUT.tar.gz excluding 'base' and 'checkout' (and 'snapshot' on failure).
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("config", type=Path)
     parser.add_argument("output", type=Path)

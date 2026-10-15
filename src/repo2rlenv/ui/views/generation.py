@@ -1,3 +1,7 @@
+# [MODULE DOC] Live view for `repo2rlenv generate`: header (repo, pipeline, model, limit, out dir),
+# a candidate progress bar, a running tally of emitted/skipped/errored candidates with skip reasons,
+# and a final outcome panel. Pipelines report through on_candidate. CandidateOutcome is 'emit' |
+# 'skip' | 'error'.
 """Live view for synthesis pipelines (`repo2rlenv generate`).
 
 Shows a header, a per-candidate progress bar, and a live tally of emitted
@@ -25,6 +29,8 @@ CandidateOutcome = Literal["emit", "skip", "error"]
 
 
 class GenerationView:
+    # [CLASS DOC] Redrawing view of a synthesis run; use as a context manager. Tracks counts, skip
+    # reasons, the current candidate name and a Rich Progress task whose total is the limit.
     """Live view for a synthesis pipeline run."""
 
     def __init__(
@@ -36,6 +42,9 @@ class GenerationView:
         limit: int,
         out: str,
     ):
+        # [FUNCTION DOC] Stores repo, pipeline, model, limit and out (keyword-only), zeroes
+        # counters, records the start time and creates a Progress (spinner, description, bar,
+        # completed/total, elapsed) with one 'Mining candidates' task of total=limit.
         self.repo = repo
         self.pipeline = pipeline
         self.model = model
@@ -68,11 +77,15 @@ class GenerationView:
     # ----- context manager ----------------------------------------------------
 
     def __enter__(self) -> GenerationView:
+        # [FUNCTION DOC] Starts live_view with the initial render; keeps the context manager and
+        # Live. Output: self.
         self._live_ctx = live_view(self._render())
         self._live = self._live_ctx.__enter__()
         return self
 
     def __exit__(self, *exc) -> None:
+        # [FUNCTION DOC] Exits the live_view context if it was entered. Does not suppress
+        # exceptions.
         if hasattr(self, "_live_ctx"):
             self._live_ctx.__exit__(*exc)
 
@@ -85,6 +98,10 @@ class GenerationView:
         outcome: CandidateOutcome,
         reason: str = "",
     ) -> None:
+        # [FUNCTION DOC] Records one processed candidate: increments processed, sets current name,
+        # increments emitted/skipped/errors by outcome (counting non-empty skip reasons), advances
+        # the progress bar with 'Processing <first 50 chars of name>' and re-renders. Inputs: name;
+        # outcome; reason (default '').
         """Pipeline calls this once per candidate processed."""
         self.processed += 1
         self.current = name
@@ -111,6 +128,9 @@ class GenerationView:
         pushed: bool = False,
         registry_url: str = "",
     ) -> None:
+        # [FUNCTION DOC] Builds the 'Generation complete' success panel listing emitted, skipped,
+        # skip reasons, registry_url (when non-empty) and the out dir, then re-renders.
+        # KNOWN ISSUE: the pushed parameter is accepted but never used.
         body = Text()
         body.append("emitted   ", style=STYLE.DIM)
         body.append(f"{emitted}\n", style="green")
@@ -135,10 +155,13 @@ class GenerationView:
     # ----- rendering ----------------------------------------------------------
 
     def _refresh(self) -> None:
+        # [FUNCTION DOC] HELPER: Updates the Live with a new render when active.
         if self._live is not None:
             self._live.update(self._render())
 
     def _render(self) -> RenderableType:
+        # [FUNCTION DOC] HELPER: Returns a Group of header panel, progress bar, stats panel and the
+        # outcome panel when set.
         parts: list[RenderableType] = [
             self._header_panel(),
             self._progress,
@@ -149,6 +172,8 @@ class GenerationView:
         return Group(*parts)
 
     def _header_panel(self) -> Panel:
+        # [FUNCTION DOC] HELPER: Builds the full-width header Panel with repo, pipeline, model,
+        # limit and out dir.
         h = Text()
         h.append("r2e-generate ", style=STYLE.HEADER)
         h.append("· ", style=STYLE.DIM)
@@ -165,6 +190,8 @@ class GenerationView:
         return Panel(Group(h, meta), border_style=STYLE.PANEL_INFO, expand=True)
 
     def _stats_panel(self) -> Panel:
+        # [FUNCTION DOC] HELPER: Builds the stats panel: emitted and skipped counts, errors only
+        # when non-zero, elapsed seconds, plus a dim skip-reasons line when any were recorded.
         line = Text()
         line.append(f"{GLYPH.SUCCESS} emitted ", style=STYLE.SUCCESS)
         line.append(f"{self.emitted}", style="white")
@@ -201,6 +228,9 @@ def generation_view_or_plain(
     out: str,
     force_plain: bool = False,
 ) -> Iterator[GenerationView | None]:
+    # [FUNCTION DOC] Context manager yielding an entered GenerationView, or None when force_plain is
+    # True or Rich is not appropriate (should_use_rich() False). Keyword inputs mirror
+    # GenerationView plus force_plain (default False).
     if force_plain or not should_use_rich():
         yield None
         return

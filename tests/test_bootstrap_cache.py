@@ -1,3 +1,7 @@
+# [MODULE DOC] Tests for bootstrap.cache: on-disk layout (<root>/<owner>__<name>/<sha12>[opts] with
+# bootstrap.json and Dockerfile), cache miss, save/load round-trip, tolerance of unknown JSON
+# fields, and option-aware cache keys (defaults/None/empty options map to the legacy path; platform
+# and base_image produce distinct slots). Uses tmp_path only.
 """Cache load/save round-trip."""
 
 from __future__ import annotations
@@ -11,6 +15,9 @@ from repo2rlenv.bootstrap.spec import BootstrapResult, LanguageHint
 def _sample_result(
     repo: str = "huggingface/trl", ref: str = "a1b2c3d4e5f6abcdef"
 ) -> BootstrapResult:
+    # [FUNCTION DOC] HELPER: Builds a representative Python BootstrapResult for repo (default
+    # huggingface/trl) and ref (default a1b2c3d4e5f6abcdef) with fixed digest, commands and a
+    # Dockerfile reconstruction.
     return BootstrapResult(
         image_digest="sha256:" + "a" * 64,
         image_tag="local/r2e/trl:a1b2c3d4e5f6",
@@ -28,6 +35,8 @@ def _sample_result(
 
 
 def test_save_creates_expected_layout(tmp_path: Path):
+    # [FUNCTION DOC] save() returns <root>/huggingface__trl/a1b2c3d4e5f6 containing bootstrap.json
+    # and Dockerfile.
     result = _sample_result()
     slot = cache_mod.save(result, tmp_path)
     assert slot == tmp_path / "huggingface__trl" / "a1b2c3d4e5f6"
@@ -36,10 +45,12 @@ def test_save_creates_expected_layout(tmp_path: Path):
 
 
 def test_load_returns_none_on_cache_miss(tmp_path: Path):
+    # [FUNCTION DOC] load() of an absent entry returns None.
     assert cache_mod.load("foo/bar", "deadbeef", tmp_path) is None
 
 
 def test_save_then_load_roundtrip(tmp_path: Path):
+    # [FUNCTION DOC] Saved fields (digest, language, commands, iterations) load back equal.
     original = _sample_result()
     cache_mod.save(original, tmp_path)
     loaded = cache_mod.load(original.repo, original.ref, tmp_path)
@@ -52,6 +63,7 @@ def test_save_then_load_roundtrip(tmp_path: Path):
 
 
 def test_load_tolerates_unknown_fields(tmp_path: Path):
+    # [FUNCTION DOC] An extra field injected into bootstrap.json does not break load().
     """Cache loads should not break if BootstrapResult adds new fields later."""
     result = _sample_result()
     slot = cache_mod.save(result, tmp_path)
@@ -69,12 +81,14 @@ def test_load_tolerates_unknown_fields(tmp_path: Path):
 
 
 def test_dockerfile_written_when_present(tmp_path: Path):
+    # [FUNCTION DOC] The Dockerfile reconstruction is written to the slot.
     result = _sample_result()
     slot = cache_mod.save(result, tmp_path)
     assert (slot / "Dockerfile").read_text().startswith("FROM python:")
 
 
 def test_cache_key_no_options_is_backwards_compatible(tmp_path: Path):
+    # [FUNCTION DOC] No/None/empty/all-None options give the same unsuffixed path named by the sha.
     """Default-only spec should produce the same v0.2 path (no opts hash suffix)."""
     p1 = cache_mod.cache_key("foo/bar", "abc123def456", tmp_path)
     p2 = cache_mod.cache_key("foo/bar", "abc123def456", tmp_path, options=None)
@@ -87,6 +101,7 @@ def test_cache_key_no_options_is_backwards_compatible(tmp_path: Path):
 
 
 def test_cache_key_differs_when_options_differ(tmp_path: Path):
+    # [FUNCTION DOC] Different platform or base_image produce different cache paths.
     """Different platforms / base images must map to different cache slots."""
     amd64 = cache_mod.cache_key("foo/bar", "abc", tmp_path, options={"platform": "linux/amd64"})
     arm64 = cache_mod.cache_key("foo/bar", "abc", tmp_path, options={"platform": "linux/arm64"})
@@ -102,6 +117,7 @@ def test_cache_key_differs_when_options_differ(tmp_path: Path):
 
 
 def test_cache_save_and_load_with_options(tmp_path: Path):
+    # [FUNCTION DOC] Matching options round-trip; different options miss.
     """save/load with matching options round-trips; mismatched options miss."""
     result = _sample_result()
     opts = {"platform": "linux/arm64", "base_image": "ubuntu:24.04"}

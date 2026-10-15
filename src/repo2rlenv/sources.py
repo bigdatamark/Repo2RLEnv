@@ -1,3 +1,9 @@
+# [MODULE DOC] Input-source model: classifies a normalized repo URL as GitHub, GitLab or local, and
+# maps each SourceKind to the platform Capabilities it offers beyond plain git (clone, history and
+# source files are implicit for all). GitHub: pull requests, issues, commit API; GitLab: pull
+# requests (merge requests) and issues; local: none. cmd_generate compares these with a pipeline's
+# required capabilities to refuse incompatible combinations early. Also builds browsable line-range
+# links.
 """Input-source contract: where a repo comes from and what it can provide.
 
 Repo2RLEnv historically assumed every input was a GitHub repo. This module
@@ -23,6 +29,8 @@ from enum import StrEnum
 
 
 class Capability(StrEnum):
+    # [CLASS DOC] StrEnum of platform data beyond git: PULL_REQUESTS ("pull_requests"), ISSUES
+    # ("issues"), COMMIT_API ("commit_api", arbitrary commit diff/parent lookup via host API).
     """Platform data a source can serve beyond plain git."""
 
     PULL_REQUESTS = "pull_requests"  # list/fetch merged PRs (pr_diff, pr_runtime)
@@ -31,6 +39,8 @@ class Capability(StrEnum):
 
 
 class SourceKind(StrEnum):
+    # [CLASS DOC] StrEnum of repository source kinds: GITHUB, GITLAB, LOCAL (values are lowercase
+    # names).
     GITHUB = "github"
     GITLAB = "gitlab"
     LOCAL = "local"
@@ -51,6 +61,9 @@ _CAPABILITIES: dict[SourceKind, frozenset[Capability]] = {
 
 
 def detect_source_kind(url: str) -> SourceKind:
+    # [FUNCTION DOC] Classifies an already-normalized repo URL: "file://" prefix -> LOCAL; contains
+    # "gitlab.com" -> GITLAB; anything else -> GITHUB. Input: url str (whitespace stripped). Output:
+    # SourceKind.
     """Classify a (normalized) repo URL into a source kind.
 
     `RepoSpec.normalize_url` canonicalizes local paths to ``file://`` and
@@ -66,12 +79,19 @@ def detect_source_kind(url: str) -> SourceKind:
 
 
 def capabilities_for(kind: SourceKind) -> frozenset[Capability]:
+    # [FUNCTION DOC] Returns the frozenset of Capability values for a SourceKind from the module
+    # table. Raises KeyError for an unknown kind.
     return _CAPABILITIES[kind]
 
 
 def blob_reference_url(
     kind: SourceKind, owner: str, name: str, ref: str, path: str, start_line: int, end_line: int
 ) -> str | None:
+    # [FUNCTION DOC] Builds a browsable URL to lines start_line..end_line of path at ref in
+    # owner/name. GitHub: https://github.com/<owner>/<name>/blob/<ref>/<path>#L<start>-L<end>;
+    # GitLab: https://gitlab.com/<owner>/<name>/-/blob/<ref>/<path>#L<start>-<end>. Returns None for
+    # LOCAL (callers must omit the field since TOML has no null). No escaping of components; no side
+    # effects.
     """Browsable link to a line range in ``path`` at ``ref``, or ``None`` for
     a local checkout (no host to link to, so callers must omit rather than
     null the field, since TOML has no null).

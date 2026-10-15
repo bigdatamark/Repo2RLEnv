@@ -1,3 +1,6 @@
+# [MODULE DOC] Context managers for Rich Live displays that mark the console as live and temporarily
+# raise noisy library loggers (litellm, httpx, httpcore, anthropic, openai, repo2rlenv.bootstrap) to
+# WARNING so the display doesn't tear.
 """Live display helper that quiets noisy loggers while active."""
 
 from __future__ import annotations
@@ -24,6 +27,9 @@ _NOISY_LOGGERS = (
 
 @contextmanager
 def quiet_libraries() -> Iterator[None]:
+    # [FUNCTION DOC] Context manager: saves each noisy logger's level, sets it to WARNING for the
+    # block and restores the saved levels afterwards (even on exception). Yields None. Mutates
+    # global logging state.
     """Raise the level of noisy libs to WARNING for the duration of the block."""
     saved: list[tuple[logging.Logger, int]] = []
     for name in _NOISY_LOGGERS:
@@ -45,6 +51,10 @@ def live_view(
     transient: bool = False,
     quiet_noisy: bool = True,
 ) -> Iterator[Live]:
+    # [FUNCTION DOC] Context manager wrapping rich.live.Live on the shared console.
+    # Inputs: renderable; refresh_per_second (default 8); transient (default False); quiet_noisy
+    # (default True, wraps the block in quiet_libraries). Sets console.live_active True for the
+    # block and False afterwards. Yields the Live object (vertical_overflow 'visible').
     """Standard Live wrapper: tracks the active flag on the console + quiets noise."""
     console.live_active = True
     try:

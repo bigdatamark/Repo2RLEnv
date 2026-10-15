@@ -1,3 +1,11 @@
+# [MODULE DOC] Tasksmith controller: a resumable LangGraph state machine that turns frozen merged
+# GitHub PRs into Harbor tasks. Per PR it runs investigate (LLM authors a dependency/test Profile)
+# -> bootstrap (remote build + merged-head readiness) -> design (LLM authors instruction/verifier
+# Design) -> construct (remote PR contrast + Harbor bundle export) -> quality (QualityLoop review,
+# controls, probes, rollout). Remote steps run repo2rlenv.tasksmith.worker on a provisioned provider
+# worker (or NativeStages when GPUs are requested). All spend goes through a shared BudgetLedger;
+# every remote effect is guarded by identity receipts so resumption never relaunches or reuses
+# mismatched state. Results and progress are persisted as JSON under the run directory.
 """Resumable LangGraph orchestration over existing owned execution components."""
 
 from __future__ import annotations
@@ -40,6 +48,11 @@ from repo2rlenv.tasksmith.source import resolve_pr, validate_source_records
 
 
 def _validate_profile_source_coverage(profile: Profile, source_files: list[str]) -> None:
+    # [FUNCTION DOC] HELPER: Ensures a Profile can see every PR source change.
+    # Inputs: profile (Profile); source_files (list of repo-relative paths). Raises ValueError
+    # listing paths not equal to or under any options.source_paths root, and ValueError for the
+    # first path that equals or lies under any options.test_paths or options.public_exclude prefix.
+    # Output: None.
     roots = [PurePosixPath(path) for path in profile.options.source_paths]
     uncovered = [
         name
@@ -67,6 +80,9 @@ def _validate_profile_source_coverage(profile: Profile, source_files: list[str])
 
 
 class State(TypedDict, total=False):
+    # [CLASS DOC] TypedDict (total=False) for the LangGraph per-candidate state: source, profile,
+    # ready (bootstrap result value), design, constructed (construct stage result), quality,
+    # profile_attempt, design_attempt, failure (failed stage result or None) and status string.
     source: dict
     profile: dict
     ready: dict
@@ -80,9 +96,20 @@ class State(TypedDict, total=False):
 
 
 class Tasksmith:
+    # [CLASS DOC] Orchestrator for one Tasksmith run directory. Holds options, the runtime wheel, a
+    # budget ledger in the campaign directory, a run-specific budget, the lazily provisioned remote
+    # worker, its receipt and remote Python path, and imported reusable generations keyed by source
+    # id.
     def __init__(
         self, directory: Path, campaign: Path, options: Options, wheel: Path, *, on_event=None
     ):
+        # [FUNCTION DOC] Initializes the controller.
+        # Inputs: directory (run output dir, resolved); campaign (dir holding budget.sqlite3);
+        # options (tasksmith Options); wheel (runtime wheel path, resolved); on_event (optional
+        # callable(stage, message), default no-op). Derives prefix 'ts-' + 12 hex of SHA-256 of the
+        # directory, creates a BudgetLedger and a RunBudget capped at options.max_spend_usd.
+        # Worker/receipt/python start as None and imported as empty. Side effects: opens/creates the
+        # ledger database.
         self.directory, self.options, self.wheel = directory.resolve(), options, wheel.resolve()
         self.ledger = BudgetLedger(campaign / "budget.sqlite3")
         self.prefix = "ts-" + hashlib.sha256(str(self.directory).encode()).hexdigest()[:12]
@@ -92,6 +119,9 @@ class Tasksmith:
         self.imported = {}
 
     def event(self, stage, message):
+        # [FUNCTION DOC] Emits a progress event: calls on_event(stage, message), ensures the run
+        # directory exists and appends a JSON line {time, stage, message} to events.jsonl. Output:
+        # None.
         self.on_event(stage, message)
         self.directory.mkdir(parents=True, exist_ok=True)
         with (self.directory / "events.jsonl").open("a") as stream:
@@ -100,6 +130,13 @@ class Tasksmith:
             )
 
     def ready_worker(self):
+        # [FUNCTION DOC] Provisions and prepares the remote worker once (no-op if already set).
+        # Validates the runtime wheel; refuses (ValueError) if any existing worker receipt in
+        # workers/ (not *.cost.json) is not 'terminated'. Provisions a worker named
+        # <prefix>-w<index> from options (provider, cpus, memory, snapshot, timeout, reservation)
+        # charged to the run budget, emits an event, prepares Docker on it and installs the runtime
+        # wheel, storing the remote python path.
+        # Side effects: provider API calls, budget reservation, files under workers/ and runtime/.
         if self.worker is not None:
             return
         check_runtime_wheel(self.wheel)
@@ -131,6 +168,17 @@ class Tasksmith:
         )
 
     def remote(self, root: Path, key: str, data: dict) -> dict:
+        # [FUNCTION DOC] Runs one deterministic worker stage remotely, idempotently.
+        # Inputs: root (candidate or seed dir); key (stage key); data (request JSON for the worker).
+        # Ensures a worker, derives a per-worker stage dir root/remote/<key>-<8 hex of worker id>,
+        # and an identity digest of data + wheel hash + worker id. If operation.json exists its
+        # identity must match (else ValueError); otherwise uploads request.json, writes a
+        # 'dispatching' receipt first and launches `python -m repo2rlenv.tasksmith.worker request
+        # artifact` as a supervised job (1500 s). If the local artifact is absent, waits for the job
+        # (1600 s; RuntimeError if not completed), downloads and unpacks artifact.tar.gz. Output:
+        # the worker's stage-result.json dict plus 'local' (local artifact path); the receipt is
+        # rewritten as 'completed' with the result. Side effects: remote exec, upload/download,
+        # local files.
         self.ready_worker()
         # Deterministic build artifacts include worker identity: local image IDs
         # and remote snapshot paths must never be reused on a different worker.
@@ -199,7 +247,20 @@ class Tasksmith:
         return result
 
     def author(self, root, stage, schema, inputs, checkout, *, validate=None):
+        # [FUNCTION DOC] Runs one LLM authoring stage producing a validated pydantic artifact.
+        # Inputs: root (candidate dir); stage (e.g. 'investigate-0', 'design-1'; role is the part
+        # before '-'); schema (pydantic model class); inputs (dict context); checkout (remote
+        # checkout path); validate (optional async validator). Loads prompts/<role>.md, appends
+        # turn-budget guidance, and runs artifact_stage synchronously via asyncio.run with an
+        # AuthorBudget, author model/runtime, per-stage USD cap, max turns, a 1200 s deadline and a
+        # shell tool. For design with a previous_design input the initial draft key is
+        # 'previous_design'. Output: the schema instance returned by artifact_stage.
+        # Side effects: LLM spend, remote shell commands, files under root/authors/<stage>.
         async def shell(command: str, timeout_sec: int = 120):
+            # [FUNCTION DOC] HELPER: Async shell tool given to the author agent. Runs `sh -c "cd
+            # <checkout> && <command>"` on the worker in a thread. Inputs: command (str);
+            # timeout_sec (int 1-120, default 120; ValueError otherwise). Output: JSON string with
+            # returncode, stdout (first 22000 chars) and stderr (first 6000 chars).
             if not isinstance(timeout_sec, int) or not 1 <= timeout_sec <= 120:
                 raise ValueError("Shell timeout must be 1-120 seconds")
             result = await asyncio.to_thread(
@@ -249,6 +310,13 @@ class Tasksmith:
         )
 
     def release_author_worker(self):
+        # [FUNCTION DOC] Stops the author worker(s) before GPU quality and reconciles spend.
+        # Raises ValueError if a live worker has no receipt. Collects all worker receipts in
+        # workers/ plus the current one, calls stop_worker on each (clearing worker/python handles
+        # once the current receipt is terminated, even if later steps fail). For Modal workers,
+        # requires a matching ledger operation (ValueError otherwise) and calls reconcile_worker
+        # unless already settled; emits a cleanup event either way and clears self.receipt when it
+        # was the current one. Side effects: provider API calls, ledger updates, events.
         """Stop an unused author worker and reconcile only confirmed Modal usage."""
         if self.worker is not None and self.receipt is None:
             raise ValueError("Cannot release an author worker without its receipt")
@@ -295,6 +363,19 @@ class Tasksmith:
                 self.receipt = None
 
     def review_candidate(self, root: Path, source: dict, constructed: dict):
+        # [FUNCTION DOC] Runs the quality loop on a constructed task.
+        # Inputs: root (candidate dir); source (frozen PR dict); constructed (stage result with
+        # local, value. task_relative and optional imported_from). If required_probe_focus is
+        # configured, rewrites the task with those requirements into root/quality-input; when that
+        # changes the identity, imported evidence is dropped and quality-input.json records the
+        # change. With GPUs, verifies the task identity and releases the author worker; otherwise
+        # ensures the worker. Builds a per-candidate RunBudget and a QualityLoop with merged_pr task
+        # context (title, body, source diff truncated to 24000 chars, guidance), using
+        # NativeModalTrials (GPU) or RemoteTrials sharing the existing worker. Writes imported
+        # probes to imported-probes.json and passes imported baseline/oracle/rollout results as
+        # evidence (rollouts only if the solver model matches); resumes if quality/run.json exists.
+        # Output: dict with quality (result dump), status and label_export (labeled-task.json
+        # content or None).
         task = Path(constructed["local"]) / constructed["value"]["task_relative"]
         imported = constructed.get("imported_from", {})
         if self.options.required_probe_focus:
@@ -395,6 +476,9 @@ class Tasksmith:
         }
 
     def _validate_profile_resources(self, profile: Profile) -> None:
+        # [FUNCTION DOC] HELPER: Raises ValueError if profile.resource is not 'gpu' when
+        # options.gpus is set (or 'cpu' otherwise), or, for CPU profiles, if test_cpus /
+        # test_memory_mb exceed the worker allocation. Output: None.
         if profile.resource != ("gpu" if self.options.gpus else "cpu"):
             raise ValueError("Profile resource must match the campaign's explicit GPU requirement")
         if profile.resource == "cpu":
@@ -409,6 +493,11 @@ class Tasksmith:
                     )
 
     def _prepared_profile(self, source: dict) -> Profile | None:
+        # [FUNCTION DOC] HELPER: Returns the validated prepared Profile for a source, or None if
+        # none is configured in options.prepared_profiles. Validates the source record, requires the
+        # prepared binding (url, head, base, workspace_strategy, source diff SHA-256) to match the
+        # source, re-validates the profile, and checks resources and source coverage. Raises
+        # ValueError on mismatch.
         prepared = self.options.prepared_profiles.get(source["id"])
         if prepared is None:
             return None
@@ -425,6 +514,10 @@ class Tasksmith:
         return profile
 
     def _prepared_design(self, source: dict) -> Design | None:
+        # [FUNCTION DOC] HELPER: Returns the prepared Design for a source, or None if none is
+        # configured. Validates the source binding like _prepared_profile, requires a prepared
+        # profile to exist and its canonical digest to equal the design's profile_sha256. Raises
+        # ValueError on mismatch.
         prepared = self.options.prepared_designs.get(source["id"])
         if prepared is None:
             return None
@@ -443,6 +536,17 @@ class Tasksmith:
         return Design.model_validate(prepared.design.model_dump())
 
     def candidate(self, source: dict):
+        # [FUNCTION DOC] Processes one frozen PR source end to end and returns its report dict. If
+        # candidates/<id>/result.json exists, returns it (ValueError if its quality task identity
+        # changed). If the source is in self.imported, verifies the task identity, reviews it
+        # directly and saves the report. Otherwise loads prepared profile/design, remotely inspects
+        # (clones) the head, builds a source context (full diff truncated to 32000 chars), and
+        # builds a LangGraph StateGraph: investigate -> bootstrap -> (failure: retry investigate
+        # while profile_attempt < max_stage_attempts, else END) -> design -> construct -> (failure:
+        # retry design while design_attempt < max, else END) -> quality -> END. Each node is wrapped
+        # to write progress.json before/after. Runs it with a SQLite checkpointer (graph.sqlite3,
+        # thread id = source id, recursion limit 40). Output: report dict {source url, id, **final
+        # state}, also saved to result.json. Raises ValueError on inspect failure or identity drift.
         from langgraph.checkpoint.sqlite import SqliteSaver
         from langgraph.graph import END, START, StateGraph
 
@@ -489,6 +593,11 @@ class Tasksmith:
         source_context["full_pr_diff_truncated"] = len(source.get("full_diff", "")) > 32000
 
         def investigate(state):
+            # [FUNCTION DOC] Graph node: produces the Profile. Uses the prepared profile on the
+            # first attempt (after validation), else authors one via the 'investigate-<n>' stage
+            # with source context, snapshot links, previous profile/failure, repository bootstrap
+            # hint and requested resources.
+            # Output: state update with profile dump, incremented profile_attempt and failure None.
             attempt = state.get("profile_attempt", 0)
             hint = self.options.bootstrap_hints.get(source.get("repo", ""))
             self.event(
@@ -496,6 +605,10 @@ class Tasksmith:
             )
 
             async def validate(profile):
+                # [FUNCTION DOC] HELPER: Async profile validator. Checks resources, requires the
+                # profile's materialize_document_links to include all previously retained links plus
+                # snapshot symlinks ending in .md/.rst/.txt (ValueError listing missing ones), and
+                # checks source coverage.
                 self._validate_profile_resources(profile)
                 previous = state.get("profile", {}).get("options", {})
                 retained_links = set(previous.get("materialize_document_links", []))
@@ -545,6 +658,10 @@ class Tasksmith:
             }
 
         def bootstrap(state):
+            # [FUNCTION DOC] Graph node: builds the environment and checks merged-head readiness via
+            # NativeStages (GPU) or the remote 'bootstrap' worker stage. Output: {failure, status
+            # 'bootstrap_failed'} on failure, else {ready: value, failure None, status 'ready'};
+            # emits a dependency cache-hit event.
             self.event("bootstrap", f"{source['id']} build and offline merged-head readiness")
             if self.options.gpus:
                 from repo2rlenv.tasksmith.native_stages import NativeStages
@@ -574,6 +691,12 @@ class Tasksmith:
             return {"ready": result["value"], "failure": None, "status": "ready"}
 
         def design(state):
+            # [FUNCTION DOC] Graph node: produces the Design. On the first attempt with a prepared
+            # design, reuses it only if the bootstrapped profile digest equals the design's
+            # profile_sha256, writing a receipt under prepared-design/ either way; otherwise authors
+            # 'design-<n>' with source, profile, readiness, previous design/failure, optional
+            # required probe focus and resources. Output: state update with design dump, incremented
+            # design_attempt, failure None.
             attempt = state.get("design_attempt", 0)
             self.event(
                 "design", f"{source['id']} request and verification design, attempt {attempt + 1}"
@@ -628,6 +751,10 @@ class Tasksmith:
             return {"design": value.model_dump(), "design_attempt": attempt + 1, "failure": None}
 
         def construct(state):
+            # [FUNCTION DOC] Graph node: runs the construct stage (NativeStages for GPU, else remote
+            # worker).
+            # Output: {failure, status 'construction_failed'} on failure, else {constructed: result,
+            # failure None, status 'generated'}.
             self.event("construct", f"{source['id']} test PR contrast and emit Harbor bundle")
             if self.options.gpus:
                 from repo2rlenv.tasksmith.native_stages import NativeStages
@@ -657,6 +784,8 @@ class Tasksmith:
             return {"constructed": result, "failure": None, "status": "generated"}
 
         def quality(state):
+            # [FUNCTION DOC] Graph node: returns review_candidate(root, source,
+            # state['constructed']).
             return self.review_candidate(root, source, state["constructed"])
 
         graph = StateGraph(State)
@@ -669,6 +798,10 @@ class Tasksmith:
         ):
 
             def tracked(state, *, operation=node, label=name):
+                # [FUNCTION DOC] HELPER: Node wrapper bound to one operation/label. Writes
+                # progress.json with the state plus stage label and 'running', calls the operation,
+                # writes progress.json with the merged update and 'completed', and returns the
+                # update.
                 save_record(
                     root / "progress.json", {**state, "stage": label, "stage_status": "running"}
                 )
@@ -726,6 +859,14 @@ class Tasksmith:
         prepared_task: Path | None = None,
         prepared_probes: ProbeManifest | None = None,
     ):
+        # [FUNCTION DOC] Public entry point for a panel run.
+        # Inputs: panel (Panel of PR URLs); limit (optional count of PRs to process,
+        # 1..len(panel.prs)); generation_run (earlier run dir to reuse); reuse_evidence (bool,
+        # requires generation_run); source_records (frozen records, exclusive with generation_run);
+        # prepared_task / prepared_probes (recover exactly one prepared task with optional probe
+        # manifest; incompatible with prepared designs). Validates these combinations (ValueError),
+        # seeds self.imported for a prepared task, creates the directory, takes an exclusive file
+        # lock on .lock and delegates to _run. Output: report dict.
         if reuse_evidence and generation_run is None:
             raise ValueError("Evidence reuse requires --generation-run")
         if prepared_probes is not None and prepared_task is None:
@@ -770,6 +911,16 @@ class Tasksmith:
 
     def _run(self, panel, limit, generation_run, reuse_evidence=False, source_records=None):
         # Fail before provisioning if optional orchestration or credentials are absent.
+        # [FUNCTION DOC] Locked implementation of run. Fails early (ImportError/ValueError) if
+        # langgraph, the author runtime or required API keys (Anthropic plus each configured quality
+        # model provider) are missing. Loads reusable generations, builds a configuration dict and
+        # compares it with an existing panel.json (ValueError if changed), otherwise resolves
+        # sources (previous, frozen, or resolve_pr per URL) and saves panel.json. Validates prepared
+        # profiles/designs are within the selected sources and not also imported. Pre-builds
+        # dependency images for repositories with bootstrap hints (CPU only) for pending unprepared
+        # sources. Calls candidate for each selected source; an exception is recorded as an
+        # 'incomplete' report and interruption.json (non-Exception BaseExceptions are re-raised).
+        # Always stops the worker in finally and writes the report. Output: final report dict.
         from langgraph.checkpoint.sqlite import SqliteSaver  # noqa: F401
         from langgraph.graph import StateGraph  # noqa: F401
 
@@ -887,6 +1038,9 @@ class Tasksmith:
         return self.report(panel, reports)
 
     def report(self, panel, reports):
+        # [FUNCTION DOC] Builds and saves report.json: panel name, input count, attempted, generated
+        # (rows with constructed), usable (status == 'usable'), the candidate rows and budget
+        # totals. Output: that dict.
         result = {
             "panel": panel.name,
             "inputs": len(panel.prs),

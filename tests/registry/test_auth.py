@@ -1,3 +1,7 @@
+# [MODULE DOC] Tests for repo2rlenv.registry.auth: host classification into RegistryKind, discovery
+# of logged-in registries from a Docker config.json (inline auth, credHelpers, credsStore, empty
+# entries, Docker Hub v1 URL normalisation) and filtering out unknown registry kinds. Uses tmp_path
+# config files only.
 """Tests for `registry.auth` — file-level Docker login discovery."""
 
 from __future__ import annotations
@@ -39,20 +43,29 @@ class TestClassifyHost:
             ("", RegistryKind.OTHER),
         ],
     )
+    # [CLASS DOC] Parametrized checks that classify_host maps hosts/URLs to the right RegistryKind.
     def test_classification(self, host: str, expected: RegistryKind) -> None:
+        # [FUNCTION DOC] Asserts classify_host(host) is the expected RegistryKind for GHCR, ECR
+        # public/private, ACR, GCP AR, Docker Hub variants, localhost/127.0.0.1, quay.io and the
+        # empty string (OTHER).
         assert classify_host(host) is expected
 
 
 class TestDiscover:
+    # [CLASS DOC] Tests for discover_logged_in_registries reading a Docker config file.
     def test_missing_config(self, tmp_path: Path) -> None:
+        # [FUNCTION DOC] A non-existent config path yields an empty list.
         assert discover_logged_in_registries(tmp_path / "nope.json") == []
 
     def test_malformed_config(self, tmp_path: Path) -> None:
+        # [FUNCTION DOC] A non-JSON config file yields an empty list.
         cfg = tmp_path / "config.json"
         cfg.write_text("not json", encoding="utf-8")
         assert discover_logged_in_registries(cfg) == []
 
     def test_inline_auth(self, tmp_path: Path) -> None:
+        # [FUNCTION DOC] An 'auth' entry for ghcr.io produces one RegistryAuth with kind GHCR,
+        # source INLINE and no helper.
         cfg = tmp_path / "config.json"
         cfg.write_text(
             json.dumps(
@@ -75,6 +88,8 @@ class TestDiscover:
         ]
 
     def test_credhelper_takes_precedence(self, tmp_path: Path) -> None:
+        # [FUNCTION DOC] A per-host credHelpers entry beats the global credsStore: ECR private host
+        # reports CREDHELPER with helper 'ecr-login'.
         """Per-host credHelpers override global credsStore."""
         cfg = tmp_path / "config.json"
         cfg.write_text(
@@ -98,6 +113,8 @@ class TestDiscover:
         assert out[0].helper == "ecr-login"
 
     def test_credstore_with_empty_auths(self, tmp_path: Path) -> None:
+        # [FUNCTION DOC] Empty {} auth entries with a credsStore are classified as CREDSTORE for
+        # both GHCR and Docker Hub.
         """Docker Desktop populates empty {} entries; classify as CREDSTORE."""
         cfg = tmp_path / "config.json"
         cfg.write_text(
@@ -119,6 +136,7 @@ class TestDiscover:
         assert sources == {CredentialSource.CREDSTORE}
 
     def test_empty_auths_without_credstore(self, tmp_path: Path) -> None:
+        # [FUNCTION DOC] An empty {} entry with no credsStore is reported with source EMPTY.
         """Bare {} with no credsStore → EMPTY (still a logged-in signal)."""
         cfg = tmp_path / "config.json"
         cfg.write_text(
@@ -130,6 +148,8 @@ class TestDiscover:
         assert out[0].cred_source is CredentialSource.EMPTY
 
     def test_mixed_sources(self, tmp_path: Path) -> None:
+        # [FUNCTION DOC] Inline, credsStore and credHelper sources coexist and are attributed per
+        # host, including the helper name 'gcloud'.
         """credHelper + credsStore + inline all coexist."""
         cfg = tmp_path / "config.json"
         cfg.write_text(
@@ -156,6 +176,8 @@ class TestDiscover:
         assert by_host["us-central1-docker.pkg.dev"].helper == "gcloud"
 
     def test_normalizes_docker_hub_v1_url(self, tmp_path: Path) -> None:
+        # [FUNCTION DOC] The 'https://index.docker.io/v1/' key is normalised to host
+        # 'index.docker.io' with kind DOCKER_HUB.
         cfg = tmp_path / "config.json"
         cfg.write_text(
             json.dumps({"auths": {"https://index.docker.io/v1/": {"auth": "dXg="}}}),
@@ -168,7 +190,9 @@ class TestDiscover:
 
 
 class TestFilterKnown:
+    # [CLASS DOC] Tests for filter_known_registries.
     def test_drops_other_kind(self) -> None:
+        # [FUNCTION DOC] OTHER-kind entries are dropped while GHCR and LOCAL are kept.
         auths = [
             RegistryAuth("ghcr.io", RegistryKind.GHCR, CredentialSource.INLINE),
             RegistryAuth("quay.io", RegistryKind.OTHER, CredentialSource.INLINE),

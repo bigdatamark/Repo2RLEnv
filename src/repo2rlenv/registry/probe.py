@@ -1,3 +1,11 @@
+# [MODULE DOC] Non-destructive OCI Distribution Spec push-readiness probe for a registry host +
+# namespace. Levels: L1 GET /v2/ (reachable if 200/401); L2 Bearer-token exchange at the WWW-
+# Authenticate realm using resolved credentials; L3 HEAD manifest of a fixed probe image
+# (PROBE_IMAGE "r2e-bootstrap-probe", tag "latest"; 200/404 = readable, 401/403 inconclusive); L4
+# POST a blob-upload session (202 = writable) then DELETE it so nothing is left behind. Credentials:
+# env vars for Docker Hub/GHCR first, then inline docker config.json auth, then a docker-
+# credential-<helper> subprocess. Network via stdlib urllib (http for localhost/127.0.0.1, https
+# otherwise), DEFAULT_TIMEOUT_SEC = 10. Public API: probe(), select_best(), ProbeResult, ProbeError.
 """OCI Distribution Spec L1-L4 verification probes.
 
 Given a host (e.g. `ghcr.io`) and a namespace (e.g. `huggingface`), this
@@ -51,11 +59,18 @@ DEFAULT_TIMEOUT_SEC = 10.0
 
 
 class ProbeError(Exception):
+    # [CLASS DOC] Exception for client-side failures that prevent a probe request entirely (network
+    # error such as DNS/refused connection, or timeout). HTTP 4xx/5xx statuses never raise this.
     """Raised when probing hits an unrecoverable client-side error (not 4xx/5xx)."""
 
 
 @dataclass(slots=True)
 class ProbeResult:
+    # [CLASS DOC] Mutable dataclass (slots) recording one probe run's outcome. Fields: host, kind
+    # (RegistryKind), namespace, levels_checked (tuple of ints requested); per-level booleans
+    # reachable/authenticated/can_read/can_write (default False); error (first blocking error
+    # message or None); helper_hint (suggested login command when L2 fails, or None); elapsed_sec
+    # (rounded to ms); details (level int -> human-readable status string).
     host: str
     kind: RegistryKind
     namespace: str
@@ -71,6 +86,8 @@ class ProbeResult:
 
     @property
     def is_pushable(self) -> bool:
+        # [FUNCTION DOC] Property: True only when reachable, authenticated, can_read and can_write
+        # are all True. No side effects.
         """All four levels passed — registry is ready for push."""
         return self.reachable and self.authenticated and self.can_read and self.can_write
 
@@ -80,6 +97,10 @@ _BEARER_KV_RE = re.compile(r'(\w+)="([^"]*)"')
 
 
 def _parse_bearer_challenge(www_authenticate: str) -> dict[str, str] | None:
+    # [FUNCTION DOC] HELPER: Parses a "Bearer k="v",..." WWW-Authenticate header into a dict
+    # (typically realm/service/scope) using a key="value" regex. Input: header str. Output: dict, or
+    # None if the header is empty, not a Bearer challenge (case-insensitive prefix check), or has no
+    # pairs.
     """Extract realm/service/scope from a `Bearer ...` WWW-Authenticate header.
 
     Returns None if the header isn't a Bearer challenge (e.g. Basic).
@@ -101,6 +122,11 @@ def _http_request(
     timeout: float = DEFAULT_TIMEOUT_SEC,
     body: bytes | None = None,
 ) -> tuple[int, dict[str, str], bytes]:
+    # [FUNCTION DOC] HELPER: Minimal urllib request that returns HTTP error statuses instead of
+    # raising. Inputs: method, url; keyword headers (dict or None), timeout (seconds, default
+    # DEFAULT_TIMEOUT_SEC), body (bytes or None). Output: (status int, headers dict with lowercased
+    # keys, body bytes). HTTPError is converted into its status/headers/body. Raises ProbeError on
+    # URLError (network) or TimeoutError. Side effects: one network request.
     """Tiny urllib wrapper that never raises on 4xx/5xx.
 
     Returns (status, lowercased-headers, body-bytes). Uses urllib (stdlib)
@@ -129,6 +155,12 @@ def _http_request(
 
 
 def _env_credential(host: str) -> tuple[str, str] | None:
+    # [FUNCTION DOC] HELPER: Returns explicit (username, token) credentials from environment
+    # variables for known hosts, preferred over the docker credstore (whose Docker Hub token may be
+    # pull-only). Docker Hub (host contains "docker.io"): DOCKER_USERNAME or DOCKERHUB_USERNAME plus
+    # DOCKER_TOKEN or DOCKERHUB_TOKEN, both required. GHCR (ghcr.io or *.ghcr.io): token from
+    # GHCR_TOKEN or GITHUB_TOKEN; username GITHUB_ACTOR or "x-access-token". Output: tuple or None.
+    # Reads os.environ only.
     """Explicit registry creds from env vars, for known hosts.
 
     Preferred over the docker credstore: Docker Hub's credstore returns an
@@ -156,6 +188,12 @@ def _env_credential(host: str) -> tuple[str, str] | None:
 
 
 def _resolve_credential(auth: RegistryAuth, host: str) -> tuple[str, str] | None:
+    # [FUNCTION DOC] HELPER: Resolves (username, password) for host. Order: _env_credential; then if
+    # auth.cred_source is INLINE, re-reads docker config.json (path from
+    # registry.auth._config_path), looks up auths[host].auth, base64-decodes it and splits on the
+    # first ":"; otherwise calls _docker_credential_helper_get with auth.helper. Output: tuple or
+    # None when nothing resolves (missing file, bad JSON, missing/invalid entry, no helper). Never
+    # raises for those cases. Side effects: file read and possibly a subprocess.
     """Resolve (username, password/token) for `host` via the right cred source.
 
     Order: explicit env creds (for known registries) → the source recorded on
@@ -201,6 +239,10 @@ def _resolve_credential(auth: RegistryAuth, host: str) -> tuple[str, str] | None
 
 
 def _docker_credential_helper_get(helper: str, host: str) -> tuple[str, str] | None:
+    # [FUNCTION DOC] HELPER: Runs "docker-credential-<helper> get" with host on stdin (10s timeout)
+    # and parses its JSON stdout. Output: (Username or "", Secret), or None if the binary is
+    # missing, times out, exits non-zero, emits invalid JSON, or the secret is empty. Side effect:
+    # subprocess.
     """Shell out to `docker-credential-<helper> get` for `host`.
 
     Returns (username, password) or None if the helper doesn't recognize the
@@ -242,6 +284,10 @@ def _docker_credential_helper_get(helper: str, host: str) -> tuple[str, str] | N
 
 
 def _l1_reachable(host: str, timeout: float) -> tuple[bool, str | None, str | None]:
+    # [FUNCTION DOC] HELPER: L1 probe - GET <scheme>://host/v2/ (http for local hosts, else https).
+    # Output: (ok, error message or None, www-authenticate header or None); ok iff status is 200 or
+    # 401. A ProbeError is caught and returned as (False, message, None). Side effect: one network
+    # request.
     """Return (ok, error, www_authenticate_header).
 
     A 200 or 401 both indicate "registry is up." Anything else (DNS / refused
@@ -259,6 +305,8 @@ def _l1_reachable(host: str, timeout: float) -> tuple[bool, str | None, str | No
 
 
 def _is_local_host(host: str) -> bool:
+    # [FUNCTION DOC] HELPER: True if host is "localhost" or "127.0.0.1", optionally followed by
+    # ":port". Used to pick http instead of https.
     return host in {"localhost", "127.0.0.1"} or host.startswith(("localhost:", "127.0.0.1:"))
 
 
@@ -274,6 +322,15 @@ def _l2_token_exchange(
     namespace: str,
     timeout: float,
 ) -> tuple[bool, str | None, str | None, list[str]]:
+    # [FUNCTION DOC] HELPER: L2 probe - exchanges credentials for a Bearer token. Inputs: challenge
+    # (parsed Bearer challenge or None), credential ((user, password) or None), keyword namespace
+    # and timeout. If challenge is None, the registry needs no auth: returns (True, None, None, []).
+    # Otherwise GETs <realm>?service=<service>&scope=repository:<ns>/<PROBE_IMAGE>:pull,push (query
+    # values not URL-encoded), with HTTP Basic auth when a credential is given. Output: (ok, error,
+    # token, granted_scopes). Fails (ok False) on missing realm, network error, non-200, non-JSON,
+    # or no "token"/"access_token" field. granted_scopes is the response "scope" (list or a single
+    # string, default the requested scope) normalized to a list of strings. Side effect: one network
+    # request.
     """Exchange (user, pass) for a Bearer token at `challenge.realm`.
 
     Returns (ok, error, bearer_token, granted_scopes).
@@ -327,6 +384,7 @@ def _l2_token_exchange(
 
 
 def _has_push_scope(granted_scopes: list[str]) -> bool:
+    # [FUNCTION DOC] HELPER: True if any granted scope string contains the substring "push".
     """True if any granted scope string includes `push`."""
     return any("push" in s for s in granted_scopes)
 
@@ -342,6 +400,11 @@ def _l3_can_read(
     bearer: str | None,
     timeout: float,
 ) -> tuple[str, str | None]:
+    # [FUNCTION DOC] HELPER: L3 probe - HEAD /v2/<namespace>/<PROBE_IMAGE>/manifests/<PROBE_TAG>
+    # with OCI and Docker v2 manifest Accept headers and an optional Bearer token. Output: (status,
+    # error) where status is "ok" for 200/404, "inconclusive" for 401/403 (some registries such as
+    # Docker Hub return 401 for nonexistent repos; L4 decides), and "fail" for anything else or a
+    # network error.
     """HEAD /v2/<ns>/<probe>/manifests/<tag>.
 
     Returns (status, err) where status is:
@@ -384,6 +447,12 @@ def _l4_can_write(
     bearer: str | None,
     timeout: float,
 ) -> tuple[bool, str | None]:
+    # [FUNCTION DOC] HELPER: L4 probe - POST /v2/<namespace>/<PROBE_IMAGE>/blobs/uploads/ with empty
+    # body and optional Bearer token. On 202 it best-effort DELETEs the session URL from the
+    # Location header (absolute or host-relative; DELETE errors only logged at debug) and returns
+    # (True, None). Returns (False, reason) for 401/403 ("write denied"), 404 (repository must be
+    # pre-created, e.g. ECR/GCP AR), other statuses, or network errors. Side effects: up to two
+    # network requests.
     """POST /v2/<ns>/<probe>/blobs/uploads/; 202 = write OK, then cancel.
 
     Per OCI spec, 202 returns a Location header pointing at the upload
@@ -432,6 +501,17 @@ def probe(
     levels: tuple[int, ...] = (1, 2, 3, 4),
     timeout: float = DEFAULT_TIMEOUT_SEC,
 ) -> ProbeResult:
+    # [FUNCTION DOC] Runs the L1-L4 push-readiness protocol for auth.host and namespace. Inputs:
+    # auth (RegistryAuth: host, kind, cred source/helper); namespace (registry path, e.g. GHCR org);
+    # keyword levels (subset of 1..4 to run, default all) and timeout. Behavior: L1 failure returns
+    # immediately; if L1 is skipped, reachable is assumed True and no challenge is known. L2
+    # resolves credentials and exchanges a token; on failure sets error and a registry-specific
+    # helper_hint (gh/aws/ az/gcloud/docker login command) and returns. L3 sets can_read; only a
+    # hard "fail" stops. L4 is skipped with "token lacks push scope" when L2 ran and its granted
+    # scopes lack push; otherwise it runs the write probe, and success also marks can_read True
+    # (inferred). Each early return sets elapsed_sec. Output: ProbeResult. Raises: nothing for HTTP
+    # failures (network errors are captured as results). Side effects: network requests, possible
+    # credential-helper subprocess and config file read.
     """Run the L1-L4 verification protocol against `auth.host` for `namespace`.
 
     `namespace` is the registry path component (e.g. `huggingface` for GHCR,
@@ -541,6 +621,11 @@ def select_best(
     *,
     require_write: bool = True,
 ) -> ProbeResult | None:
+    # [FUNCTION DOC] Chooses the preferred usable registry from probe results. Inputs: results (list
+    # of ProbeResult); keyword require_write (default True: needs is_pushable, else only
+    # authenticated). Ranks kinds GHCR < GCP_AR < ECR_PUBLIC < ECR_PRIVATE < ACR < LOCAL <
+    # DOCKER_HUB (unknown kinds last) and returns the lowest-ranked eligible result, or None if none
+    # are eligible.
     """Pick the highest-ranked pushable result.
 
     Preference: GHCR > GCP_AR > ECR_PUBLIC > ECR_PRIVATE > ACR > LOCAL > DOCKER_HUB.

@@ -1,3 +1,10 @@
+# [MODULE DOC] Options models for owned recipes. Core is PythonRepositoryProfile: an explicit
+# description of a Python repository's source/test layout, Docker build (base image, dependencies,
+# install commands, pinned Hugging Face Hub assets) and test resources, with validators that block
+# path traversal, option injection and multi-line build directives. Recipe-specific option models
+# (SWE-smith, PR, reconstruction, CodeMidas, history-mining, R2E, env repair, terminal synthesis,
+# DataArc, Scaler, task evolution, FrontierSmith) extend it or BaseModel with bounded numeric
+# fields. All forbid extra fields.
 """Explicit Python repository profile for the procedural SWE-smith recipe."""
 
 from __future__ import annotations
@@ -9,6 +16,10 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 
 class HubAsset(BaseModel):
+    # [CLASS DOC] Pinned public Hugging Face Hub model/tokenizer data fetched during remote image
+    # build: repo_id ("org/name"), revision (40-hex commit), filenames (1-64 exact files), max_bytes
+    # (default 256 MiB, max 2 GiB), purpose (10-500 chars), cache_aliases (up to 8 extra repo ids
+    # for the cache).
     """Public model/tokenizer data fetched during remote image construction."""
 
     model_config = ConfigDict(extra="forbid")
@@ -22,6 +33,9 @@ class HubAsset(BaseModel):
     @field_validator("cache_aliases")
     @classmethod
     def cache_names(cls, values):
+        # [FUNCTION DOC] Field validator for cache_aliases: requires unique values, each a valid
+        # "name" or "org/name" id (allowed charset, segments <=96 chars, not ending in ".", "-" or
+        # ".git", no "--" or ".."). Returns the sorted list; raises ValueError otherwise.
         import re
 
         if len(set(values)) != len(values):
@@ -42,6 +56,10 @@ class HubAsset(BaseModel):
     @field_validator("filenames")
     @classmethod
     def data_files(cls, values):
+        # [FUNCTION DOC] Field validator for filenames: requires uniqueness, a safe relative path
+        # under environment/assets/ (emitter.bundle.relative_asset_path, which may raise), not
+        # absolute, an allowed data suffix (.json .txt .model .tiktoken .jinja .safetensors .bin)
+        # and no glob characters. Returns the sorted list; raises ValueError otherwise.
         from pathlib import PurePosixPath
 
         from repo2rlenv.emitter.bundle import relative_asset_path
@@ -66,6 +84,12 @@ class HubAsset(BaseModel):
 
 
 class PythonRepositoryProfile(BaseModel):
+    # [CLASS DOC] Explicit Python repository profile: source_paths and test_paths (min 1),
+    # private_test_paths, pytest_args, test_selectors, public_exclude, materialize_document_links
+    # (<=32), base_image (python:3.12-slim), use_system_site_packages, dependencies (default pytest
+    # pin), hub_assets (<=8), install_command (pip editable install), task_install_command,
+    # freeze_git_version, test_timeout_sec (90, 5-600), exclude_candidate_ids, test_cpus (1-16,
+    # strict int), test_memory_mb (2048, 128-65536, strict int).
     model_config = ConfigDict(extra="forbid")
     source_paths: list[str] = Field(min_length=1)
     test_paths: list[str] = Field(min_length=1)
@@ -88,6 +112,10 @@ class PythonRepositoryProfile(BaseModel):
 
     @model_validator(mode="after")
     def pinned_asset_dependencies(self):
+        # [FUNCTION DOC] After-validator applied when hub_assets is non-empty: requires a
+        # "huggingface-hub==" pin in dependencies (case/underscore-insensitive), one asset per
+        # repo_id, no collisions among cache names (repo ids and aliases with "/" mapped to "--"),
+        # and total max_bytes <= 2 GiB. Returns self; raises ValueError otherwise.
         if self.hub_assets:
             if not any(
                 item.lower().replace("_", "-").startswith("huggingface-hub==")
@@ -117,6 +145,9 @@ class PythonRepositoryProfile(BaseModel):
     )
     @classmethod
     def safe_paths(cls, values: list[str]) -> list[str]:
+        # [FUNCTION DOC] Field validator for path lists: each value must be a safe relative path
+        # under environment/ (relative_asset_path) and must not start with "-". Returns the list
+        # unchanged; raises ValueError otherwise.
         from repo2rlenv.emitter.bundle import relative_asset_path
 
         for value in values:
@@ -128,6 +159,8 @@ class PythonRepositoryProfile(BaseModel):
     @field_validator("materialize_document_links")
     @classmethod
     def document_links_only(cls, values: list[str]) -> list[str]:
+        # [FUNCTION DOC] Field validator for materialize_document_links: values must be unique and
+        # end in .md, .rst or .txt (case-insensitive). Raises ValueError otherwise.
         from pathlib import PurePosixPath
 
         if len(set(values)) != len(values) or any(
@@ -143,6 +176,9 @@ class PythonRepositoryProfile(BaseModel):
     )
     @classmethod
     def no_directive_injection(cls, value):
+        # [FUNCTION DOC] Field validator for base_image, install commands, dependencies and
+        # pytest_args: passes None through; every string (or list item) must be non-blank and
+        # contain no newline or carriage return. Returns the value; raises ValueError otherwise.
         if value is None:
             return value
         items = value if isinstance(value, list) else [value]
@@ -152,6 +188,8 @@ class PythonRepositoryProfile(BaseModel):
 
 
 class SWESmithOptions(PythonRepositoryProfile):
+    # [CLASS DOC] Options for repo_mutate/swe_smith: profile plus seed 24, max_candidates 100,
+    # max_per_entity 2, target 20.
     seed: int = 24
     max_candidates: int = Field(default=100, ge=1, le=1000)
     max_per_entity: int = Field(default=2, ge=1, le=10)
@@ -159,12 +197,16 @@ class SWESmithOptions(PythonRepositoryProfile):
 
 
 class PRRecipeOptions(PythonRepositoryProfile):
+    # [CLASS DOC] Options for pr_to_env/swe_gen: profile plus target 20, max_candidates 40,
+    # force_generate_instruction False.
     target: int = Field(default=20, ge=1, le=1000)
     max_candidates: int = Field(default=40, ge=1, le=1000)
     force_generate_instruction: bool = False
 
 
 class ReconstructionOptions(PythonRepositoryProfile):
+    # [CLASS DOC] Options for repo_reconstruct/swe_flow: profile plus target 20, max_candidates 60,
+    # trace_max_tests 128 (20-1000), trace_seed 24.
     target: int = Field(default=20, ge=1, le=1000)
     max_candidates: int = Field(default=60, ge=1, le=1000)
     trace_max_tests: int = Field(default=128, ge=20, le=1000)
@@ -172,6 +214,11 @@ class ReconstructionOptions(PythonRepositoryProfile):
 
 
 class CodeMidasOptions(PythonRepositoryProfile):
+    # [CLASS DOC] Options for the CodeMidas recipe: profile with fixed generated test path
+    # ["test_codemidas_generated.py"] and pytest_args ["--noconftest"], plus target 5,
+    # max_candidates 12, max_per_module 2, min_implementation_statements 5, seed 24, optional
+    # stack_manifest, stack_materialization inline|hydrated, max_rounds 3, max_turns 16,
+    # candidate_budget_usd 2.0, and author/reviewer model choices.
     """Paper-inspired construction with explicit, separately metered screening."""
 
     test_paths: list[str] = Field(default_factory=lambda: ["test_codemidas_generated.py"])
@@ -191,12 +238,18 @@ class CodeMidasOptions(PythonRepositoryProfile):
 
     @model_validator(mode="after")
     def generated_test_contract(self):
+        # [FUNCTION DOC] After-validator: requires test_paths to be exactly the generated file and
+        # test_selectors empty. Returns self; raises ValueError otherwise.
         if self.test_paths != ["test_codemidas_generated.py"] or self.test_selectors:
             raise ValueError("CodeMidas runs only its independently constructed private verifier")
         return self
 
 
 class HistoryRecipeOptions(PythonRepositoryProfile):
+    # [CLASS DOC] Shared options for history-mining recipes: profile plus target 20, max_candidates
+    # 80, history_limit 2000, limits on non-test files (5), edited lines (200), patch length
+    # (10000), require_bug_edit/require_test_match (False), and entity-count limits (added 1, edited
+    # 4, statement 6).
     target: int = Field(default=20, ge=1, le=1000)
     max_candidates: int = Field(default=80, ge=1, le=1000)
     history_limit: int = Field(default=2000, ge=1, le=10000)
@@ -211,23 +264,32 @@ class HistoryRecipeOptions(PythonRepositoryProfile):
 
 
 class R2EGymOptions(HistoryRecipeOptions):
+    # [CLASS DOC] History options for commit_runtime/r2e_gym with require_bug_edit and
+    # require_test_match defaulting to True.
     require_bug_edit: bool = True
     require_test_match: bool = True
 
 
 class SWENextOptions(HistoryRecipeOptions):
+    # [CLASS DOC] History options for pr_runtime/swe_next plus max_prs 300 and an explicit
+    # pr_numbers list.
     max_prs: int = Field(default=300, ge=1, le=2000)
     pr_numbers: list[int] = Field(default_factory=list)
 
     @field_validator("pr_numbers")
     @classmethod
     def positive_unique_prs(cls, values):
+        # [FUNCTION DOC] Field validator: PR numbers must be >= 1 and unique. Returns the list;
+        # raises ValueError otherwise.
         if any(number < 1 for number in values) or len(set(values)) != len(values):
             raise ValueError("PR numbers must be positive and unique")
         return values
 
 
 class R2EOptions(PythonRepositoryProfile):
+    # [CLASS DOC] Options for equivalence_tests/r2e: profile plus target 20, max_candidates 60,
+    # max_rounds 3, min_branch_coverage 0.8, seed 24, dependencies defaulting to pytest and coverage
+    # pins.
     target: int = Field(default=20, ge=1, le=1000)
     max_candidates: int = Field(default=60, ge=1, le=1000)
     max_rounds: int = Field(default=3, ge=1, le=5)
@@ -237,6 +299,8 @@ class R2EOptions(PythonRepositoryProfile):
 
 
 class EnvironmentRepairOptions(PythonRepositoryProfile):
+    # [CLASS DOC] Options for env_repair/cli_gym: profile plus target 20, max_candidates 40,
+    # max_rounds 3, seed 24, and directions (non-empty list of environment-breaking themes).
     target: int = Field(default=20, ge=1, le=1000)
     max_candidates: int = Field(default=40, ge=1, le=1000)
     max_rounds: int = Field(default=3, ge=1, le=5)
@@ -254,6 +318,8 @@ class EnvironmentRepairOptions(PythonRepositoryProfile):
 
 
 class TerminalSynthesisOptions(BaseModel):
+    # [CLASS DOC] Options for terminal task authoring: target 20, max_candidates 40, max_repairs 2,
+    # seed 24, max_tokens 10000, test_timeout_sec 120, review_drafts, exclude_seed_sha256.
     """Bounds for terminal task authoring and its executable repair loop."""
 
     model_config = ConfigDict(extra="forbid")
@@ -268,10 +334,14 @@ class TerminalSynthesisOptions(BaseModel):
 
 
 class RecordingReconstructionOptions(TerminalSynthesisOptions):
+    # [CLASS DOC] Terminal synthesis options plus min_score 4 (0-12) for terminal_reconstruct
+    # recordings.
     min_score: int = Field(default=4, ge=0, le=12)
 
 
 class DataArcOptions(TerminalSynthesisOptions):
+    # [CLASS DOC] Terminal synthesis options plus DataArc strategies (few_shot/self_instruct/
+    # evol_instruct), evol_directions (in_depth/in_breadth) and samples_per_strategy 3.
     strategies: list[Literal["few_shot", "self_instruct", "evol_instruct"]] = Field(
         default_factory=lambda: ["few_shot", "self_instruct", "evol_instruct"], min_length=1
     )
@@ -282,6 +352,9 @@ class DataArcOptions(TerminalSynthesisOptions):
 
 
 class ScalerOptions(BaseModel):
+    # [CLASS DOC] Options for reasoning_synth/scaler: target 20, max_candidates 60, seed 24,
+    # difficulties (default 2..12 step 2), samples_per_difficulty 1, execution_timeout_sec 20,
+    # max_generator_attempts 3, exclude_instance_hashes.
     model_config = ConfigDict(extra="forbid")
     target: int = Field(default=20, ge=1, le=1000)
     max_candidates: int = Field(default=60, ge=1, le=1000)
@@ -295,12 +368,16 @@ class ScalerOptions(BaseModel):
     @field_validator("difficulties")
     @classmethod
     def nonnegative_unique_levels(cls, values):
+        # [FUNCTION DOC] Field validator: difficulty levels must be >= 0 and unique. Returns the
+        # list; raises ValueError otherwise.
         if any(level < 0 for level in values) or len(set(values)) != len(values):
             raise ValueError("Difficulty levels must be nonnegative and unique")
         return values
 
 
 class TaskEvolutionOptions(TerminalSynthesisOptions):
+    # [CLASS DOC] Terminal synthesis options plus evolution strategies (difficulty/context changes;
+    # default increase_difficulty, change_context, decrease_difficulty) and variants_per_parent 1.
     strategies: list[
         Literal[
             "increase_difficulty",
@@ -318,6 +395,9 @@ class TaskEvolutionOptions(TerminalSynthesisOptions):
 
 
 class FrontierSmithOptions(BaseModel):
+    # [CLASS DOC] Options for the FrontierSmith recipe: target 10, max_candidates 20, solutions 3,
+    # max_repairs 2, seed 42, min_divergence 0.3, min_score_spread 0.001, max_tokens 8192,
+    # rollout_tasks 1.
     model_config = ConfigDict(extra="forbid")
     target: int = Field(default=10, ge=1, le=1000)
     max_candidates: int = Field(default=20, ge=1, le=2000)
@@ -331,6 +411,8 @@ class FrontierSmithOptions(BaseModel):
 
     @model_validator(mode="after")
     def enough_candidates(self):
+        # [FUNCTION DOC] After-validator: max_candidates must be >= target. Returns self; raises
+        # ValueError otherwise.
         if self.max_candidates < self.target:
             raise ValueError("max_candidates must be at least target")
         return self

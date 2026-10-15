@@ -1,3 +1,8 @@
+# [MODULE DOC] Pushes a local Docker image to a remote OCI registry by shelling out to the docker
+# CLI (no docker-py dependency) and resolves the pushed image's registry-qualified digest from
+# RepoDigests. Idempotent: optionally skips the push when "docker manifest inspect" finds the ref
+# already exists. Public API: push_image, manifest_exists, ImagePushResult, PushError. Side effects:
+# docker subprocesses, network traffic to the registry, logging.
 """Push a local docker image to a remote OCI registry.
 
 Wraps the `docker` CLI rather than docker-py because:
@@ -23,11 +28,17 @@ logger = logging.getLogger(__name__)
 
 
 class PushError(Exception):
+    # [CLASS DOC] Exception raised by push_image when docker is unavailable, the local image is
+    # missing, or docker tag/push fails. The message includes truncated docker stderr.
     """Raised when `docker push` fails irrecoverably."""
 
 
 @dataclass(slots=True)
 class ImagePushResult:
+    # [CLASS DOC] Dataclass (slots) describing a push outcome: local_tag; remote_ref (target tag
+    # ref); digest (registry-qualified "host/path@sha256:..." or, if unresolvable, the tag ref
+    # itself); pushed (False when skipped because the manifest already existed); duration_sec
+    # (rounded to 0.01s).
     local_tag: str
     remote_ref: str
     digest: str  # full `host/path@sha256:...`
@@ -36,10 +47,14 @@ class ImagePushResult:
 
 
 def _docker_available() -> bool:
+    # [FUNCTION DOC] HELPER: True if a "docker" executable is on PATH.
     return shutil.which("docker") is not None
 
 
 def _run(args: list[str], *, timeout: int = 1800) -> subprocess.CompletedProcess[str]:
+    # [FUNCTION DOC] HELPER: Runs a command (list of args) via subprocess with captured UTF-8 text
+    # output, timeout seconds (default 1800), never raising on non-zero exit. Output:
+    # CompletedProcess. Raises subprocess.TimeoutExpired on timeout.
     """Run a docker subcommand, capturing output and never raising on nonzero."""
     return subprocess.run(
         args,
@@ -52,6 +67,9 @@ def _run(args: list[str], *, timeout: int = 1800) -> subprocess.CompletedProcess
 
 
 def manifest_exists(remote_ref: str) -> bool:
+    # [FUNCTION DOC] Returns True iff "docker manifest inspect <remote_ref>" exits 0 (60s timeout),
+    # i.e. the registry already has that manifest. Returns False when docker is not on PATH. Side
+    # effects: docker subprocess / registry network call.
     """`docker manifest inspect <ref>` returns 0 iff the registry already has it.
 
     Used for the idempotent-re-push optimization: skip the push entirely if
@@ -67,6 +85,16 @@ def manifest_exists(remote_ref: str) -> bool:
 
 
 def _resolve_repo_digest(remote_ref: str) -> str | None:
+    # [FUNCTION DOC] HELPER: Finds the registry-qualified digest for remote_ref via "docker image
+    # inspect <ref> --format {{json .RepoDigests}}". Ignores entries starting with "local/" or
+    # "local-". Returns the first digest prefixed by remote_ref's host component; otherwise the
+    # first digest whose bare path (remote_ref minus host, minus tag) matches "<path>@", prefixed
+    # with the host when the host is a Docker Hub alias (index.docker.io, registry-1.docker.io,
+    # docker.io). Output: str or None (inspect failure, invalid JSON, empty or no match). Side
+    # effect: docker subprocess.
+    # KNOWN ISSUE: the path/tag split uses the first "/" and first ":" after it, so a ref without a
+    # host (e.g. "user/img:tag") treats the user as the host, and the Docker Hub branch only applies
+    # when the host is literally one of the listed aliases.
     """Return the registry-qualified digest for `remote_ref`, or None.
 
     `docker image inspect <ref>` exposes RepoDigests AFTER a push (or pull).
@@ -124,6 +152,16 @@ def push_image(
     timeout: int = 1800,
     skip_if_exists: bool = True,
 ) -> ImagePushResult:
+    # [FUNCTION DOC] Tags local_tag as remote_ref, pushes it, and resolves the digest. Inputs:
+    # local_tag, remote_ref; keyword timeout (push timeout seconds, default 1800) and skip_if_exists
+    # (default True). Steps: require docker on PATH; verify the local image exists via image
+    # inspect; if skip_if_exists and manifest_exists, return pushed=False with the resolved digest
+    # (or the ref); else docker tag, docker push, then resolve the digest, falling back to the tag
+    # ref with a logged warning. Output: ImagePushResult. Raises PushError (no docker, local image
+    # missing, tag or push failure) and subprocess.TimeoutExpired. Side effects: docker
+    # subprocesses, registry upload, logging.
+    # KNOWN ISSUE: the docstring says a non-running docker daemon raises PushError; it does, but via
+    # the image-inspect failure, so the message misleadingly reports the local image as not found.
     """Tag → push → resolve digest. Returns the canonical registry-qualified ref.
 
     Raises `PushError` if the local image isn't present, the docker daemon

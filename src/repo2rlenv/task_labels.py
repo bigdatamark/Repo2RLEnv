@@ -1,3 +1,8 @@
+# [MODULE DOC] CLI subcommand "tasks" for advisory evaluation labels on generated Harbor tasks:
+# "show" one task's label, "list" labels of all tasks (dirs with task.toml) under a path with an
+# optional status filter, and "label" to write a labeled copy of a task to a new directory (from a
+# saved quality-loop result or explicit status/stage/reasons). Output via the Rich console as a
+# table or JSON. Labels describe evidence; they are not acceptance.
 """CLI for retaining, filtering, and diagnosing generated Harbor tasks."""
 
 from __future__ import annotations
@@ -14,6 +19,15 @@ from repo2rlenv.ui.errors import report_error
 
 
 def command(args) -> int:
+    # [FUNCTION DOC] Handler for the "tasks" subcommand. For "label": builds an EvaluationLabel
+    # either from args.quality_result (label_from_quality) or from
+    # args.status/stage/reason_code/detail/provenance (a non-"unverified" status requires reason
+    # codes and detail; defaults reason ["validation_not_run"] and a generic detail; checked_at set
+    # only when reason codes given), writes a labeled copy to args.out, and reports it. For
+    # "show"/"list": reads each task's label (list walks task.toml files recursively, sorted,
+    # filtering by args.status). Prints rows as JSON (args.json) or a table plus the detail when
+    # exactly one row, and an advisory note. Output: exit code 0, or report_error's code on
+    # OSError/ValueError. Side effects: filesystem reads/writes, console output.
     try:
         if args.tasks_action == "label":
             if args.quality_result:
@@ -74,6 +88,10 @@ def command(args) -> int:
 
 
 def add_tasks_parser(subparsers):
+    # [FUNCTION DOC] Registers the "tasks" argparse subcommand on subparsers with actions
+    # "show"/"list" (positional path, --json, list-only --status) and "label" (task, required --out,
+    # mutually exclusive --quality-result or --status, --stage, repeatable --reason-code, --detail,
+    # --provenance, --json), each dispatching to command via set_defaults(func=...). Returns None.
     parser = subparsers.add_parser("tasks", help="Retain and inspect Harbor evaluation labels")
     actions = parser.add_subparsers(dest="tasks_action", required=True)
     for name in ("show", "list"):

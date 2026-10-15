@@ -1,3 +1,6 @@
+# [MODULE DOC] Freezes public GitHub PR evidence (head/base SHAs, Python source diff, file
+# inventory) before any paid operation, and re-validates such frozen records later without network
+# access.
 """Freeze public PR evidence before any paid operation."""
 
 from __future__ import annotations
@@ -11,6 +14,16 @@ from repo2rlenv.github import _run_gh, fetch_pr_diff
 
 
 def validate_source_records(records: list[dict], urls: list[str]) -> list[dict]:
+    # [FUNCTION DOC] Validates frozen PR records against panel URLs without fetching anything.
+    # Inputs: records (list of source dicts as produced by resolve_pr); urls (list of PR URLs, order
+    # matters). Checks per record: URL matches https://github.com/<owner>/<repo>/pull/<n> and
+    # record.repo matches it; base and head are 40-char lowercase hex; source_diff is a non-empty
+    # string; id equals the first 12 hex chars of SHA-256 of the sorted JSON of {url, head,
+    # source_diff}; source_files is non-empty, unique, relative, has no '..', and only .py files;
+    # source_operations covers exactly those paths with operation added/modified; the diff has one
+    # 'diff --git a/X b/X' header per source file, with same-name headers covering exactly the
+    # paths; workspace_strategy is 'head_minus_source_patch'.
+    # Output: the same records list. Raises ValueError on the first failed check.
     """Check frozen intake identities without fetching or executing target code."""
     if [row.get("url") for row in records] != urls:
         raise ValueError("Frozen PR records must match panel URLs in order")
@@ -52,6 +65,20 @@ def validate_source_records(records: list[dict], urls: list[str]) -> list[dict]:
 
 
 def resolve_pr(url: str) -> dict:
+    # [FUNCTION DOC] Fetches and freezes a merged public GitHub PR via the gh CLI.
+    # Input: url (https://github.com/<owner>/<repo>/pull/<n>, optional trailing slash). Raises
+    # ValueError if the URL does not match, the PR is unmerged or its base repo is private, a non-
+    # test .py file was renamed/removed, any non-test native source
+    # (.c/.cc/.cpp/.h/.rs/.go/.js/.ts/.cu) changed, no Python source file changed, the source diff
+    # blocks do not cover exactly the source files, the paginated file inventory count differs from
+    # changed_files, or head/base SHAs changed during intake (force-push detection by re-reading the
+    # PR). Test files are those under test/tests/testing dirs, conftest.py or test_*.py.
+    # Output: dict with url (slash-stripped), head, source_diff (concatenated per-file diff blocks
+    # of the source files), id (12-hex SHA-256 identity), repo, base, title, created_at, merged_at,
+    # body (truncated to 10000 chars), source_files, source_operations, changed_files
+    # (filename/status/ additions/deletions), full_diff and workspace_strategy
+    # 'head_minus_source_patch'.
+    # Side effects: network via gh api (3 calls) and fetch_pr_diff.
     match = re.fullmatch(r"https://github.com/([\w.-]+)/([\w.-]+)/pull/([1-9][0-9]*)/?", url)
     if not match:
         raise ValueError("Use a public GitHub PR URL")

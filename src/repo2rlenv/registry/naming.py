@@ -1,3 +1,9 @@
+# [MODULE DOC] Builds and parses OCI image references for bootstrap images pushed to a registry.
+# Shape: <registry_prefix>/<prefix>-<owner>-<repo slug>:<sha12>[-<opts8>], where opts8 is the first
+# 8 chars of the bootstrap cache options hash (empty hash => no suffix). Enforces OCI rules:
+# lowercase name components matching the OCI path-component regex, tag <=128 chars, full ref <=255
+# chars. Pure string logic: no I/O, no global state. Constants: DEFAULT_BOOTSTRAP_PREFIX
+# ("r2e-bootstrap").
 """Slug + tag construction for the bootstrap image reference.
 
 Final shape (default, when GHCR is the chosen registry):
@@ -27,6 +33,11 @@ _OCI_TAG_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$")
 
 
 def slugify_repo(owner: str, name: str, *, prefix: str = DEFAULT_BOOTSTRAP_PREFIX) -> str:
+    # [FUNCTION DOC] Builds the image-name component "<prefix>-<owner>-<name>" in OCI-safe form.
+    # Lowercases, collapses every run of characters outside [a-z0-9] into one "-", strips
+    # leading/trailing "-", "." and "_", truncates to 100 chars (re-stripping trailing separators).
+    # Inputs: owner, name (non-empty str); prefix (keyword, default DEFAULT_BOOTSTRAP_PREFIX).
+    # Output: slug str. Raises ValueError if owner/name empty or the slug fails the OCI name regex.
     """Build the image *name* portion: `<prefix>-<owner>-<repo>`, slugified.
 
     Lowercase, non-`[a-z0-9-]` collapsed to a single `-`, trimmed.
@@ -54,6 +65,12 @@ def build_image_ref(
     options_hash: str = "",
     prefix: str = DEFAULT_BOOTSTRAP_PREFIX,
 ) -> str:
+    # [FUNCTION DOC] Composes the full reference "<registry_prefix>/<slug>:<tag>". registry_prefix
+    # is a host or host/namespace (whitespace and trailing "/" trimmed). Tag is the first 12 chars
+    # of commit_sha (stripped, lowercased), plus "-" and the first 8 chars of options_hash when that
+    # is non-empty. Slug comes from slugify_repo(owner, name, prefix=prefix). All args keyword-only.
+    # Output: ref str. Raises ValueError if registry_prefix or commit_sha is empty, the tag fails
+    # the OCI tag regex, the ref exceeds 255 chars, or slugify_repo fails. Side effects: none.
     """Compose the full `host[/namespace]/<image-name>:<tag>` reference.
 
     `registry_prefix` is a registry-with-namespace string like:
@@ -85,6 +102,10 @@ def build_image_ref(
 
 
 def split_ref(ref: str) -> tuple[str, str, str]:
+    # [FUNCTION DOC] Splits "host[/namespace]/<image>:<tag>" into (registry_prefix, image, tag).
+    # Partitions on the LAST ":" for the tag, then on the last "/" of the remainder for the image
+    # name. Raises ValueError if there is no ":" or the part before the tag has no "/". Does not
+    # handle digest ("@sha256:") references specially. Side effects: none.
     """Split `host[/namespace]/<image>:<tag>` into (registry_prefix, image, tag).
 
     Inverse of `build_image_ref` minus the slugify step. Useful for the

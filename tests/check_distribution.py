@@ -1,3 +1,9 @@
+# [MODULE DOC] Standalone release check (not a pytest module) for built distributions: given a DIST
+# dir with exactly one wheel and one sdist, verifies license metadata and files, that every package
+# resource under src/repo2rlenv is byte-identical in both archives, that no
+# workspace/node_modules/.env/ references paths leak into the wheel, and that the installed base
+# package's CLI discovers recipes and emits JSON errors without optional SDKs. Run with the
+# installed wheel's Python; prints JSON via console.json. No remote calls.
 """Check release archives and a base-only wheel install without optional SDKs.
 
 Run with the freshly installed wheel's Python: tests/check_distribution.py DIST.
@@ -19,6 +25,15 @@ from pathlib import Path
 
 
 def check(dist: Path) -> dict:
+    # [FUNCTION DOC] Input: dist (Path containing exactly one .whl and one .tar.gz, else
+    # AssertionError). Reads pyproject.toml's [project]; asserts wheel METADATA License-Expression
+    # equals project license and License-File entries equal the expanded license-files globs; each
+    # license file must match in wheel dist-info/licenses and in the sdist. Every non-cache file
+    # under src/repo2rlenv must be identical in wheel and sdist; wheel paths must not contain
+    # workspace/node_modules/.env/references; sdist PKG-INFO license fields must match. Then runs
+    # CLI checks (pipelines list/describe, and generate/tasksmith/quality error paths expecting exit
+    # 2 with {error, message}). Returns a dict with package_files, license_files, recipe_discovery
+    # counts and status 'passed'. Side effects: reads archives, runs subprocesses.
     root = Path(__file__).resolve().parents[1]
     project = tomllib.loads((root / "pyproject.toml").read_text())["project"]
     wheels, sources = list(dist.glob("*.whl")), list(dist.glob("*.tar.gz"))
@@ -56,6 +71,9 @@ def check(dist: Path) -> dict:
         assert set(pkg_info.get_all("License-File", [])) == license_paths
 
     def cli(*args: str, expected: int = 0):
+        # [FUNCTION DOC] HELPER: Runs 'python -m repo2rlenv.cli <args>' with the current
+        # interpreter, cwd the dist dir, PYTHON_DOTENV_DISABLED=1, 30s timeout; asserts returncode
+        # equals expected (default 0) and returns stdout parsed as JSON.
         result = subprocess.run(
             [sys.executable, "-m", "repo2rlenv.cli", *args],
             capture_output=True,

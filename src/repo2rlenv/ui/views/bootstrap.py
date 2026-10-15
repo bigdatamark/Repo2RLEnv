@@ -1,3 +1,8 @@
+# [MODULE DOC] Live view for the bootstrap agent loop. Stacks a header (repo@ref, model, language,
+# base image, max iterations), a phases table (clone/pull/sandbox/agent/commit/push), a steps table
+# of agent turns, a 'Now' panel, the latest thought and latest tool output (last 14 lines,
+# duplicates collapsed), a stats line (iterations, tokens, cost, elapsed) and an optional outcome
+# panel. Driven by runner callbacks (on_phase, on_thinking, on_executing, on_turn, set_outcome).
 """Bootstrap live view — built on shared UI primitives.
 
 Six panels stacked top-to-bottom:
@@ -44,6 +49,9 @@ _PHASE_GLYPH = {
 
 @dataclass
 class PhaseState:
+    # [CLASS DOC] Dataclass for one bootstrap phase: name, status (pending | running | done |
+    # skipped | failed, default pending), detail text, started_at (monotonic seconds) and
+    # duration_sec.
     name: str
     status: str = "pending"  # pending | running | done | skipped | failed
     detail: str = ""
@@ -52,6 +60,9 @@ class PhaseState:
 
 
 class BootstrapView:
+    # [CLASS DOC] Redrawing view of a bootstrap run; use as a context manager. Accumulates agent
+    # turns, token and cost totals, current status/action, phase states and an outcome panel; every
+    # callback re-renders the Live when it is active.
     """Live, redrawing view of the bootstrap agent loop. Use as a context manager."""
 
     def __init__(
@@ -64,6 +75,9 @@ class BootstrapView:
         language: str,
         base_image: str,
     ):
+        # [FUNCTION DOC] Stores repo, ref, model, max_iterations, language and base_image (all
+        # keyword-only), initializes empty turn list, zero totals, start time, status 'starting', a
+        # PhaseState per phase, a spinner and no Live yet.
         self.repo = repo
         self.ref = ref
         self.model = model
@@ -89,11 +103,17 @@ class BootstrapView:
     # ----- context manager ----------------------------------------------------
 
     def __enter__(self) -> BootstrapView:
+        # [FUNCTION DOC] Starts live_view with the initial render and keeps its context manager and
+        # Live object.
+        # Output: self.
         self._live_ctx = live_view(self._render())
         self._live = self._live_ctx.__enter__()
         return self
 
     def __exit__(self, *exc) -> None:
+        # [FUNCTION DOC] Sets status to 'done' and renders a final frame if a Live exists, then
+        # exits the live_view context (passing exception info). Output: None (does not suppress
+        # exceptions).
         if self._live is not None:
             self.status = "done"
             self._live.update(self._render())
@@ -103,6 +123,12 @@ class BootstrapView:
     # ----- runner callbacks ---------------------------------------------------
 
     def on_phase(self, phase: str, details: dict) -> None:
+        # [FUNCTION DOC] Handles a runner phase event. 'detected' updates language/base_image from
+        # details. '<phase>_start' marks running, records start time and detail; '_progress' keeps
+        # running (setting the start time if missing) and updates detail; '_done' marks done with
+        # duration if started; '_skipped' / '_failed' set that status and detail. Unknown events
+        # change nothing. Always re-renders. Inputs: phase (str); details (dict, optional 'detail'
+        # key, etc.).
         """Receive runner phase notifications."""
         # Special "detected" event: update header language/base
         if phase == "detected":
@@ -143,17 +169,24 @@ class BootstrapView:
         self._refresh()
 
     def on_thinking(self, step: int) -> None:
+        # [FUNCTION DOC] Marks status 'thinking', clears the current action, sets the agent phase
+        # running, re-renders. step is unused.
         self.status = "thinking"
         self.current_action = None
         self.phases["agent"].status = "running"
         self._refresh()
 
     def on_executing(self, step: int, action: AgentAction) -> None:
+        # [FUNCTION DOC] Marks status 'executing' with the given action and re-renders. step is
+        # unused.
         self.status = "executing"
         self.current_action = action
         self._refresh()
 
     def on_turn(self, turn: AgentTurn, total_cost: float) -> None:
+        # [FUNCTION DOC] Appends a completed AgentTurn, sets total_cost to the runner's cumulative
+        # value, adds the turn's prompt/completion tokens, returns to 'thinking' with no action, re-
+        # renders.
         self.turns.append(turn)
         self.total_cost = total_cost
         self.total_tokens_in += turn.prompt_tokens
@@ -172,6 +205,10 @@ class BootstrapView:
         test_cmds: list[str] | None = None,
         reason: str = "",
     ) -> None:
+        # [FUNCTION DOC] Builds the outcome panel. On success marks the agent phase done and shows
+        # image_digest, image_tag and the '&&'-joined rebuild_cmds/test_cmds when provided; on
+        # failure shows reason in a red panel and flips every running phase to failed. Sets status
+        # 'done' and re-renders.
         if success:
             self.phases["agent"].status = "done"
             body = Text()
@@ -197,10 +234,13 @@ class BootstrapView:
     # ----- rendering ----------------------------------------------------------
 
     def _refresh(self) -> None:
+        # [FUNCTION DOC] HELPER: Updates the Live with a new render when a Live is active.
         if self._live is not None:
             self._live.update(self._render())
 
     def _render(self) -> RenderableType:
+        # [FUNCTION DOC] HELPER: Returns a Group of header, phases, steps, now, thought, output and
+        # stats sections, plus the outcome panel when set.
         parts: list[RenderableType] = [
             self._header_panel(),
             self._phases_panel(),
@@ -215,6 +255,8 @@ class BootstrapView:
         return Group(*parts)
 
     def _header_panel(self) -> Panel:
+        # [FUNCTION DOC] HELPER: Builds the full-width header Panel: tool name, repo@first 12 chars
+        # of ref and model, then language, base image and max iterations.
         h = Text()
         h.append("r2e-bootstrap ", style=STYLE.HEADER)
         h.append("· ", style=STYLE.DIM)
@@ -231,6 +273,9 @@ class BootstrapView:
         return Panel(Group(h, meta), border_style=STYLE.PANEL_INFO, expand=True)
 
     def _phases_panel(self) -> Panel:
+        # [FUNCTION DOC] HELPER: Builds the Phases panel table: status icon (check, spinner, cross,
+        # or pending dot for skipped/pending), phase emoji, name, detail (placeholder
+        # '(skipped)'/'(pending)' when empty) and duration in seconds when non-zero.
         table = Table(show_header=False, show_edge=False, pad_edge=False, box=None, expand=True)
         table.add_column("", width=2)  # icon
         table.add_column("", width=3)  # phase emoji
@@ -270,6 +315,8 @@ class BootstrapView:
         return Panel(table, title="[bold]Phases[/bold]", border_style=STYLE.PANEL_DIM, expand=True)
 
     def _status_icon(self, action_name: str) -> Text:
+        # [FUNCTION DOC] HELPER: Returns the step icon Text for an action name: green check for
+        # SAVE_SETUP, red cross for GIVE_UP, warning for INVALID, plain green check otherwise.
         if action_name == "SAVE_SETUP":
             return Text(GLYPH.SUCCESS, style=STYLE.SUCCESS)
         if action_name == "GIVE_UP":
@@ -279,6 +326,9 @@ class BootstrapView:
         return Text(GLYPH.SUCCESS, style="green")
 
     def _steps_panel(self) -> Panel:
+        # [FUNCTION DOC] HELPER: Builds the Steps panel: a placeholder row before the first turn,
+        # then one row per turn with icon, 1-based step, styled action name, input (newlines shown
+        # as a return symbol, ellipsized), duration and cost ('—' when zero).
         table = Table(
             show_header=True,
             header_style="bold magenta",
@@ -317,6 +367,9 @@ class BootstrapView:
         return Panel(table, title="[bold]Steps[/bold]", border_style=STYLE.PANEL_DIM, expand=True)
 
     def _current_step_panel(self) -> Panel:
+        # [FUNCTION DOC] HELPER: Builds the 'Now' panel: spinner + 'thinking...' or 'executing
+        # <action> -> <first 120 chars of input>', 'done', or 'idle', labelled with the next step
+        # number.
         step_num = len(self.turns) + 1
         if self.status == "thinking":
             label = Text()
@@ -341,6 +394,8 @@ class BootstrapView:
         return Panel(renderable, title="[bold]Now[/bold]", border_style="yellow", expand=True)
 
     def _latest_thought_panel(self) -> Panel:
+        # [FUNCTION DOC] HELPER: Panel with the last turn's thought, or a placeholder when there are
+        # no turns or the thought is empty.
         if not self.turns:
             text = Text("(none yet)", style=f"{STYLE.DIM} italic")
         else:
@@ -350,6 +405,8 @@ class BootstrapView:
         )
 
     def _latest_output_panel(self) -> Panel:
+        # [FUNCTION DOC] HELPER: Panel with the last turn's observation, consecutive duplicate lines
+        # collapsed, keeping the last 14 lines with an elided-count prefix when longer.
         if not self.turns:
             body: RenderableType = Text("(no tool output yet)", style=f"{STYLE.DIM} italic")
         else:
@@ -366,6 +423,9 @@ class BootstrapView:
         )
 
     def _stats_line(self) -> Padding:
+        # [FUNCTION DOC] HELPER: Returns a padded one-line summary: iterations used/max, input and
+        # output tokens in thousands, cost (highlighted when > 0) and elapsed seconds since
+        # construction.
         elapsed = time.monotonic() - self.start_time
         line = Text()
         line.append("  iter ", style=STYLE.DIM)
@@ -387,6 +447,8 @@ class BootstrapView:
 
 
 def _dedupe_consecutive(text: str) -> str:
+    # [FUNCTION DOC] HELPER: Collapses runs of identical consecutive lines into '<line> (×N)' and
+    # returns the joined text (trailing newline not preserved).
     """Collapse runs of identical lines into '<line> (×N)'."""
     out = []
     last = None
@@ -416,6 +478,9 @@ def bootstrap_view_or_plain(
     base_image: str,
     force_plain: bool = False,
 ) -> Iterator[BootstrapView | None]:
+    # [FUNCTION DOC] Context manager yielding a BootstrapView (entered) when Rich is appropriate, or
+    # None when force_plain is True or should_use_rich() is False. Keyword inputs mirror
+    # BootstrapView plus force_plain (default False).
     """Yield a BootstrapView if Rich is appropriate, else None (plain mode)."""
     if force_plain or not should_use_rich():
         yield None

@@ -1,3 +1,8 @@
+# [MODULE DOC] Tests for registry.integration.prepare_dataset_for_push and its helpers. Probe, push,
+# registry selection, recipe loading and GHCR visibility are monkeypatched; tests build fake
+# runtime/text-only task dirs in tmp_path and assert mode selection (local_only, inline_dockerfile,
+# registry), in-place Dockerfile/task.toml rewrites, reproducibility metadata, multi-image handling
+# and error/warning behaviour.
 """Integration tests for `registry.integration.prepare_dataset_for_push`.
 
 We stub the probe + push primitives and verify:
@@ -39,6 +44,11 @@ def _write_runtime_task(
     pipeline: str = "pr_runtime",
     repo: str = "pallets/click",
 ) -> Path:
+    # [FUNCTION DOC] HELPER: Creates root/name as a runtime-shaped Harbor task: task.toml with
+    # [metadata.repo2env] (spec 0.1.0, pipeline, repo, ref) and a pipeline subtable naming
+    # bootstrap_ref, instruction.md, empty solution/patch.diff, environment/Dockerfile 'FROM
+    # <bootstrap_ref>' plus WORKDIR/RUN overlay, and tests/test.sh. Keyword args: bootstrap_ref
+    # (required), pipeline (default pr_runtime), repo (default pallets/click). Returns the task dir.
     task_dir = root / name
     task_dir.mkdir(parents=True)
     (task_dir / "task.toml").write_text(
@@ -77,6 +87,8 @@ bootstrap_image = "{bootstrap_ref}"
 
 
 def _write_text_only_task(root: Path, name: str) -> Path:
+    # [FUNCTION DOC] HELPER: Creates a pr_diff-shaped task (no environment/ dir) with task.toml,
+    # instruction.md and a minimal solution/patch.diff; returns its path.
     """pr_diff-shape task — no environment/ dir."""
     task_dir = root / name
     task_dir.mkdir(parents=True)
@@ -105,6 +117,9 @@ repo = "pallets/click"
 def _make_pushable_probe(
     host: str = "ghcr.io", kind: RegistryKind = RegistryKind.GHCR
 ) -> ProbeResult:
+    # [FUNCTION DOC] HELPER: Returns a ProbeResult for host/kind (default ghcr.io/GHCR) under
+    # namespace 'testorg' with all four levels checked and reachable/authenticated/read/write all
+    # True.
     return ProbeResult(
         host=host,
         kind=kind,
@@ -123,19 +138,27 @@ def _make_pushable_probe(
 
 
 class TestHelpers:
+    # [CLASS DOC] Unit tests for private integration helpers (tag parsing, Dockerfile FROM rewrite,
+    # task dir listing, bootstrap ref collection).
     def test_parse_local_tag(self) -> None:
+        # [FUNCTION DOC] _parse_local_tag splits 'local/r2e-bootstrap/owner__name:sha' into owner,
+        # name and sha.
         owner, name, sha = _parse_local_tag("local/r2e-bootstrap/pallets__click:a1b2c3d4e5f6")
         assert owner == "pallets"
         assert name == "click"
         assert sha == "a1b2c3d4e5f6"
 
     def test_parse_local_tag_with_opts(self) -> None:
+        # [FUNCTION DOC] An options-hash suffix '__xxxx' after the sha is stripped from the returned
+        # sha.
         _owner, _name, sha = _parse_local_tag(
             "local/r2e-bootstrap/pallets__click:a1b2c3d4e5f6__01234567"
         )
         assert sha == "a1b2c3d4e5f6"
 
     def test_parse_local_tag_digest_form(self) -> None:
+        # [FUNCTION DOC] The '@sha256:<digest>' form parses owner/name and truncates the sha to 12
+        # chars.
         """Real-world inputs use the @sha256:... digest form, not :tag."""
         owner, name, sha = _parse_local_tag(
             "local/r2e-bootstrap/pallets__click@sha256:"
@@ -147,6 +170,7 @@ class TestHelpers:
         assert len(sha) == 12  # truncated for OCI tag-length safety
 
     def test_rewrite_dockerfile_from(self, tmp_path: Path) -> None:
+        # [FUNCTION DOC] _rewrite_dockerfile_from replaces the FROM image and reports a change.
         df = tmp_path / "Dockerfile"
         df.write_text("FROM local/foo:tag\nWORKDIR /x\n", encoding="utf-8")
         changed = _rewrite_dockerfile_from(df, "ghcr.io/u/n@sha256:abc")
@@ -154,6 +178,7 @@ class TestHelpers:
         assert df.read_text().startswith("FROM ghcr.io/u/n@sha256:abc")
 
     def test_list_task_dirs_skips_hidden(self, tmp_path: Path) -> None:
+        # [FUNCTION DOC] Hidden directories are ignored when listing task dirs.
         _write_runtime_task(tmp_path, "task-1", bootstrap_ref="local/x:1")
         (tmp_path / ".hidden").mkdir()
         (tmp_path / ".hidden" / "task.toml").write_text("ignored")
@@ -162,6 +187,8 @@ class TestHelpers:
         assert out[0].name == "task-1"
 
     def test_list_task_dirs_accepts_nested_tasks_layout(self, tmp_path: Path) -> None:
+        # [FUNCTION DOC] Tasks under a tasks/ subdirectory are discovered, sorted by name, skipping
+        # hidden dirs.
         tasks = tmp_path / "tasks"
         _write_runtime_task(tasks, "task-2", bootstrap_ref="local/x:1")
         _write_runtime_task(tasks, "task-1", bootstrap_ref="local/x:1")
@@ -174,12 +201,15 @@ class TestHelpers:
         assert all(path.parent == tasks for path in out)
 
     def test_list_task_dirs_combines_flat_and_nested_layouts(self, tmp_path: Path) -> None:
+        # [FUNCTION DOC] Flat and tasks/-nested task dirs are both returned.
         _write_runtime_task(tmp_path, "flat", bootstrap_ref="local/x:1")
         _write_runtime_task(tmp_path / "tasks", "nested", bootstrap_ref="local/x:1")
 
         assert [path.name for path in _list_task_dirs(tmp_path)] == ["flat", "nested"]
 
     def test_list_task_dirs_rejects_duplicate_task_ids(self, tmp_path: Path) -> None:
+        # [FUNCTION DOC] The same task name in flat and nested layouts raises RuntimeError naming
+        # the duplicate.
         _write_runtime_task(tmp_path, "duplicate", bootstrap_ref="local/x:1")
         _write_runtime_task(tmp_path / "tasks", "duplicate", bootstrap_ref="local/x:1")
 
@@ -187,6 +217,7 @@ class TestHelpers:
             _list_task_dirs(tmp_path)
 
     def test_bootstrap_image_refs(self, tmp_path: Path) -> None:
+        # [FUNCTION DOC] Tasks sharing a bootstrap image yield one distinct ref.
         _write_runtime_task(tmp_path, "task-1", bootstrap_ref="local/r2e:1")
         _write_runtime_task(tmp_path, "task-2", bootstrap_ref="local/r2e:1")
         refs = _bootstrap_image_refs(_list_task_dirs(tmp_path))
@@ -199,9 +230,12 @@ class TestHelpers:
 
 
 class TestModeSelection:
+    # [CLASS DOC] End-to-end mode selection of prepare_dataset_for_push under various probe and flag
+    # combinations.
     """The big one: given probe + flag combinations, the right mode wins."""
 
     def test_text_only_dataset_skipped(self, tmp_path: Path) -> None:
+        # [FUNCTION DOC] Text-only datasets give mode local_only and no rewrites.
         _write_text_only_task(tmp_path, "task-1")
         _write_text_only_task(tmp_path, "task-2")
         result = prepare_dataset_for_push(tmp_path, hf_owner="testorg")
@@ -209,6 +243,9 @@ class TestModeSelection:
         assert result.tasks_rewritten == 0
 
     def test_self_contained_public_base_takes_fast_path(self, tmp_path: Path) -> None:
+        # [FUNCTION DOC] Tasks on an allowlisted public base (python:3.12-slim) skip pushing, get
+        # mode inline_dockerfile/public/user_dockerfile, and each task.toml gets matching
+        # reproducibility fields including sha256 and line count.
         """pr_diff-shape Dockerfiles (FROM python:3.12-slim) skip image push
         AND get their reproducibility metadata rewritten to inline_dockerfile
         + public."""
@@ -233,6 +270,8 @@ class TestModeSelection:
     def test_custom_unqualified_image_not_self_contained(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        # [FUNCTION DOC] An unqualified non-allowlisted image does not take the fast path; with no
+        # registry and no cached recipe a RuntimeError ('inline mode requires') is raised.
         """An unqualified image that isn't on the public-base allowlist must
         NOT take the fast path. It looks "not local" by the legacy check,
         but the user might have meant a private registry or a hand-built
@@ -255,6 +294,8 @@ class TestModeSelection:
     def test_multi_image_registry_pushes_each_image(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        # [FUNCTION DOC] With a pushable probe, two distinct images are both pushed and each task's
+        # Dockerfile FROM points at its own digest.
         """Multi-image datasets are supported in REGISTRY mode too: each
         distinct image is pushed and each task is rewritten to ITS digest."""
         _write_runtime_task(
@@ -271,6 +312,8 @@ class TestModeSelection:
         pushed: list[str] = []
 
         def fake_push(local_ref, remote_ref, looks_local):
+            # [FUNCTION DOC] HELPER: Records local_ref and returns a mock push result with digest
+            # '<remote_ref>@sha256:deadbeef' and pushed True.
             pushed.append(local_ref)
             return mock.MagicMock(digest=f"{remote_ref}@sha256:deadbeef", pushed=True)
 
@@ -290,6 +333,8 @@ class TestModeSelection:
     def test_multi_image_allowed_in_inline_mode(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        # [FUNCTION DOC] In explicit inline mode each task bakes its own ref's recipe into its
+        # Dockerfile.
         """Multi-repo datasets (one image per repo) publish in inline mode —
         each task bakes its OWN bootstrap recipe."""
         _write_runtime_task(tmp_path, "task-1", bootstrap_ref="local/r2e:imgA")
@@ -312,12 +357,16 @@ class TestModeSelection:
     def test_registry_mode_selected_when_probe_passes(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        # [FUNCTION DOC] Pushable probe + successful push + visibility flip yields registry mode;
+        # Dockerfile rewritten to the digest, reproducibility mode registry, spec_version bumped to
+        # 0.2.0 and legacy bootstrap_image updated.
         _write_runtime_task(tmp_path, "task-1", bootstrap_ref="local/r2e:abc123def456")
 
         # Stub selection to return a pushable GHCR probe
         probe = _make_pushable_probe()
 
         def fake_select(hf_owner: str, **kwargs: Any) -> Any:
+            # [FUNCTION DOC] HELPER: Stub returning (probe, 'testorg', [probe]).
             return (probe, "testorg", [probe])
 
         monkeypatch.setattr(integ, "_select_verified_registry", fake_select)
@@ -358,6 +407,9 @@ class TestModeSelection:
     def test_auto_fallback_to_inline_when_no_registry(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        # [FUNCTION DOC] No registry -> inline_dockerfile with a fallback_reason mentioning registry
+        # credentials; recipe content and per-task overlay are both in the Dockerfile and task.toml
+        # records agent_replay source.
         _write_runtime_task(
             tmp_path, "task-1", bootstrap_ref="local/r2e-bootstrap/pallets__click:abc123def456"
         )
@@ -399,6 +451,8 @@ class TestModeSelection:
     def test_require_registry_hard_fails(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        # [FUNCTION DOC] require_registry=True without a registry raises RuntimeError ('no verified
+        # registry').
         _write_runtime_task(tmp_path, "task-1", bootstrap_ref="local/r2e:abc123def456")
         monkeypatch.setattr(
             integ, "_select_verified_registry", lambda *a, **kw: (None, "testorg", [])
@@ -407,6 +461,8 @@ class TestModeSelection:
             prepare_dataset_for_push(tmp_path, hf_owner="testorg", require_registry=True)
 
     def test_explicit_inline_flag(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        # [FUNCTION DOC] inline_dockerfile=True forces inline mode with user_dockerfile source and
+        # no fallback_reason.
         _write_runtime_task(tmp_path, "task-1", bootstrap_ref="local/r2e:abc123def456")
         monkeypatch.setattr(
             integ,
@@ -423,6 +479,8 @@ class TestModeSelection:
     def test_inline_fails_without_cached_recipe(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        # [FUNCTION DOC] Inline mode with no loadable recipe raises RuntimeError mentioning the
+        # bootstrap reconstructed Dockerfile.
         _write_runtime_task(tmp_path, "task-1", bootstrap_ref="local/r2e:abc123def456")
         monkeypatch.setattr(integ, "_load_bootstrap_recipe", lambda lr: (None, None))
         with pytest.raises(RuntimeError, match="bootstrap reconstructed Dockerfile"):
@@ -431,6 +489,8 @@ class TestModeSelection:
     def test_visibility_flip_failure_in_default_mode_warns(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        # [FUNCTION DOC] A failed GHCR visibility flip still publishes in registry mode but with
+        # image_visibility 'unknown' and a visibility warning.
         _write_runtime_task(tmp_path, "task-1", bootstrap_ref="local/r2e:abc123def456")
         probe = _make_pushable_probe()
         monkeypatch.setattr(
@@ -465,6 +525,8 @@ class TestModeSelection:
     def test_visibility_flip_failure_with_require_registry_hard_fails(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        # [FUNCTION DOC] With require_registry, a failed visibility flip raises RuntimeError
+        # mentioning visibility.
         _write_runtime_task(tmp_path, "task-1", bootstrap_ref="local/r2e:abc123def456")
         probe = _make_pushable_probe()
         monkeypatch.setattr(

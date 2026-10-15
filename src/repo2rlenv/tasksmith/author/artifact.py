@@ -1,3 +1,10 @@
+# [MODULE DOC] Durable, typed artifact authoring stages for Tasksmith. artifact_stage runs an author
+# agent that must produce a Pydantic-schema artifact through tools (submit_artifact full
+# replacement, revise_artifact JSON merge patch, optional shell and extra tools), validates it, and
+# commits it atomically to <root>/artifact.json keyed by a digest of all inputs, so completed stages
+# are reused and never re-rolled. In-progress workers leave operation.json and must be reconciled,
+# not replayed. Limits: MAX_ARTIFACT_BYTES 512000, MAX_PATCH_BYTES 64000, MAX_JSON_DEPTH 32; tool
+# protocol 2.
 from __future__ import annotations
 
 import asyncio
@@ -23,6 +30,11 @@ MAX_JSON_DEPTH = 32
 
 
 def _bounded_object(value: object, *, max_bytes: int) -> dict:
+    # [FUNCTION DOC] HELPER: Validates that value is a JSON-like object and returns a detached deep
+    # copy. Iteratively checks nesting depth <= MAX_JSON_DEPTH, string keys, and only
+    # str/int/float/bool/None/list/dict values; serializes (NaN disallowed) and enforces max_bytes
+    # on the UTF-8 size; returns the re-parsed copy. Raises ValueError on any violation (json may
+    # raise ValueError for NaN).
     """Validate JSON before recursive merging, and detach it from caller-owned objects."""
     if not isinstance(value, dict):
         raise ValueError("Expected a JSON object")
@@ -46,6 +58,10 @@ def _bounded_object(value: object, *, max_bytes: int) -> dict:
 
 
 def _merge_patch(target: object, patch: object) -> object:
+    # [FUNCTION DOC] HELPER: Applies an RFC 7396 JSON merge patch recursively: a non-dict patch
+    # replaces target; for dicts, null values delete keys and other values merge into a shallow copy
+    # of target (a non-dict target becomes empty). Output: new merged value; does not mutate target
+    # at top level.
     """RFC 7396 semantics; the public tool additionally requires an object root."""
     if not isinstance(patch, dict):
         return patch
@@ -59,6 +75,8 @@ def _merge_patch(target: object, patch: object) -> object:
 
 
 def canonical_digest(value: object) -> str:
+    # [FUNCTION DOC] Returns the SHA-256 hex digest of value's canonical JSON (sorted keys, compact
+    # separators, non-JSON values via str, NaN disallowed). Raises ValueError for NaN/inf.
     return hashlib.sha256(
         json.dumps(
             value, sort_keys=True, separators=(",", ":"), default=str, allow_nan=False
@@ -67,6 +85,9 @@ def canonical_digest(value: object) -> str:
 
 
 def save_json(path: Path, value: object) -> None:
+    # [FUNCTION DOC] Atomically writes value as indented JSON to path: creates parent dirs, writes
+    # to "<path>.tmp", flushes and fsyncs, then replaces path. Non-JSON values are stringified. Side
+    # effect: filesystem write.
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     with tmp.open("w") as stream:
@@ -96,6 +117,25 @@ async def artifact_stage[Artifact: BaseModel](
     validate: Callable[[Artifact], Awaitable[None]] | None = None,
     initial_draft_key: str | None = None,
 ) -> Artifact:
+    # [FUNCTION DOC] Runs (or restores) one durable authoring stage and returns the validated
+    # artifact. Inputs (keyword): schema (Pydantic model class), stage name, inputs dict,
+    # system/prompt text, root dir, budget (spent tracking), model, runtime ("openai" or external
+    # engine), max_cost (USD for this stage), max_turns, deadline (epoch seconds), optional shell
+    # callable, extra_tools/extra_handlers, validate (async operator check), initial_draft_key (an
+    # inputs key holding a draft to seed revisions). Behavior: validates any initial draft against
+    # the schema and adds guidance to the prompt; builds the tool list and rejects duplicate names
+    # or handlers overriding built-ins; computes an identity digest of inputs, tools, protocol and
+    # limits. If artifact.json exists, returns it after checking its digest (protocol 1 artifacts
+    # use the legacy digest), else raises ValueError. If operation.json exists, or retained draft
+    # files exist with an initial draft, raises RuntimeError (needs reconciliation). Raises
+    # TimeoutError if the deadline passed. Writes operation.json ("running") and seed draft files,
+    # then runs the agent under an asyncio timeout until the deadline, with one recovery retry after
+    # a ProviderOutputError (re-prompting with remaining turns/cost and the retained draft). Raises
+    # BudgetExceeded if recovery has no allowance and ValueError if no artifact was committed. On
+    # any exception, records status/error; returns an accepted artifact anyway for
+    # BudgetExceeded/ValueError. Always records finish time and spend in operation.json. Side
+    # effects: files under root (artifact.json, operation.json, draft.json, initial-draft.json,
+    # trace files), LLM calls and budget spend.
     """Commit typed output before graph advancement; never reroll unchanged completed stages.
 
     A crashed worker is deliberately not replayed blindly. If it submitted its artifact,
@@ -233,6 +273,11 @@ async def artifact_stage[Artifact: BaseModel](
         save_json(root / "draft.json", retained_seed)
 
     async def validate_and_commit(payload: dict, origin: str) -> str:
+        # [FUNCTION DOC] HELPER: Bounds the payload, records it as the next numbered unvalidated
+        # draft in draft.json, validates it against the schema and the optional validate callback,
+        # and on success writes artifact.json and sets accepted. Output: a message string for the
+        # model describing rejection (with error text truncated to 6000 chars) or commit. Mutates
+        # enclosing accepted/draft/number.
         nonlocal accepted, draft, draft_number
         try:
             payload = _bounded_object(payload, max_bytes=MAX_ARTIFACT_BYTES)
@@ -267,12 +312,19 @@ async def artifact_stage[Artifact: BaseModel](
         return "Artifact committed. Do not call more tools; finish with a brief summary."
 
     async def submit_artifact(**payload) -> str:
+        # [FUNCTION DOC] HELPER: Tool handler for submit_artifact: under the lock, returns an
+        # "already committed" message if accepted, else validates and commits the full payload
+        # (kwargs).
         async with lock:
             if accepted is not None:
                 return "Artifact already committed. Finish with a brief summary."
             return await validate_and_commit(payload, "submit_artifact")
 
     async def revise_artifact(patch=None, **unexpected) -> str:
+        # [FUNCTION DOC] HELPER: Tool handler for revise_artifact: under the lock, rejects if
+        # already committed, if there is no draft yet, or if extra arguments or an invalid patch
+        # (bounded to MAX_PATCH_BYTES) are given; otherwise merges patch into the current draft and
+        # validates/commits it. Output: message string.
         async with lock:
             if accepted is not None:
                 return "Artifact already committed. Finish with a brief summary."
@@ -287,6 +339,10 @@ async def artifact_stage[Artifact: BaseModel](
             return await validate_and_commit(_merge_patch(draft, patch), "revise_artifact")
 
     async def remote_shell(command: str, timeout_sec: int = 120) -> str:
+        # [FUNCTION DOC] HELPER: Tool handler wrapping the provided shell callable: returns a "shell
+        # closed" message once an artifact is committed, raises TimeoutError if the deadline passed,
+        # and otherwise runs command with timeout min(timeout_sec, seconds remaining). Output: shell
+        # output string.
         if accepted is not None:
             return "Stage output committed; shell closed."
         remaining = int(deadline - time.time())

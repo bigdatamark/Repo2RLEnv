@@ -1,3 +1,11 @@
+# [MODULE DOC] Static, task-aware checks behind 'repo2rlenv validate --deep' / '--oracle'.
+# validate_task() inspects one Harbor task directory plus its parsed task.toml and returns a list of
+# Finding records (severity error/warning, task-relative path, message):
+# instruction/environment/tests layout, pipeline-specific verifier assets (graded F2P/P2P verifiers,
+# LLM-authored test files, pr_diff verifier+oracle), [metadata.repo2env.reproducibility]
+# consistency, and (with oracle) solution files. Module constants enumerate known pipelines, repro
+# modes, image visibilities, inline recipe sources, reward kinds (with a legacy alias map) and which
+# pipelines ship which verifier assets. No Docker, network or LLM; only filesystem reads.
 """Task-aware static checks behind `repo2rlenv validate --deep` / `--oracle`.
 
 The default `validate` pass only proves each task.toml parses and names its
@@ -70,23 +78,38 @@ _DIFF_FILE_HEADER_RE = re.compile(r"^(diff --git |\+\+\+ )", re.MULTILINE)
 
 @dataclass(frozen=True, slots=True)
 class Finding:
+    # [CLASS DOC] Immutable (frozen, slotted) dataclass for one validation result: severity ('error'
+    # or 'warning'), path (task-relative POSIX path the finding concerns) and human-readable
+    # message.
     severity: Severity
     path: str  # task-relative POSIX path the finding is about
     message: str
 
 
 class _Report:
+    # [CLASS DOC] HELPER: Accumulator of Finding objects with error()/warn() convenience appenders.
     def __init__(self) -> None:
+        # [FUNCTION DOC] HELPER: Initialises an empty findings list.
         self.findings: list[Finding] = []
 
     def error(self, path: str, message: str) -> None:
+        # [FUNCTION DOC] HELPER: Appends an 'error' Finding for path with message. Returns None.
         self.findings.append(Finding("error", path, message))
 
     def warn(self, path: str, message: str) -> None:
+        # [FUNCTION DOC] HELPER: Appends a 'warning' Finding for path with message. Returns None.
         self.findings.append(Finding("warning", path, message))
 
 
 def validate_task(task_dir: Path, data: dict[str, Any], *, oracle: bool = False) -> list[Finding]:
+    # [FUNCTION DOC] Statically checks one task directory. Inputs: task_dir (Path), data (already-
+    # parsed task.toml dict), keyword oracle (default False; also require solution assets). Reads
+    # [environment]: non-table -> error and treated as empty; os must be 'linux' or 'windows' (else
+    # error, falls back to linux); picks script extension .bat for windows else .sh. Reads
+    # [metadata.repo2env] (non-table -> error, ignored). If the task has [[steps]], warns that per-
+    # step assets are unchecked; otherwise runs the layout checks. For Repo2RLEnv tasks runs
+    # reproducibility checks and, when oracle and not multi-step, oracle checks. Returns the list of
+    # Findings. Side effects: filesystem reads only.
     """Statically check one task directory against its parsed task.toml.
 
     `data` is the already-parsed task.toml. With `oracle=True`, Repo2RLEnv
@@ -134,6 +157,15 @@ def _check_layout(
     script_ext: str,
     report: _Report,
 ) -> None:
+    # [FUNCTION DOC] HELPER: Layout checks for single-step tasks. Requires non-empty instruction.md.
+    # An env definition exists if [environment].docker_image is set or environment/Dockerfile or
+    # environment/docker-compose.yaml exists. For non-Repo2RLEnv tasks (r2e None) it only errors on
+    # an environment/ dir without a definition and requires a non-empty tests/test<ext> when tests/
+    # exists. For Repo2RLEnv tasks: resolves reward kinds, warns on unknown pipeline; if runnable
+    # (test_execution reward, env definition, environment/ dir or tests/ dir) requires an env
+    # definition and the test script; else if diff_similarity requires solution/patch.diff. Then,
+    # using the pipeline's metadata subtable, dispatches graded-verifier, test-file and diff-
+    # verifier checks. Returns None; appends to report.
     _check_nonempty_file(task_dir, "instruction.md", report)
 
     env_dir = task_dir / "environment"
@@ -184,6 +216,9 @@ def _check_layout(
 
 
 def _reward_kinds(r2e: dict[str, Any], report: _Report) -> list[str]:
+    # [FUNCTION DOC] HELPER: Reads reward_kinds from the repo2env table. Missing -> warning and [];
+    # not a list of strings -> error and []. Maps legacy names via _LEGACY_REWARD_KINDS, warns for
+    # each unknown kind, and returns the normalised list.
     kinds = r2e.get("reward_kinds")
     if kinds is None:
         report.warn("task.toml", "[metadata.repo2env] has no reward_kinds")
@@ -199,6 +234,11 @@ def _reward_kinds(r2e: dict[str, Any], report: _Report) -> list[str]:
 
 
 def _check_graded_verifier(task_dir: Path, meta_f2p: Any, report: _Report) -> None:
+    # [FUNCTION DOC] HELPER: For graded runtime pipelines: requires non-empty tests/verifier.py that
+    # parses as Python (syntax error -> error), tests/f2p.json as a JSON list of strings that is
+    # non-empty (empty -> error) and warns if its set differs from the task.toml fail_to_pass list
+    # (when that is a string list); also validates tests/p2p.json loads as a string list. Returns
+    # None.
     verifier = _check_nonempty_file(task_dir, "tests/verifier.py", report)
     if verifier is not None:
         try:
@@ -216,6 +256,9 @@ def _check_graded_verifier(task_dir: Path, meta_f2p: Any, report: _Report) -> No
 
 
 def _check_diff_verifier(task_dir: Path, report: _Report) -> None:
+    # [FUNCTION DOC] HELPER: For a runnable pr_diff task: requires non-empty tests/verifier.py that
+    # parses as Python, non-empty tests/oracle.patch containing a 'diff --git' or '+++' header line
+    # (else error), and non-empty tests/instruction.md. Returns None; appends findings.
     """A runnable pr_diff task must ship its verifier + oracle under tests/.
 
     The oracle is deliberately NOT in the environment image (an agent could
@@ -235,6 +278,8 @@ def _check_diff_verifier(task_dir: Path, report: _Report) -> None:
 
 
 def _load_test_id_list(task_dir: Path, rel: str, report: _Report) -> list[str] | None:
+    # [FUNCTION DOC] HELPER: Loads task_dir/rel as JSON. Errors (and returns None) if missing, not
+    # UTF-8/valid JSON, or not a list of strings; otherwise returns the list.
     path = task_dir / rel
     if not path.is_file():
         report.error(rel, "missing")
@@ -251,6 +296,9 @@ def _load_test_id_list(task_dir: Path, rel: str, report: _Report) -> list[str] |
 
 
 def _check_test_file(task_dir: Path, test_filename: Any, report: _Report) -> None:
+    # [FUNCTION DOC] HELPER: Validates test_filename is a bare filename (string with no '/' or '\',
+    # not '.' or '..'); otherwise reports an error on task.toml. If valid, requires tests/<name> to
+    # be non-empty. Returns None.
     bare = isinstance(test_filename, str) and re.fullmatch(r"[^/\\]+", test_filename)
     if not bare or test_filename in (".", ".."):
         report.error("task.toml", f"test_filename must be a bare filename, got {test_filename!r}")
@@ -259,6 +307,14 @@ def _check_test_file(task_dir: Path, test_filename: Any, report: _Report) -> Non
 
 
 def _check_repro(task_dir: Path, r2e: dict[str, Any], report: _Report) -> None:
+    # [FUNCTION DOC] HELPER: Validates [metadata.repo2env.reproducibility]. Absent: warns only when
+    # environment/Dockerfile exists and spec_version >= 0.2.0. Non-table -> error. mode must be in
+    # REPRO_MODES; image_ref/image_tag/pushed_at/pushed_by/fallback_reason must be strings when
+    # present; image_visibility must be public/private/unknown. mode 'registry': image_ref required
+    # non-blank, and warns if the Dockerfile's first FROM image differs from it. mode
+    # 'inline_dockerfile': Dockerfile required; inline_recipe_source must be
+    # user_dockerfile/agent_replay; inline_recipe_sha256 must match 'sha256:<64 lowercase hex>';
+    # inline_recipe_lines must be a non-negative int (bool rejected). Returns None.
     dockerfile = task_dir / "environment" / "Dockerfile"
     repro = r2e.get("reproducibility")
     if repro is None:
@@ -323,6 +379,10 @@ def _check_repro(task_dir: Path, r2e: dict[str, Any], report: _Report) -> None:
 
 
 def _check_oracle(task_dir: Path, r2e: dict[str, Any], script_ext: str, report: _Report) -> None:
+    # [FUNCTION DOC] HELPER: Oracle (--oracle) checks. solution/patch.diff is required for native
+    # tasks (recipe missing or 'native') and checked when present for named recipes; unless pr_diff
+    # diff_format is 'search_replace' it must contain a unified-diff file header. Always requires a
+    # non-empty solution/solve<ext>. Returns None.
     # Named recipes can restore files or run commands directly in solve.sh.
     # Preserve the stricter patch contract for existing native tasks, and
     # validate any patch a recipe actually includes.
@@ -340,6 +400,8 @@ def _check_oracle(task_dir: Path, r2e: dict[str, Any], script_ext: str, report: 
 
 
 def _check_nonempty_file(task_dir: Path, rel: str, report: _Report) -> str | None:
+    # [FUNCTION DOC] HELPER: Reads task_dir/rel as UTF-8. Reports 'missing', 'not valid UTF-8' or
+    # 'empty' (whitespace-only) errors and returns None in those cases; otherwise returns the text.
     """Report a missing/unreadable/blank file; return its text when usable."""
     path = task_dir / rel
     if not path.is_file():
@@ -357,15 +419,21 @@ def _check_nonempty_file(task_dir: Path, rel: str, report: _Report) -> str | Non
 
 
 def _one_of(value: Any, allowed: frozenset[str]) -> bool:
+    # [FUNCTION DOC] HELPER: True when value is a str contained in allowed (isinstance check first
+    # because TOML arrays/tables are unhashable).
     # isinstance first: TOML arrays/tables are unhashable and would raise on `in`.
     return isinstance(value, str) and value in allowed
 
 
 def _is_str_list(value: Any) -> bool:
+    # [FUNCTION DOC] HELPER: True when value is a list whose elements are all strings (empty list
+    # counts).
     return isinstance(value, list) and all(isinstance(v, str) for v in value)
 
 
 def _no_env_definition_msg() -> str:
+    # [FUNCTION DOC] HELPER: Returns the fixed error message explaining how to add an environment
+    # definition.
     return (
         "no environment definition: add environment/Dockerfile or "
         "environment/docker-compose.yaml, or set [environment].docker_image"
@@ -373,6 +441,8 @@ def _no_env_definition_msg() -> str:
 
 
 def _version_at_least(value: Any, minimum: tuple[int, ...]) -> bool:
+    # [FUNCTION DOC] HELPER: Parses a dotted version string into an int tuple and compares it to
+    # minimum. Returns False for non-strings or non-integer parts (e.g. '0.2.0rc1').
     if not isinstance(value, str):
         return False
     try:

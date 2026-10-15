@@ -1,3 +1,6 @@
+# [MODULE DOC] Single source of truth for UI colors (STYLE), glyphs (GLYPH) and the agent action ->
+# style map (ACTION_STYLE_MAP keyed by action name: BASH, READ_FILE, LIST_DIR, SAVE_SETUP, GIVE_UP,
+# INVALID).
 """Single source of truth for the Repo2RLEnv UI look-and-feel.
 
 Change a color or glyph here; every CLI command picks it up.
@@ -9,6 +12,8 @@ from typing import Final
 
 
 class STYLE:
+    # [CLASS DOC] Namespace of Rich style strings: stamped-line colors, header/highlight/muted,
+    # panel border colors and per-agent-action colors. Constants only.
     SUCCESS: Final[str] = "bold green"
     WARN: Final[str] = "bold yellow"
     ERROR: Final[str] = "bold red"
@@ -33,6 +38,8 @@ class STYLE:
 
 
 class GLYPH:
+    # [CLASS DOC] Namespace of glyph strings: status marks (success, warn, error, info, pending,
+    # arrow, bullet) and emoji used for bootstrap phases. Constants only.
     SUCCESS: Final[str] = "✓"
     WARN: Final[str] = "⚠"
     ERROR: Final[str] = "✗"

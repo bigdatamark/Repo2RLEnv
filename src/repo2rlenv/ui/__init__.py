@@ -1,3 +1,8 @@
+# [PACKAGE DOC] Package repo2rlenv.ui: the single Rich-based UI and logging layer for every CLI
+# command. Re-exports the console singleton and R2EConsole, logging/UTF-8 setup (install_logging,
+# ensure_utf8_output), Live helpers (live_view, quiet_libraries), panel builders, the STYLE/GLYPH
+# theme and the BootstrapView/GenerationView live views. Library and CLI code must use this instead
+# of print().
 """Unified Rich-based UI + logging for every Repo2RLEnv CLI command.
 
 One module, one Console, one set of glyphs and colors. Use the primitives
